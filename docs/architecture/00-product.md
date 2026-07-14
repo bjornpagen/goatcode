@@ -220,10 +220,36 @@ engine would police them by discipline, which is how retire protocols rot.
 agent fibers as hand-rolled state machines (async without effects), and the
 contract-deriving ecosystem targeted here (`jsonschema` + `yojson_conv` from
 one declaration) has no equally paired equivalent.
-**Reverses if:** OxCaml's mode system proves too unstable to pin (a toolchain
-fact, recorded per switch), or the ppx census (`README.md` OPEN) fails badly
-enough that contracts need hand-written codecs — at which point the one-supply
-law, not the language, decides where to go.
+**Alternative:** Rust on bumbledb, with a Lean spec tree — the recorded
+*successor*, not a loser: ownership gives the squash-safety property natively
+(affine consumption is the mode discipline without the `+ox` toolchain),
+serde + schemars is the one-supply law as a mature ecosystem, and the entire
+tuple/ledger/witness/commit substrate — append-only provenance, generation-
+witnessed optimistic commits, final-state judgment of declared statements,
+the admission gate — is bumbledb's existing, falsifier-tested feature list
+rather than a reimplementation. Deferred, not rejected, because it couples
+GOAT CODE to a foundation that is itself pre-stability, and because the
+right representation is only visible after the running version exposes the
+pattern (the Brooks limit, applied to ourselves).
+**Ruling: OxCaml is the experimental substrate; the port is planned, not
+hypothetical.** Interim disciplines that keep the port cheap: the ledger
+format and wire schemas stay language-neutral (JSON on disk, never
+Marshal); investment goes to the layers that survive the port conceptually
+(theory grammar, scheduler policy, drift routing, prompt assembly), and the
+store layer (`ledger`/`witness`/`retire`) stays as thin as v0 allows —
+it is the layer the port deletes.
+**Reverses (the port triggers) if:** (a) the Greenspun trigger — the OCaml
+store layer starts growing tuple queries, indexes, or incremental judgment,
+i.e. an ad hoc, informally-specified implementation of half of bumbledb; or
+(b) the design reaches quiescence (three months without a doc-rule-4
+amendment to the protocol docs) AND bumbledb reaches its own stability
+milestone — whichever comes first. Also reverses early if OxCaml's mode
+system proves too unstable to pin (a toolchain fact, recorded per switch).
+The ppx census already returned its verdict (`ppx_deriving_jsonschema`
+does not build against the ox Parsetree; codecs via `ppx_yojson_conv`
+work), and v0 carries the wound: hand-written wire schemas are a second
+supply, tolerated only with a lint that diffs them against the type
+declarations, and only until the port or a deriver port closes it.
 
 ## Success criteria
 

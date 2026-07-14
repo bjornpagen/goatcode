@@ -154,6 +154,9 @@ re-litigated by accident:
 - **Theories must be weakly acyclic at accept time** — chase termination is a
   static admission judgment, not a runtime hope; the token ceiling is a
   backstop, not the mechanism (`10-theory.md`).
-- **OxCaml is the implementation substrate** — modes prove squash safety,
-  effects carry the fibers; the decision block with alternatives is in
-  `00-product.md`.
+- **OxCaml is the experimental substrate; Rust-on-bumbledb (with a Lean spec
+  tree) is the recorded successor.** The port triggers on the Greenspun
+  condition (the OCaml store layer growing bumbledb features) or on design
+  quiescence plus bumbledb stability — whichever comes first. Interim law:
+  ledger and wire formats stay language-neutral; the store layer stays thin
+  (`00-product.md` § substrate decision).
