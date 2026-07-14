@@ -21,7 +21,8 @@ type config = {
           bottlenecks (docs/architecture/40-scheduling.md § ports). *)
   executors : Chase.executor_binding list;
       (** Runtime bindings for the theory's executors: rigged in tests,
-          [Agent.claude_cli] live. *)
+          the direct provider lanes ([Agent.agent] over [Agent.Provider])
+          live. *)
   backstops : Speculate.Backstops.t;
       (** Token ceiling and confidence floor
           (docs/architecture/40-scheduling.md § backstops). *)

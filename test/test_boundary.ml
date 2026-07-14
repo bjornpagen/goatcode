@@ -15,7 +15,7 @@
      suite can generate (30-channels.md § event taxonomy, 60-agents.md
      § tool grants).
 
-   Rigged executors only; no live model call, no [Agent.claude_cli], no
+   Rigged executors only; no live model call, no live provider lane, no
    network, no sleeps. *)
 
 open Goatcode
@@ -122,11 +122,13 @@ let counting calls (inner : Agent.Executor.t) =
   let run :
       type s.
       s Agent.Invocation.t ->
+      ledger:Ledger.t ->
+      node:Ledger.node Id.t ->
       on_yield:(unit -> Speculate.Drift.note list) ->
       (Agent.Executor.reply, Ledger.Fault.t) result =
-   fun inv ~on_yield ->
+   fun inv ~ledger ~node ~on_yield ->
     incr calls;
-    inner.Agent.Executor.run inv ~on_yield
+    inner.Agent.Executor.run inv ~ledger ~node ~on_yield
   in
   { Agent.Executor.run }
 
@@ -822,4 +824,92 @@ let%expect_test "F12: the non-idempotent case exists only at the committed \
     - deploy — effect, non-idempotent (grantable on witnessed operands only)
     - cache_write — effect, idempotent by declaration (content-keyed cache write)
     Any action outside this grant returns a typed refusal — a tool error you can read — never a silent no-op.
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* The harness-owned tool loop (agent.mli § agent): every store and load
+   an agent performs is a ledger event with its footprint, and an
+   out-of-grant action is a typed in-band refusal that leaves no event.
+   Offline via [Rigged.Call_tool]; Phase C owns the fuller tool-event
+   falsifiers. *)
+
+let%expect_test "tool loop: stores and loads are evented with footprints; \
+                 out-of-grant actions refuse in-band" =
+  let e = env () in
+  let worktree =
+    let d = Filename.temp_file "goat-wt-" "" in
+    Sys.remove d;
+    Unix.mkdir d 0o755;
+    d
+  in
+  let grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [ "src/**/*.ml" ];
+      worktree_root = worktree;
+      snoop_mounts = [];
+      shell_gates = [];
+      effects = [];
+    }
+  in
+  let script =
+    [
+      Agent.Rigged.Call_tool
+        {
+          name = "write_file";
+          input =
+            `Assoc
+              [
+                ("path", `String "src/gen.ml");
+                ("content", `String "let x = 1\n");
+              ];
+        };
+      (* The node snoops its own store buffer: the draft it just wrote is
+         readable back. *)
+      Agent.Rigged.Call_tool
+        {
+          name = "read_file";
+          input = `Assoc [ ("path", `String "src/gen.ml") ];
+        };
+      (* A '..' hop is outside every grant by construction: refused
+         in-band, no event, and the invocation continues. *)
+      Agent.Rigged.Call_tool
+        {
+          name = "read_file";
+          input = `Assoc [ ("path", `String "../escape.ml") ];
+        };
+      Agent.Rigged.Reply "{\"verdict\": \"done\"}";
+    ]
+  in
+  show_result
+    (Agent.invoke
+       ~executor:(Agent.Rigged.executor ~script)
+       ?fallback:None ~codec:verdict_codec ~registry:e.registry
+       ~invocation:(invocation grant)
+       ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
+       ~on_yield:(fun () -> []));
+  Printf.printf "draft landed in worktree: %b\n"
+    (Sys.file_exists (Filename.concat worktree "src/gen.ml"));
+  List.iter
+    (fun (ev : Ledger.Event.t) ->
+      match ev.kind with
+      | Ledger.Event.Store { tool; address; delta } ->
+          Printf.printf "Store %s at %s (delta %s)\n" tool
+            (Ledger.Address.to_string address)
+            (Ledger.Delta_ref.to_string delta)
+      | Ledger.Event.Load { tool; observed } ->
+          Printf.printf "Load %s observing [%s]\n" tool
+            (String.concat "; "
+               (List.map
+                  (fun (a, _, _) -> Ledger.Address.to_string a)
+                  observed))
+      | Ledger.Event.Effect { tool; resource; idempotent } ->
+          Printf.printf "Effect %s on %s (idempotent %b)\n" tool resource
+            idempotent
+      | _ -> ())
+    (Ledger.Replay.events e.ledger);
+  [%expect {|
+    Ok "done"
+    draft landed in worktree: true
+    Store write_file at file:src/gen.ml (delta src/gen.ml)
+    Load read_file observing [file:src/gen.ml]
     |}]

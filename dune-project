@@ -11,6 +11,9 @@
   ppxlib
   yojson
   ppx_yojson_conv
+  ; ocurl: in-process libcurl bindings for the direct provider lanes
+  ; (lib/http.mli owns the no-subprocess rationale).
+  ocurl
   ; ppx_deriving_jsonschema dropped for v0: 0.0.4 does not compile against
   ; the OxCaml-patched ppxlib (labeled-tuple core_type change). The Contract
   ; module hand-derives schemas from yojson instead.

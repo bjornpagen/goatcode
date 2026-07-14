@@ -13,8 +13,8 @@
    committed tuples; committed id space is dense and replay-stable
    (docs/architecture/50-commit.md § provisional identity).
 
-   Rigged executors only ([Agent.Rigged]); no test constructs
-   [Agent.claude_cli]; every run is bounded by an explicit step budget so a
+   Rigged executors only ([Agent.Rigged]); no test constructs a live
+   provider lane; every run is bounded by an explicit step budget so a
    non-terminating chase fails the test instead of hanging it. *)
 
 open Goatcode

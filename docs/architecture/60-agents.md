@@ -82,6 +82,20 @@ read), never a silent no-op — agents route around obstacles they can see;
 the refusal is the runtime *edge* of a boundary whose interior is
 compile-time.
 
+## The executor transport
+
+**Both lanes are direct API calls from the harness process — never a CLI
+shell-out.** (Ruling.) This is an architectural necessity, not taste: the
+harness owns the tool loop, so every load, store, and effect an agent
+performs is executed by the harness and appended to the ledger with its
+footprint. A CLI session runs its own tools invisibly, which makes the
+mechanized-witness law (`30-channels.md` § mechanized witnesses)
+unimplementable through one — memory disambiguation, conflict detection,
+and the disjoint-writes law all read the witness index those events build.
+Recorded when the executor layer moved from a `claude`-CLI shell-out to
+direct Messages/Responses calls; the rigged lane sits behind the same tool
+loop, so falsifiers exercise the one boundary the live lanes use.
+
 ## Drift notes at yield
 
 Between tool calls, a speculative node may receive **drift notes** —

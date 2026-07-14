@@ -7,20 +7,50 @@ architecture docs disagree, the architecture docs win.
 
 ## Where we are
 
-Git (`git log --oneline`):
-- `4a8e638` Docs: two-provider routing (Fable 5 / GPT-5.6 Terra)
-- `5bc79c0` Docs: substrate ruling (OxCaml experimental, Rust-on-bumbledb successor)
-- `7e2c39f` Falsifiers: F1-F15 green   ← last commit that touched `lib/`
-- `650088a` Implement: v0 core modules
-- `df5106b` Gate: stubs compile on 5.2.0+ox
-- `3092a97` Contracts: v0 module interfaces
-- `cdb5b64` Scaffold
+**PHASE A LANDED** (commit "Executors: direct provider APIs +
+harness-owned tool loop", 2026-07-14). What shipped:
 
-Build + test are green as of `7e2c39f`, BUT an adversarial review (run after
-that commit, not committed) found the assembled engine is a skeleton whose
-seams are unwired — see the findings roster below. **No `lib/` code has
-changed since `7e2c39f`.** The two doc commits after it only touched
-`docs/architecture/`.
+- `lib/http` on ocurl (`Http.post_json`, transport errors typed, non-2xx
+  is data); `curl` in `lib/dune`, `ocurl` in `dune-project`.
+- `agent.ml`/`agent.mli` rebuilt: `Agent.Provider` (one stateless model
+  turn; Anthropic Messages / OpenAI Responses / Rigged behind one
+  signature) + the shared agent layer (`Agent.agent ~provider`) owning the
+  tool loop, grant enforcement, Load/Store/Effect eventing, refusal
+  recognition. `Executor.run` now takes `~ledger ~node`; `Executor.reply`
+  gained `refusal`.
+- Harness tools: `read_file`, `write_file`, `str_replace_edit`,
+  `glob_list`, `grep`, `run_command` (granted only via an effect tool of
+  that name; behind the mkdir-atomic holder-named machine lock at
+  `$TMPDIR/goatcode-effect.lock`). Reads resolve worktree → read_globs
+  (against process CWD) → snoop mounts; writes worktree-only; out-of-grant
+  → typed in-band refusal.
+- `claude_cli` DELETED; grep-gate clean. `bin/main.ml` dispatches
+  `Pin.provider` at bind time (`provider_runtime`; unknown provider = a
+  config error before any node runs). Planner pin default model is now
+  `claude-fable-5`.
+- chase's divergent repair-lane copy KILLED: `invoke_lane` now calls
+  `Agent.invoke_parsed` (one repair-loop implementation; chase still
+  supplies its own `parse_heads` — that migration is B1).
+- `Ledger.Delta_ref.v` is public (the B2 constructor ask — done).
+- `Rigged` steps are scripted provider turns; new `Call_tool` step drives
+  the tool loop offline. New falsifier in `test_boundary.ml` ("tool loop:
+  stores and loads are evented…"). Full `dune runtest --force` green.
+- `60-agents.md` gained "§ The executor transport" (the no-CLI ruling +
+  mechanized-witness rationale).
+- OpenAI Responses wire shapes VERIFIED against the openai-openapi spec
+  (flat `function` tools; `function_call`/`function_call_output` with
+  `call_id`, `arguments` as JSON string; `text.format` json_schema;
+  `output_text`/`refusal` content items; `input_tokens`/`output_tokens`).
+  The earlier "wire uncertainty" note is resolved on paper; live smoke
+  (Phase C) still pending.
+
+Known Phase-A residue, deliberate:
+- Tool Load events carry `Generation.zero` in their witness triples (the
+  content hash is real); threading committed-state generation lookups
+  through the executor is the B2/B7 rewiring.
+- `pure_fn`/`shell_gate` emit no Load/Store/Effect events yet (B2/B15).
+- Anthropic `output_config.format` + tool use together is untested live;
+  `betas: server-side-fallback` opt-in still OPEN.
 
 Working tree: clean except `.claude/` (untracked, ignore).
 
@@ -97,7 +127,7 @@ Working tree: clean except `.claude/` (untracked, ignore).
 
 ## The plan — three phases
 
-### Phase A — executor rebuild (executor layer only)
+### Phase A — executor rebuild (executor layer only) — DONE, see "Where we are"
 
 Owns: `lib/agent.mli`/`agent.ml`, new `lib/http`, `bin/main.ml` dispatch,
 rigged-executor adaptation, `60-agents.md` doc-rule-4 amendment.

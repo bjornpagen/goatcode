@@ -103,6 +103,12 @@ end
 module Delta_ref : sig
   type t
 
+  val v : string -> t
+  (** Mint a locator. v0 carries the locator as an opaque string (a
+      worktree-relative path or blob key); the exact blob scheme is OPEN
+      (docs/architecture/30-channels.md § OPEN items). Minters: the agent
+      layer's store tools and the commit layer's net-delta extraction. *)
+
   val to_string : t -> string
   val pp : Format.formatter -> t -> unit
 end

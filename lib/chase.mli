@@ -80,8 +80,9 @@ module Settlement = Ledger.Settlement
     rejection (docs/architecture/40-scheduling.md § settlement). *)
 
 (** Binding a theory's executor declarations to runtimes: rigged in tests,
-    {!Agent.claude_cli} live. The binding is run configuration, never
-    theory content — the theory names executors; the run supplies them. *)
+    the direct provider lanes ({!Agent.agent} over {!Agent.Provider}) live.
+    The binding is run configuration, never theory content — the theory
+    names executors; the run supplies them. *)
 type executor_binding = {
   executor : Theory.Executor.id;
   runtime : Agent.Executor.t;

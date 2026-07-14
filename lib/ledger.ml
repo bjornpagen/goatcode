@@ -115,11 +115,10 @@ end
 module Delta_ref = struct
   (* An opaque locator for an out-of-line payload.  The exact blob scheme is
      OPEN (30-channels.md § OPEN items); v0 carries the locator as a string
-     (a worktree-relative path or blob key).  No public constructor exists
-     in the .mli set yet — the commit layer mints these when the blob scheme
-     closes. *)
+     (a worktree-relative path or blob key). *)
   type t = string
 
+  let v s = s
   let to_string r = r
   let pp ppf r = Format.pp_print_string ppf r
 end

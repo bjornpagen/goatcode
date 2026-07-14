@@ -447,47 +447,68 @@ let rec map_result f = function
       let* ys = map_result f rest in
       Ok (y :: ys)
 
-(* Bind every executor the theory names to the CLI's runtimes: agent
-   templates to the live claude lane, shell gates to the gate runner.
-   Pure functions stay unbound — the CLI carries no host-function
+(* The runtime behind an agent template's pin: dispatched on the pin's
+   [provider] field at BIND time — an unknown provider is a config error
+   before any node runs, never a mid-run surprise. Both lanes are direct
+   API calls behind the harness-owned tool loop (agent.mli owns the
+   no-shell-out ruling). *)
+let provider_runtime (pin : Theory.Pin.t) =
+  match pin.provider with
+  | "anthropic" -> Ok (Agent.agent ~provider:(Agent.Provider.anthropic ()))
+  | "openai" -> Ok (Agent.agent ~provider:(Agent.Provider.openai ()))
+  | other ->
+      Error
+        (Printf.sprintf
+           "pin names unknown provider %S (expected \"anthropic\" or \
+            \"openai\")"
+           other)
+
+(* Bind every executor the theory names to runtimes: agent templates to
+   the direct provider lane their pin routes to, shell gates to the gate
+   runner. Pure functions stay unbound — the CLI carries no host-function
    registry, so a theory that names one surfaces as the typed
    [Run.Unbound_executor] misuse, never as a fake runtime. *)
 let bindings_of ~theory ~port ~repair_attempts =
-  let bindings =
+  let* bindings =
     Theory.statements theory
     |> List.filter_map (fun (_, (s : Theory.Spawn.t)) ->
            match s.by with
            | Theory.Executor.Pure_fn _ -> None
-           | Theory.Executor.Agent_template _ ->
+           | Theory.Executor.Agent_template { pin; _ } ->
                Some
-                 {
-                   Chase.executor = Theory.Executor.id s.by;
-                   runtime = Agent.claude_cli ();
-                   fallback = None;
-                   repair_budget = Agent.Repair_budget.v repair_attempts;
-                   port;
-                 }
+                 (let* runtime = provider_runtime pin in
+                  Ok
+                    {
+                      Chase.executor = Theory.Executor.id s.by;
+                      runtime;
+                      fallback = None;
+                      repair_budget = Agent.Repair_budget.v repair_attempts;
+                      port;
+                    })
            | Theory.Executor.Shell_gate _ ->
                Some
-                 {
-                   Chase.executor = Theory.Executor.id s.by;
-                   runtime = Agent.shell_gate;
-                   fallback = None;
-                   repair_budget = Agent.Repair_budget.v 1;
-                   port;
-                 })
+                 (Ok
+                    {
+                      Chase.executor = Theory.Executor.id s.by;
+                      runtime = Agent.shell_gate;
+                      fallback = None;
+                      repair_budget = Agent.Repair_budget.v 1;
+                      port;
+                    }))
+    |> map_result Fun.id
   in
-  List.fold_left
-    (fun acc (b : Chase.executor_binding) ->
-      if
-        List.exists
-          (fun (b' : Chase.executor_binding) ->
-            Theory.Executor.id_equal b'.executor b.executor)
-          acc
-      then acc
-      else b :: acc)
-    [] bindings
-  |> List.rev
+  Ok
+    (List.fold_left
+       (fun acc (b : Chase.executor_binding) ->
+         if
+           List.exists
+             (fun (b' : Chase.executor_binding) ->
+               Theory.Executor.id_equal b'.executor b.executor)
+             acc
+         then acc
+         else b :: acc)
+       [] bindings
+    |> List.rev)
 
 let run_config_of ~(file : Config_file.t) ~theory =
   let require key =
@@ -529,6 +550,7 @@ let run_config_of ~(file : Config_file.t) ~theory =
   let repair_attempts =
     Option.value (Config_file.int_ file "repair_attempts") ~default:3
   in
+  let* executors = bindings_of ~theory ~port:default_port ~repair_attempts in
   Ok
     {
       Run.repo;
@@ -536,7 +558,7 @@ let run_config_of ~(file : Config_file.t) ~theory =
       worktree_root;
       ledger_path;
       ports;
-      executors = bindings_of ~theory ~port:default_port ~repair_attempts;
+      executors;
       backstops;
       switches = [];
       (* Unconstructible from config text: throwing one requires
@@ -572,10 +594,11 @@ let planner_pin_of (file : Config_file.t) =
       Option.value (Config_file.str file "planner_provider")
         ~default:"anthropic";
     model =
-      (* The real lane shells out to the claude CLI; absent an explicit
-         pin in run.toml, the CLI's configured default model runs. *)
+      (* Pins name the model explicitly — the lane is a direct API call,
+         so there is no ambient default to inherit. The planner pins the
+         strongest available model (60-agents.md § provider routing). *)
       Option.value (Config_file.str file "planner_model")
-        ~default:"cli-default";
+        ~default:"claude-fable-5";
     sampling = [];
     options = [];
   }

@@ -350,11 +350,12 @@ let parse_heads t (inst : instance) text :
         payloads
 
 (* {2 The invocation lane}
-   Freeform generation, boundary parse, then the repair loop: the same
-   executor re-invoked stateless-with-diagnostics, at most the configured
-   budget; a recognized refusal routes one retry to the fallback lane
-   without burning budget (docs/architecture/60-agents.md § the primary
-   lane, § the fallback lane). *)
+   Freeform generation, boundary parse, then the repair loop — the SHARED
+   lane ([Agent.invoke_parsed]): one repair-loop implementation for the
+   engine and the host API alike (docs/architecture/60-agents.md § the
+   primary lane, § the fallback lane). The head parse is still the
+   engine's own [parse_heads]; its migration onto [Contract.Codec] is the
+   recorded B1 rewiring. *)
 
 let invoke_lane :
     type s.
@@ -375,54 +376,33 @@ let invoke_lane :
   | Some schema ->
       let preamble = preamble_of inst.spawn.Theory.Spawn.by in
       let pin = pin_of inst.spawn.Theory.Spawn.by in
-      let budget = Agent.Repair_budget.attempts inst.binding.repair_budget in
-      let rec attempt n ~operands ~fallback_used =
-        let prompt =
-          Agent.Prompt.assemble ~preamble ~schema ~operands ~hypotheses:hyps
-            ~grant
-        in
-        let invocation = { Agent.Invocation.prompt; schema; grant; pin } in
-        let exec =
-          if fallback_used then
-            Option.value inst.binding.fallback ~default:inst.binding.runtime
-          else inst.binding.runtime
-        in
-        match exec.Agent.Executor.run invocation ~on_yield:(fun () -> []) with
-        | Error fault -> Error fault
-        | Ok reply ->
-            ignore
-              (Ledger.append t.ledger ~node:inst.node
-                 (Ledger.Event.Agent_turn
-                    { usage = reply.Agent.Executor.usage })
-                : Ledger.Event.t);
-            (match parse_heads t inst reply.Agent.Executor.text with
-            | Ok heads -> Ok heads
-            | Error complaint ->
-                let refusal = is_refusal reply.Agent.Executor.text in
-                ignore
-                  (Ledger.append t.ledger ~node:inst.node
-                     (Ledger.Event.Repair_attempt { attempt = n; refusal })
-                    : Ledger.Event.t);
-                if
-                  refusal && (not fallback_used)
-                  && Option.is_some inst.binding.fallback
-                then attempt n ~operands ~fallback_used:true
-                else if n < budget then
-                  attempt (n + 1) ~fallback_used
-                    ~operands:
-                      (operands
-                      ^ "\n\n[repair] previous reply failed the boundary \
-                         parse: " ^ complaint
-                      ^ "\n[repair] your previous reply, verbatim:\n"
-                      ^ reply.Agent.Executor.text)
-                else
-                  Error
-                    {
-                      Ledger.Fault.origin = Ledger.Fault.Repair_exhausted;
-                      message = complaint;
-                    })
+      let prompt =
+        Agent.Prompt.assemble ~preamble ~schema
+          ~operands:(operands_text inst.consumed) ~hypotheses:hyps ~grant
       in
-      attempt 1 ~operands:(operands_text inst.consumed) ~fallback_used:false
+      let invocation = { Agent.Invocation.prompt; schema; grant; pin } in
+      let parse text =
+        match parse_heads t inst text with
+        | Ok heads -> Ok heads
+        | Error complaint ->
+            Error
+              {
+                Contract.Repair.raw_reply = text;
+                complaints =
+                  [
+                    {
+                      Contract.Repair.path = [];
+                      expected = "head tuples against the wire schema";
+                      got = complaint;
+                    };
+                  ];
+                refusal = is_refusal text;
+              }
+      in
+      Agent.invoke_parsed ~executor:inst.binding.runtime
+        ?fallback:inst.binding.fallback ~parse ~invocation
+        ~budget:inst.binding.repair_budget ~ledger:t.ledger ~node:inst.node
+        ~on_yield:(fun () -> [])
 
 (* The footprint grant, from the template's declarations. The status
    phantom is chosen at the call site: hypothesis-free dispatches carry the

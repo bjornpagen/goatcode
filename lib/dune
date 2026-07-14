@@ -8,4 +8,6 @@
  (public_name goatcode)
  ; unix: Ledger.Timestamp is stamped from the wall clock at append (the one
  ; clock any scheduler decision may consult); the stdlib has no wall clock.
- (libraries yojson unix))
+ ; curl (ocurl): in-process libcurl for the direct provider lanes — no
+ ; subprocess may sit between the harness and a model (http.mli).
+ (libraries yojson unix curl))
