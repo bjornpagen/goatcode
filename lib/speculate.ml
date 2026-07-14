@@ -1,4 +1,11 @@
-(* Stubs only: signatures are normative (see speculate.mli). *)
+(* Speculation: hypotheses, drift classification, the survival-counter
+   predictor, and the backstops.
+
+   Speculation is default-on; the per-shape off switch requires a churn
+   measurement obtainable only from a ledger, so a bare switch is
+   unconstructible (docs/architecture/40-scheduling.md § speculation is
+   default-on; falsifier F15). Drift routing is a policy table — data, in
+   one place — per doc rule 8. *)
 
 module Shape = struct
   type t = {
@@ -7,9 +14,20 @@ module Shape = struct
     pin : string;
   }
 
-  let equal _ _ = failwith "TODO: speculate"
-  let compare _ _ = failwith "TODO: speculate"
-  let to_string _ = failwith "TODO: speculate"
+  let compare a b =
+    let c = Theory.Statement.compare a.statement b.statement in
+    if c <> 0 then c
+    else
+      let c = Theory.Executor.id_compare a.executor b.executor in
+      if c <> 0 then c else String.compare a.pin b.pin
+
+  let equal a b = compare a b = 0
+
+  let to_string t =
+    Printf.sprintf "%s/%s@%s"
+      (Theory.Statement.to_string t.statement)
+      (Theory.Executor.id_to_string t.executor)
+      t.pin
 end
 
 module Hypothesis = struct
@@ -53,7 +71,12 @@ module Drift = struct
     | Breaking_broad_t
     | Producer_squashed_t
 
-  let tag _ = failwith "TODO: speculate"
+  let tag = function
+    | Schema_identical -> Schema_identical_t
+    | Additive _ -> Additive_t
+    | Breaking_narrow _ -> Breaking_narrow_t
+    | Breaking_broad _ -> Breaking_broad_t
+    | Producer_squashed -> Producer_squashed_t
 
   module Route = struct
     type t =
@@ -63,17 +86,76 @@ module Drift = struct
       | Flush_subtree
   end
 
-  let table =
+  (* The routing policy, one total match (doc rule 8). [table] below is its
+     rendering as inspectable data; deriving the table from the match keeps
+     one supply, so the twins cannot drift apart. *)
+  let route_of_tag = function
+    | Schema_identical_t -> Route.Discharge_silently
+    | Additive_t -> Route.Reconcile_note
+    | Breaking_narrow_t -> Route.Reconcile_delta
+    | Breaking_broad_t -> Route.Flush_subtree
+    | Producer_squashed_t -> Route.Flush_subtree
+
+  let all_tags =
     [
-      (Schema_identical_t, Route.Discharge_silently);
-      (Additive_t, Route.Reconcile_note);
-      (Breaking_narrow_t, Route.Reconcile_delta);
-      (Breaking_broad_t, Route.Flush_subtree);
-      (Producer_squashed_t, Route.Flush_subtree);
+      Schema_identical_t;
+      Additive_t;
+      Breaking_narrow_t;
+      Breaking_broad_t;
+      Producer_squashed_t;
     ]
 
-  let route _ = failwith "TODO: speculate"
-  let classify ~landing:_ ~consumed:_ = failwith "TODO: speculate"
+  let table = List.map (fun t -> (t, route_of_tag t)) all_tags
+  let route cls = route_of_tag (tag cls)
+
+  (* Wire renderings of the class tags, as recorded on
+     [Ledger.Event.Drift_note] events; [Churn.measure] reads them back. *)
+  let tag_wire = function
+    | Schema_identical_t -> "schema_identical"
+    | Additive_t -> "additive"
+    | Breaking_narrow_t -> "breaking_narrow"
+    | Breaking_broad_t -> "breaking_broad"
+    | Producer_squashed_t -> "producer_squashed"
+
+  (* A consumed path is touched when it and a diff path lie on one
+     root-to-leaf line: a change at a parent reshapes every read beneath
+     it, and a change at a child reshapes a read of the parent. *)
+  let touches consumed_path diff_path =
+    let rec prefix a b =
+      match (a, b) with
+      | [], _ -> true
+      | _, [] -> false
+      | x :: a', y :: b' -> String.equal x y && prefix a' b'
+    in
+    prefix consumed_path diff_path || prefix diff_path consumed_path
+
+  let classify ~landing ~consumed =
+    match landing with
+    | `Producer_squashed -> Producer_squashed
+    | `Refired diff ->
+        (* The producer's statement itself re-fired: broad by definition,
+           whatever the diff says (40-scheduling.md § drift routing). *)
+        Breaking_broad { diff; refired = true }
+    | `Landed diff -> (
+        if Contract.Diff.is_empty diff then Schema_identical
+        else if Contract.Diff.additive_only diff then Additive { diff }
+        else
+          let diff_paths = Contract.Diff.touched_paths diff in
+          let touched =
+            List.filter
+              (fun c -> List.exists (touches c) diff_paths)
+              consumed
+          in
+          match touched with
+          | [] ->
+              (* Breaking changes only to paths this consumer's observed
+                 witness never read: additive from this consumer's
+                 perspective (per-consumer refinement, falsifier F8). *)
+              Additive { diff }
+          | _ :: _ ->
+              if 2 * List.length touched > List.length consumed then
+                Breaking_broad { diff; refired = false }
+              else Breaking_narrow { diff; touched })
 
   type note = {
     address : Ledger.Address.t;
@@ -82,6 +164,21 @@ module Drift = struct
     disposition : [ `Continue | `Patch_then_continue | `Stop_cleanly ];
   }
 end
+
+(* The nodes a shape fired, from the ledger's firing events. Firing
+   provenance records the statement; the executor and pin are properties of
+   the statement's [by] clause in the admitted theory, so within one run the
+   statement identifies the shape. *)
+let shape_nodes ledger (shape : Shape.t) =
+  List.filter_map
+    (fun (e : Ledger.Event.t) ->
+      match e.kind with
+      | Ledger.Event.Fired { provenance; _ }
+        when Theory.Statement.equal provenance.Ledger.Provenance.statement
+               shape.Shape.statement ->
+          e.node
+      | _ -> None)
+    (Ledger.Replay.events ledger)
 
 module Counters = struct
   type t = {
@@ -93,37 +190,190 @@ module Counters = struct
     samples : int;
   }
 
-  let of_ledger _ _ = failwith "TODO: speculate"
+  let mean = function
+    | [] -> 0.
+    | xs -> List.fold_left ( +. ) 0. xs /. float_of_int (List.length xs)
+
+  let of_ledger ledger (shape : Shape.t) =
+    let samples =
+      Ledger.Predictor_history.samples ledger
+        ~statement:(Theory.Statement.to_string shape.Shape.statement)
+        ~executor:(Theory.Executor.id_to_string shape.Shape.executor)
+        ~pin:shape.Shape.pin
+    in
+    let n = List.length samples in
+    let survivors =
+      List.filter
+        (fun (s : Ledger.Predictor_history.sample) -> s.survived)
+        samples
+    in
+    let survival =
+      if n = 0 then 0.
+      else float_of_int (List.length survivors) /. float_of_int n
+    in
+    (* Mean tokens per event, over the samples in which the event
+       occurred: a hypothesis that never drifted contributes no reconcile,
+       a hypothesis never flushed contributes no flush. *)
+    let mean_positive f =
+      mean
+        (List.filter_map
+           (fun (s : Ledger.Predictor_history.sample) ->
+             let v = f s in
+             if v > 0 then Some (float_of_int v) else None)
+           samples)
+    in
+    let reconcile_cost =
+      mean_positive (fun (s : Ledger.Predictor_history.sample) ->
+          s.reconcile_tokens)
+    in
+    let flush_cost =
+      mean_positive (fun (s : Ledger.Predictor_history.sample) ->
+          s.flush_tokens)
+    in
+    let overlap_s =
+      mean
+        (List.map
+           (fun (s : Ledger.Predictor_history.sample) -> s.overlap_s)
+           survivors)
+    in
+    (* Read-suspension time: the blocked component of the shape's nodes'
+       telemetry — a suspended fiber is parked at a read with no
+       hypothesis source (40-scheduling.md § read-time binding). *)
+    let suspended_reads_s =
+      List.fold_left
+        (fun acc node ->
+          match Ledger.Telemetry.timing ledger node with
+          | None -> acc
+          | Some t -> acc +. t.Ledger.Telemetry.blocked_s)
+        0.
+        (shape_nodes ledger shape)
+    in
+    { survival; reconcile_cost; flush_cost; overlap_s; suspended_reads_s;
+      samples = n }
 end
 
 module Predictor = struct
-  type t = unit
+  type t = { ledger : Ledger.t }
 
-  let of_ledger _ = failwith "TODO: speculate"
-  let survival _ _ = failwith "TODO: speculate"
-  let prefer_source _ _ ~issued:_ ~snooped:_ = failwith "TODO: speculate"
-  let compare_for_port _ _ _ = failwith "TODO: speculate"
+  let of_ledger ledger = { ledger }
+
+  let survival t shape =
+    let c = Counters.of_ledger t.ledger shape in
+    if c.Counters.samples = 0 then None else Some c.Counters.survival
+
+  (* Hypothesis-source selection. A snooped store buffer is later, richer
+     reality than any issued contract (30-channels.md § store-to-load
+     forwarding), so it wins by default and wherever history says this
+     shape's hypotheses tend to survive. A shape whose hypotheses
+     predominantly die is one whose partial artifacts churn, and its reads
+     fall back to the issued contract — the interface tuple, the more
+     settled source. *)
+  let prefer_source t shape ~issued ~snooped =
+    match survival t shape with
+    | Some s when s < 0.5 -> issued
+    | Some _ | None -> snooped
+
+  (* Higher survival first; a fresh shape ranks with the optimists so its
+     regime measurements get taken in (80-validation.md § honest
+     measurement). Ties compare 0, so the port queue's FIFO order
+     stands. *)
+  let compare_for_port t a b =
+    let rank shape =
+      match survival t shape with None -> 1. | Some s -> s
+    in
+    Float.compare (rank b) (rank a)
 end
 
 module Churn = struct
-  type measurement = unit
+  type measurement = { shape : Shape.t; lengthening_s : float }
 
-  let measure _ ~shape:_ = failwith "TODO: speculate"
-  let shape _ = failwith "TODO: speculate"
-  let lengthening_s _ = failwith "TODO: speculate"
+  (* "Survival ≈ 0" made mechanical: at or below one discharge in ten.
+     Measurement-owned; adjust the constant, never the requirement. *)
+  let survival_ceiling = 0.1
+
+  let measure ledger ~shape =
+    let counters = Counters.of_ledger ledger shape in
+    if
+      counters.Counters.samples = 0
+      || counters.Counters.survival > survival_ceiling
+    then None
+    else
+      let events = Ledger.Replay.events ledger in
+      let nodes = shape_nodes ledger shape in
+      let of_shape id = List.exists (Id.equal id) nodes in
+      (* Drift predominantly breaking-broad: a strict majority of the
+         shape's delivered drift notes carry the broad class. *)
+      let classes =
+        List.filter_map
+          (fun (e : Ledger.Event.t) ->
+            match (e.kind, e.node) with
+            | Ledger.Event.Drift_note { cls; _ }, Some n when of_shape n ->
+                Some cls
+            | _ -> None)
+          events
+      in
+      let broad_wire = Drift.tag_wire Drift.Breaking_broad_t in
+      let broad =
+        List.length (List.filter (String.equal broad_wire) classes)
+      in
+      if 2 * broad <= List.length classes then None
+      else
+        let squashed n =
+          List.exists
+            (fun (e : Ledger.Event.t) ->
+              match (e.kind, e.node) with
+              | ( Ledger.Event.Settled (Ledger.Settlement.Squashed _),
+                  Some m ) ->
+                  Id.equal m n
+              | _ -> false)
+            events
+        in
+        let timings =
+          List.filter_map
+            (fun n ->
+              Option.map (fun t -> (n, t)) (Ledger.Telemetry.timing ledger n))
+            nodes
+        in
+        (* Port contended: the shape's nodes spent time queued at all. *)
+        let contended =
+          List.exists
+            (fun ((_, t) : _ * Ledger.Telemetry.timing) -> t.queued_s > 0.)
+            timings
+        in
+        (* The lengthening: wall clock the flush-reissue cycle serialized —
+           queue and run time of the shape's squashed nodes, work that
+           occupied contended slots and then had to run again anyway. *)
+        let lengthening_s =
+          List.fold_left
+            (fun acc ((n, t) : _ * Ledger.Telemetry.timing) ->
+              if squashed n then acc +. t.queued_s +. t.run_s else acc)
+            0. timings
+        in
+        if (not contended) || lengthening_s <= 0. then None
+        else Some { shape; lengthening_s }
+
+  let shape m = m.shape
+  let lengthening_s m = m.lengthening_s
 end
 
 module Switch = struct
-  type t = unit
+  type t = {
+    evidence : Churn.measurement;
+    thrown_by : [ `Operator | `Scheduler ];
+  }
 
-  let throw ~evidence:_ ~thrown_by:_ = failwith "TODO: speculate"
-  let shape _ = failwith "TODO: speculate"
-  let evidence _ = failwith "TODO: speculate"
-  let thrown_by _ = failwith "TODO: speculate"
+  let throw ~evidence ~thrown_by = { evidence; thrown_by }
+  let shape t = Churn.shape t.evidence
+  let evidence t = t.evidence
+  let thrown_by t = t.thrown_by
 end
 
 module Backstops = struct
   type t = { token_ceiling : int; confidence_floor : float }
 
-  let default = { token_ceiling = max_int; confidence_floor = 0.05 }
+  (* Generous: the ceiling is runaway protection that never binds in
+     normal operation; the floor bounds flush-cascade depth without
+     suppressing ordinary chains (0.05 admits chains ~40 deep at 0.93
+     per-link confidence). Per-run configurable. *)
+  let default = { token_ceiling = 10_000_000; confidence_floor = 0.05 }
 end
