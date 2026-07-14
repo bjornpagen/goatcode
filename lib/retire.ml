@@ -691,7 +691,16 @@ let squash_set ledger ~cause =
           (consumed_pairs n)
        || List.exists
             (fun (m, _, source) ->
-              Id.equal m n && String.equal source (Id.to_string producer))
+              (* A snooped store-buffer read is a provenance edge
+                 (30-channels.md § store-to-load forwarding). The engine's
+                 dispatch path records the source as
+                 "store-buffer:<producer id>" (chase.ml [source_label]);
+                 hand-laid ledgers may record the bare producer id. Both
+                 spell the same edge. *)
+              Id.equal m n
+              && (String.equal source (Id.to_string producer)
+                 || String.equal source
+                      ("store-buffer:" ^ Id.to_string producer)))
             taken
        || List.exists (fun h -> carries n h) (hyps_taken_by producer))
   in

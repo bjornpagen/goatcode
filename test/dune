@@ -1,10 +1,237 @@
 (library
  (name goatcode_test)
+ ; Probe files (probe_*.ml) are NOT modules of this library: the negative
+ ; ones must not typecheck, so they are compiled (and required to fail) by
+ ; the rules below.
+ (modules
+  test_goatcode
+  test_engine
+  test_squash
+  test_witness
+  test_drift
+  test_boundary
+  test_admission
+  test_probes)
  ; The preview ppx_expect on this switch resolves source files relative to
  ; the runner's cwd (the library dir), not the workspace root that dune's
  ; backend flags pass as -source-tree-root; the trailing flag wins.
  (inline_tests
   (flags -source-tree-root .))
- (libraries goatcode yojson)
+ ; unix: falsifier F4 instruments the settlement-to-issue path (stderr
+ ; capture via dup2, ledger-file stat); F1 bounds real wall clock; F9's
+ ; churn-evidence construction uses millisecond sleeps for
+ ; strictly-increasing ledger timestamps.
+ (libraries goatcode yojson unix)
  (preprocess
   (pps ppx_expect)))
+
+; --- F15: compile-time probes (docs/architecture/80-validation.md) ---------
+;
+; Each negative probe is a program that must NOT typecheck. The rule
+; compiles it with the same command as the control, accepts ONLY the
+; compiler's error exit (2) — an unexpected successful compile fails the
+; rule, going red exactly when an "unrepresentable" state becomes
+; representable — and a second rule greps the captured diagnostic for the
+; expected error class, so a probe cannot "pass" by failing for an
+; unrelated reason (e.g. a broken include path).
+;
+; (sandbox none): the probes compile against the library's cmis in
+; ../lib/.goatcode.objs/byte, materialized by depending on goatcode.cma.
+
+; The harness control: MUST compile. If this rule fails, every negative
+; probe is failing for a spurious reason.
+
+(rule
+ (targets probe_control.cmi probe_control.cmo)
+ (deps
+  (sandbox none)
+  probe_control.ml
+  ../lib/goatcode.cma)
+ (action
+  (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+    probe_control.ml)))
+
+(rule
+ (alias runtest)
+ (deps probe_control.cmo)
+ (action (progn)))
+
+; F15 probe: wrong-relation phantom ref (20-contracts.md § failure surface).
+
+(rule
+ (targets probe_f15_wrong_relation_ref.err)
+ (deps
+  (sandbox none)
+  probe_f15_wrong_relation_ref.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_wrong_relation_ref.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_wrong_relation_ref.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_wrong_relation_ref.err)
+ (action
+  (run grep -q "is not compatible with type"
+    probe_f15_wrong_relation_ref.err)))
+
+; F15 probe: Run.exec on an unadmitted theory (10-theory.md § termination;
+; 70-api.md § running).
+
+(rule
+ (targets probe_f15_unadmitted_theory.err)
+ (deps
+  (sandbox none)
+  probe_f15_unadmitted_theory.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_unadmitted_theory.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_unadmitted_theory.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_unadmitted_theory.err)
+ (action
+  (run grep -q "Theory.admitted" probe_f15_unadmitted_theory.err)))
+
+; F15 probe: bare Switch.throw (40-scheduling.md § speculation is
+; default-on; 70-api.md § running).
+
+(rule
+ (targets probe_f15_bare_switch.err)
+ (deps
+  (sandbox none)
+  probe_f15_bare_switch.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_bare_switch.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_bare_switch.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_bare_switch.err)
+ (action (run grep -q "Churn.measurement" probe_f15_bare_switch.err)))
+
+; F15 probe: fabricated churn evidence (40-scheduling.md § default-on).
+
+(rule
+ (targets probe_f15_forged_churn.err)
+ (deps
+  (sandbox none)
+  probe_f15_forged_churn.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_forged_churn.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_forged_churn.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_forged_churn.err)
+ (action (run grep -q "Unbound record field" probe_f15_forged_churn.err)))
+
+; F15 probe: non-idempotent effect tool at the speculative index
+; (60-agents.md § tool grants; 30-channels.md § event taxonomy).
+
+(rule
+ (targets probe_f15_nonidem_speculative.err)
+ (deps
+  (sandbox none)
+  probe_f15_nonidem_speculative.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_nonidem_speculative.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_nonidem_speculative.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_nonidem_speculative.err)
+ (action
+  (run grep -q "Agent.Grant.speculative" probe_f15_nonidem_speculative.err)))
+
+; F15 probe: same law, attacked through the grant record's effects list.
+
+(rule
+ (targets probe_f15_nonidem_in_grant.err)
+ (deps
+  (sandbox none)
+  probe_f15_nonidem_in_grant.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_nonidem_in_grant.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_nonidem_in_grant.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_nonidem_in_grant.err)
+ (action
+  (run grep -q "Agent.Grant.speculative" probe_f15_nonidem_in_grant.err)))
+
+; F15 probe: speculative value into committed structures (50-commit.md
+; § abort by construction). Carries the recorded unique-mode gap — see the
+; probe file's header.
+
+(rule
+ (targets probe_f15_speculative_into_committed.err)
+ (deps
+  (sandbox none)
+  probe_f15_speculative_into_committed.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_speculative_into_committed.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_speculative_into_committed.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_speculative_into_committed.err)
+ (action
+  (run grep -q "Unbound value" probe_f15_speculative_into_committed.err)))
+
+; F15 probe: publish on a reader end (30-channels.md § the unidirectional
+; law).
+
+(rule
+ (targets probe_f15_rx_publish.err)
+ (deps
+  (sandbox none)
+  probe_f15_rx_publish.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_rx_publish.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_rx_publish.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_rx_publish.err)
+ (action (run grep -q "Channel.tx" probe_f15_rx_publish.err)))
