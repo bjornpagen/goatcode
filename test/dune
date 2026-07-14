@@ -1,6 +1,10 @@
 (library
  (name goatcode_test)
- (inline_tests)
+ ; The preview ppx_expect on this switch resolves source files relative to
+ ; the runner's cwd (the library dir), not the workspace root that dune's
+ ; backend flags pass as -source-tree-root; the trailing flag wins.
+ (inline_tests
+  (flags -source-tree-root .))
  (libraries goatcode yojson)
  (preprocess
   (pps ppx_expect)))
