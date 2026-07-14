@@ -93,15 +93,44 @@ guesses its own fate. A stop-cleanly note is the humane form of squash for
 an agent mid-turn: finish no further work, emit nothing; the worktree drop
 does the rest.
 
-## Model pins
+## Model pins and provider routing
 
 **Every template pins its model; pins move deliberately, never implicitly.**
 A pin is (provider, model id, sampling config, prompt-affecting options),
-recorded in the theory. The planner template pins the strongest available
-model; worker templates pin per task shape. A pin bump is a first-class
-ledger event and resets the shape's predictor counters (survival history is
-per pin — a new model is a new speculation regime; regime honesty,
-`README.md` rule 6). **Decision.** **Alternative:** auto-upgrade to the
+recorded in the theory. A pin bump is a first-class ledger event and resets
+the shape's predictor counters (survival history is per pin — a new model is
+a new speculation regime; regime honesty, `README.md` rule 6).
+
+**Two providers are wired, and routing between them is the planner's
+decision, made per template at theory-emission time.** The planner template
+itself pins the strongest available model (Claude Fable 5). For worker
+templates the planner chooses by the intelligence the shape requires:
+
+- **`anthropic` / Fable 5** — shapes where judgment is the product: design,
+  integration and adjudication, repair, adversarial review, anything
+  navigating ambiguity or a long horizon.
+- **`openai` / GPT-5.6 Terra** — shapes that are mechanical against a tight
+  contract: structured extraction, summarization into a fixed schema,
+  formatting, low-ambiguity finders — work where the contract does the
+  thinking and the model fills the shape, at roughly a quarter of the
+  input cost.
+
+**Routing is a theory decision, never a per-call auto-router.** The chosen
+pin is data in the emitted theory — auditable at admission, stable for the
+run, and accountable to the predictor: counters are keyed per (shape, pin),
+so a mis-routed shape surfaces as measured survival and repair-rate deltas,
+and the correction is a recorded pin bump on the next theory, not a silent
+runtime switch. The planner's meta-catalog carries the routing guidance as
+part of the template contract, so the planner justifies each pin the way it
+justifies any other emitted value. **Decision.** **Alternative:** a runtime
+auto-router (classify each firing's difficulty, pick the model per call) —
+lost because it makes the executor identity unpredictable within a shape,
+which corrupts the predictor's per-pin history, defeats regime honesty
+(which model produced this outcome?), and moves a judgment the planner is
+best placed to make into a heuristic nobody audits. **Reverses if:**
+measured per-shape difficulty variance is so bimodal that one pin per shape
+visibly wastes money or intelligence — the recorded path is then splitting
+the *statement* into two shapes at planning time, not routing at runtime. **Decision.** **Alternative:** auto-upgrade to the
 provider's latest — lost because the predictor's history silently stops
 describing the executor generating the outcomes, corrupting port priority
 and the churn detector's evidence — the harness would be measuring one
@@ -133,6 +162,8 @@ planner-shaped garbage (`80-validation.md`).
   Candidate: a declared checkpoint contract (the node emits partial head
   tuples and a continuation tuple; the chase fires a successor). *Trigger:
   the first fault attributed to context exhaustion in a real pipeline.*
-- **Provider abstraction.** Deleted vocabulary until a second provider is
-  wired (`00-product.md`); the pin record's provider field is the only
-  provision. *Trigger: the second provider.*
+- **Provider abstraction** — CLOSED: the trigger fired (OpenAI is the second
+  provider). The resolution is § model pins and provider routing above: two
+  named lanes behind the pin record, planner-owned routing, and still no
+  general middleware layer — the pin's `provider` field plus one runtime per
+  lane is the entire abstraction, permanently.

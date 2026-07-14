@@ -137,10 +137,14 @@ hypothesize and default-on is a no-op.
   carry typed tuples only.
 - **Not a prompt library.** Prompts are derived artifacts (`20-contracts.md`);
   a hand-authored per-node prompt is a bug.
-- **Not model-agnostic middleware.** The planner runs on the strongest
-  available model and workers are pinned per pipeline (`60-agents.md`); a
-  provider-abstraction layer is deleted vocabulary until a second provider is
-  actually wired.
+- **Not model-agnostic middleware.** Two providers are wired — Anthropic
+  (Claude Fable 5, the planner and every judgment-heavy shape) and OpenAI
+  (GPT-5.6 Terra, mechanical contract-filling shapes) — and the planner
+  routes between them per template at theory-emission time
+  (`60-agents.md` § model pins and provider routing). That is the ceiling:
+  the pin record's `provider` field plus one runtime lane per provider is
+  the entire abstraction; a general provider-middleware layer stays deleted
+  vocabulary.
 
 ## Deleted vocabulary
 
