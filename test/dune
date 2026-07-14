@@ -1,0 +1,6 @@
+(library
+ (name goatcode_test)
+ (inline_tests)
+ (libraries goatcode yojson)
+ (preprocess
+  (pps ppx_expect)))
