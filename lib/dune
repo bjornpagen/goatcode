@@ -1,6 +1,9 @@
+; The engine library takes no ppx: contracts are one-supply BY THE HOST —
+; theory authors' payload types carry [@@deriving jsonschema, yojson] and the
+; catalog entry (Contract.v) receives the deriver's output as data. The
+; derivers therefore run where the type declarations live (host executables,
+; test theories), never here (docs/architecture/20-contracts.md).
 (library
  (name goatcode)
  (public_name goatcode)
- (libraries yojson ppx_yojson_conv_lib)
- (preprocess
-  (pps ppx_yojson_conv ppx_deriving_jsonschema)))
+ (libraries yojson))

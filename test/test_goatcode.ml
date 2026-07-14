@@ -1,10 +1,13 @@
-let%expect_test "contract payload round-trips through yojson" =
-  let payload = { Goatcode.Contract.relation = "task"; arity = 2 } in
-  let json = Goatcode.Contract.yojson_of_payload payload in
-  print_string (Yojson.Safe.to_string json);
-  [%expect {| {"relation":"task","arity":2} |}]
+(* Placeholder until the falsifier roster lands (docs/architecture/
+   80-validation.md): asserts the v0 interfaces exist and link without
+   executing any stub body. Every future test drives the library through
+   the public surface with rigged executors ([Agent.Rigged]); no test ever
+   constructs [Agent.claude_cli]. *)
 
-let%expect_test "contract payload schema is derivable" =
-  print_string (Yojson.Safe.to_string Goatcode.Contract.payload_schema);
-  [%expect
-    {| {"type":"object","properties":{"relation":{"type":"string"},"arity":{"type":"integer"}},"required":["relation","arity"]} |}]
+let%expect_test "v0 interfaces link" =
+  let (_ : Goatcode.Theory.admitted option) = None in
+  let (_ : Goatcode.Run.settled option) = None in
+  let (_ : Goatcode.Ledger.Settlement.t option) = None in
+  let (_ : Goatcode.Speculate.Drift.Route.t option) = None in
+  print_string "ok";
+  [%expect {| ok |}]
