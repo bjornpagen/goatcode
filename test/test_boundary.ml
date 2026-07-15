@@ -557,6 +557,9 @@ let admission_error_name = function
   | Theory.Admission.Unknown_ref_target _ -> "Unknown_ref_target"
   | Theory.Admission.Duplicate_relation _ -> "Duplicate_relation"
   | Theory.Admission.Duplicate_statement _ -> "Duplicate_statement"
+  | Theory.Admission.Reserved_field _ -> "Reserved_field"
+  | Theory.Admission.Invalid_window _ -> "Invalid_window"
+  | Theory.Admission.Invalid_generation_bound _ -> "Invalid_generation_bound"
   | Theory.Admission.Unjudgeable_law _ -> "Unjudgeable_law"
 
 let meta_relation name (schema : Yojson.Safe.t) : Yojson.Safe.t =
