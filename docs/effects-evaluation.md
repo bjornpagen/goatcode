@@ -1,5 +1,10 @@
 # OCaml 5 effects — the language-test report (NON-NORMATIVE)
 
+> Doc names below predate the six-doc consolidation; the mapping table is
+> in `architecture/README.md` § the documents (`40-scheduling.md` →
+> `30-scheduling.md`, etc.). This file is dated evidence and is not
+> rewritten.
+
 Written for the substrate decision (`00-product.md` § substrate decision;
 the operator effects ruling, `executor-campaign.md`). This is an evidence
 file, not an architecture doc: it records what the effects port of the

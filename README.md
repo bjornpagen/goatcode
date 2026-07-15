@@ -113,8 +113,11 @@ objective. Consequences, each a ruling in the architecture docs:
   rollback, no compensation. Witnesses are observed from tool events, never
   self-reported. Retirement is dependency-ordered; squash precision is
   absolute.
-- **Channels are unidirectional.** Feedback is a forward edge firing a new
-  generation; the scheduler is the only bidirectional party.
+- **Two graphs.** Derivation is a strict forward DAG — feedback is a
+  forward edge firing a new generation, and a backward derivation edge is
+  unrepresentable. Communication is wall-less and witnessed: declared
+  structure filters delivery, never forbids flow; messages are evented
+  facts whose provenance the same squash machinery judges.
 
 ## The agent harness
 
@@ -227,17 +230,12 @@ the acceptance gate) and the reading order.
 
 | doc | what it owns |
 |---|---|
-| [00 — Product](docs/architecture/00-product.md) | what goat code is and refuses to be |
-| [10 — Theory](docs/architecture/10-theory.md) | the work representation: relations, spawn statements, laws, admission-as-parse, weak acyclicity |
-| [20 — Contracts](docs/architecture/20-contracts.md) | one supply: schema, codec, and prompt prose from one declaration; the LLM-safe subset |
-| [30 — Channels](docs/architecture/30-channels.md) | pre-opened channels, footprint filtering, store-to-load forwarding, mechanized witnesses |
-| [40 — Scheduling](docs/architecture/40-scheduling.md) | the chase: eager start, read-time binding, ports, the predictor, backstops, quiescence |
-| [50 — Commit](docs/architecture/50-commit.md) | retirement, the three laws, squash, the repair lane |
-| [60 — Agents](docs/architecture/60-agents.md) | executors, tool grants, prompt assembly, model pins, the planner, the git ban |
-| [70 — API](docs/architecture/70-api.md) | declaring, running, and reading a run; the CLI; the settled map |
-| [80 — Validation](docs/architecture/80-validation.md) | the falsifier discipline, replay determinism, measurement rules |
-| [90 — Supervisor](docs/architecture/90-supervisor.md) | the supervisory plane: a frontier model steering a running engine through a typed vocabulary |
-| [91 — Flat Org](docs/architecture/91-flat-org.md) | the in-flight redesign: one tree, no branches, frontier-consulting reads |
+| [00 — Product & Philosophy](docs/architecture/00-product.md) | what goat code is and refuses to be: the two co-equal bets (work is data; share memory by communicating), the two graphs, the two message modes, fix-forward |
+| [10 — Theory & Contracts](docs/architecture/10-theory.md) | the work representation: relations, spawn statements, laws, admission-as-parse, weak acyclicity; one supply — schema, codec, and prompt prose from one declaration |
+| [20 — The Medium](docs/architecture/20-medium.md) | the ledger and its five readers, mechanized witnesses, validity as a ledger coordinate, channels, messages and no walls, footprint filtering, the two delivery modes |
+| [30 — Scheduling & Commit](docs/architecture/30-scheduling.md) | the chase: eager start, read-time binding, ports, the predictor, backstops, drift routing; retirement, the witness protocol, squash, gates on the shared tree |
+| [40 — Agents & Supervision](docs/architecture/40-agents.md) | executors, tool grants, prompt assembly, model pins, the planner, the git ban; the supervisor — push not pull, the typed steering vocabulary, session succession |
+| [50 — API & Validation](docs/architecture/50-api.md) | declaring, running, and reading a run; the CLI; the falsifier roster, replay determinism, measurement rules |
 
 ## Repository layout
 
@@ -262,10 +260,14 @@ Research-grade and honest about it. The engine, both direct provider lanes,
 default-on speculation, retirement, and the readers are implemented and
 held by the falsifier suite; three live pipelines have run green
 end-to-end, including a from-scratch coding task built by parallel agents
-and verified by a test gate. Known open seams are recorded where they live:
-the plan-to-run seed surface (70-api), fresh-landing notifications and
-absent-read witnesses (30-channels), issued-contract firing to widen the
-speculation window (40-scheduling), and the flat-org migration (91).
+and verified by a test gate. The docs describe the **design of record** —
+the flat org (one tree, no branches, no worktrees) — while the shipped
+engine still runs the worktree machine; the gap is recorded in one place,
+the [migration ledger](docs/architecture/README.md#design-of-record-vs-shipped-engine-the-migration-ledger).
+Other open seams are recorded where they live: the plan-to-run seed
+surface and the supervisor module (doc-resident until their triggers),
+issued-contract firing to widen the speculation window, and the message
+event class.
 
 ## License
 

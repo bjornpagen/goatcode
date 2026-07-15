@@ -3,7 +3,9 @@
 This is a resumption tracker, not an architecture doc. The architecture docs
 (`docs/architecture/`) are present-tense and normative; this file records
 in-flight work and is deleted when the campaign lands. If this file and the
-architecture docs disagree, the architecture docs win.
+architecture docs disagree, the architecture docs win. (Doc names below
+predate the six-doc consolidation; the mapping table is in
+`architecture/README.md` § the documents.)
 
 ## WAVE 3 FIXES — the verified finding list, worked in order (2026-07-15)
 
