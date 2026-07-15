@@ -454,8 +454,10 @@ let rec map_result f = function
    no-shell-out ruling). *)
 let provider_runtime (pin : Theory.Pin.t) =
   match pin.provider with
-  | "anthropic" -> Ok (Agent.agent ~provider:(Agent.Provider.anthropic ()))
-  | "openai" -> Ok (Agent.agent ~provider:(Agent.Provider.openai ()))
+  | "anthropic" ->
+      Ok (Agent.agent ~stop:[] ~provider:(Agent.Provider.anthropic ()))
+  | "openai" ->
+      Ok (Agent.agent ~stop:[] ~provider:(Agent.Provider.openai ()))
   | other ->
       Error
         (Printf.sprintf

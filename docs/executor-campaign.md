@@ -44,6 +44,22 @@ harness-owned tool loop", 2026-07-14). What shipped:
   The earlier "wire uncertainty" note is resolved on paper; live smoke
   (Phase C) still pending.
 
+**REFACTOR LANDED** (second 2026-07-14 commit): the executor layer
+re-expressed representation-first after an audit against the Vercel AI
+SDK's agent abstractions (decision recorded in 60-agents.md § the
+executor transport). What changed: tools are values in a grant-derived
+table (`Toolset.of_grant` — capability is the table; the giant
+string-match dispatcher and every per-branch grant re-check are gone);
+tool paths parse once into `Relpath.t` (bounds proof carried by the
+type); read resolution is one `Source.resolve` (worktree → read_globs →
+snoop, with `Missing`/`Outside_grant` typed); `Provider.outcome` is a sum
+with non-empty-by-construction `Calls` and a real `Suspend` constructor
+(the two degenerate-state guards deleted); `Executor.outcome` is
+`Text | Refusal` (flag gone); `Agent.Stop` bounds the loop (pin option
+`max_steps`, default 32; exhaustion = `Context_exhausted`); tool events
+travel as data in `Tool.outcome` and the loop appends them. Suite green,
+zero expect diffs — behavior-preserving.
+
 Known Phase-A residue, deliberate:
 - Tool Load events carry `Generation.zero` in their witness triples (the
   content hash is real); threading committed-state generation lookups

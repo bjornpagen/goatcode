@@ -15,12 +15,20 @@
     § mechanized witnesses). Two layers:
 
     - {!Provider} — ONE stateless model turn: request out, assistant reply
-      (text, tool calls, stop reason, usage) back. Three lanes behind one
+      back as a typed {!Provider.outcome}. Three lanes behind one
       signature: Anthropic Messages, OpenAI Responses, and {!Rigged}
       (scripted turns).
     - the agent layer ({!agent}) — shared across lanes: the tool-execution
-      loop, ledger eventing, grant enforcement, and (via {!invoke}) the
-      repair lane and refusal recognition.
+      loop, ledger eventing, grant enforcement, loop bounds ({!Stop}), and
+      (via {!invoke}) the repair lane and refusal recognition.
+
+    Design discipline throughout (docs/architecture/README.md rule 8): the
+    representation carries the logic. Tools are values in a table derived
+    from the grant — capability is the table, so an ungranted action has no
+    entry to dispatch to; tool paths are parsed once into a bounds-carrying
+    type at the argument boundary; provider outcomes are a sum whose cases
+    carry exactly their own data, so "tool turn with no calls" is not a
+    state anyone guards against.
 
     No live LLM call happens in tests: falsifiers run entirely on
     {!Rigged} lanes; the provider lanes are never constructed by the test
@@ -156,11 +164,11 @@ end
 
 (** The provider layer: ONE stateless model turn — request (system,
     messages including tool results, tool declarations, wire schema) in,
-    assistant reply (text, tool calls, stop reason, usage) out. The tool
-    loop lives {e above} this signature, in the agent layer, so a provider
-    never executes anything: it moves bytes to a model API and types the
-    reply (docs/architecture/60-agents.md § model pins and provider
-    routing, § the executor transport). *)
+    assistant reply out. The tool loop lives {e above} this signature, in
+    the agent layer, so a provider never executes anything: it moves bytes
+    to a model API and types the reply
+    (docs/architecture/60-agents.md § model pins and provider routing,
+    § the executor transport). *)
 module Provider : sig
   (** A tool the model may call: harness-owned declarations, one per tool
       the grant admits. *)
@@ -192,17 +200,22 @@ module Provider : sig
       | Tool_results of Tool_result.t list
   end
 
-  (** Why the turn ended. [Refused] is a typed outcome (Anthropic
-      [stop_reason: "refusal"], an OpenAI [refusal] content item): it
-      routes to the repair/fallback lane and is never parsed as payload. *)
-  type stop = End_turn | Tool_calls | Refused
+  (** How one turn ended, with exactly the data that ending carries.
+      [Calls] is non-empty by construction ([first] plus [rest]) — a
+      "tool turn with zero calls" is unrepresentable, so no code guards
+      it. [Suspend] is a bare yield point (work-free suspension): the
+      rigged lane's drift-note delivery step; live decoders never produce
+      it, and it bills no model turn. [Refused] is a typed outcome
+      (Anthropic [stop_reason: "refusal"], an OpenAI [refusal] content
+      item): routed to the repair/fallback lane, never parsed as
+      payload. *)
+  type outcome =
+    | Settled of { text : string }
+    | Refused of { text : string }
+    | Calls of { text : string; first : Call.t; rest : Call.t list }
+    | Suspend
 
-  type reply = {
-    text : string;
-    calls : Call.t list;
-    stop : stop;
-    usage : Ledger.Usage.t;
-  }
+  type reply = { outcome : outcome; usage : Ledger.Usage.t }
 
   type request = {
     pin : Theory.Pin.t;
@@ -228,18 +241,42 @@ module Provider : sig
       turn time. *)
 end
 
+(** Loop bounds as data, checked by the agent loop before each model turn
+    (the runaway-loop backstop; cf. the same posture in
+    docs/architecture/40-scheduling.md § backstops: a ceiling is declared,
+    never implied). Exhaustion is the node's own throw —
+    [Fault.Context_exhausted] — and settles like any fault. *)
+module Stop : sig
+  type t
+
+  val step_ceiling : int -> t
+  (** Bound on tool-execution rounds. Every agent invocation carries one:
+      the pin option ["max_steps"] (default 32) — a model that never stops
+      calling tools is a fault, not a hang. *)
+
+  val token_ceiling : int -> t
+  (** Bound on the invocation's summed usage. *)
+
+  val check :
+    t list -> steps:int -> usage:Ledger.Usage.t -> string option
+  (** [Some why] when any condition trips; the string lands in the fault
+      message. *)
+end
+
 (** The executor interface: how one invocation runs to a raw reply. The
     engine owns everything around it (parsing, repair, settlement); an
-    executor produces the turn's final text — and, because the harness owns
-    the tool loop, it also owes the ledger every tool event, which is why
-    [run] takes the ledger and the node identity. *)
+    executor produces the turn's final outcome — and, because the harness
+    owns the tool loop, it also owes the ledger every tool event, which is
+    why [run] takes the ledger and the node identity. *)
 module Executor : sig
+  (** The two ways an invocation can speak: payload text for the codec
+      boundary, or a typed refusal for the repair/fallback lane. One sum,
+      not a text-plus-flag pair. *)
+  type outcome = Text of string | Refusal of string
+
   type reply = {
-    text : string;
+    outcome : outcome;
     usage : Ledger.Usage.t;  (** Summed across the invocation's turns. *)
-    refusal : bool;
-        (** The provider typed this turn as a refusal; routed to the
-            repair/fallback lane by {!invoke}, never parsed as payload. *)
   }
 
   type t = {
@@ -260,27 +297,33 @@ module Executor : sig
   }
 end
 
-val agent : provider:Provider.t -> Executor.t
+val agent : stop:Stop.t list -> provider:Provider.t -> Executor.t
 (** The agent layer over one provider lane — shared across all three, so
     there is exactly one tool loop, one grant boundary, one eventing path.
-    Per turn: send the conversation, receive the reply, log an
-    [Agent_turn]; on tool calls, execute each within the grant and append
-    the matching ledger event with its footprint —
+    [stop] is the caller's extra loop bounds — written, never implied
+    ([~stop:[]] is an explicit "pin ceiling only").
 
-    - {b Load} ([read_file], [glob_list], [grep]): reads within the grant's
-      [read_globs], the worktree, or a snoop mount; the observed content
-      hash enters the witness triple.
-    - {b Store} ([write_file], [str_replace_edit]): writes land {e only} in
-      the node's worktree; the event carries the address and a delta ref.
-    - {b Effect} ([run_command]): granted only when the grant's [effects]
-      carry a tool of that name — which the type index already polices
-      (F12/F15) — and runs behind the mkdir-atomic, holder-named machine
-      lock.
+    The tool surface is a table of tool values derived from the grant at
+    invocation start — the table {e is} the capability set: [read_file],
+    [glob_list], [grep] (loads), [write_file], [str_replace_edit] (stores,
+    landing only in the worktree), and [run_command] {e only when} the
+    grant's effects carry a tool of that name (which the status index
+    already polices — F12/F15; it runs behind the mkdir-atomic,
+    holder-named machine lock). An ungranted tool has no table entry to
+    dispatch to; there is no run-time grant check to forget. Tool paths
+    parse once, at the argument boundary, into a bounds-carrying type —
+    absolute paths and ['..'] hops are outside every grant by
+    construction, and the refusal is a typed in-band tool error
+    ({!Grant.Refusal}), never a silent no-op.
 
-    An action outside the grant returns a typed in-band tool error
-    ({!Grant.Refusal}, [is_error] on the result), never a silent no-op.
-    After each tool batch the loop calls [on_yield]; a stop-cleanly note
-    ends the invocation with no further work and nothing emitted
+    Every execution appends the matching ledger event with its footprint —
+    Load / Store / Effect — returned by the tool as data and appended by
+    the loop, so an unevented execution is not writable inside a tool.
+    Each billed model turn appends an [Agent_turn]. After each tool batch
+    the loop calls [on_yield]; a stop-cleanly note ends the invocation
+    with no further work and nothing emitted. [stop] conditions (plus the
+    pin's step ceiling) bound the loop; exhaustion faults with
+    [Context_exhausted]
     (docs/architecture/60-agents.md § tool grants, § drift notes at
     yield). *)
 
@@ -291,14 +334,14 @@ val agent : provider:Provider.t -> Executor.t
     (docs/architecture/80-validation.md § the falsifier discipline). *)
 module Rigged : sig
   type step =
-    | Reply of string  (** An end-turn reply with this final text. *)
+    | Reply of string  (** A settled turn with this final text. *)
     | Invalid of string  (** Injected parse failure: exercises the repair lane. *)
     | Refuse of string
         (** A typed provider refusal: exercises the fallback lane. *)
     | Fault of string  (** Provider error: exercises fault settlement. *)
     | Delay_s of float  (** Scheduling pressure without wall-clock cost in tests. *)
     | Yield
-        (** A turn boundary with no tool work: forces an [on_yield] — the
+        (** A {!Provider.Suspend} turn: forces an [on_yield] — the
             drift-note delivery point. *)
     | Call_tool of { name : string; input : Yojson.Safe.t }
         (** A scripted tool call: drives the harness tool loop (and its

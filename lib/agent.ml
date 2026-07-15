@@ -1,6 +1,12 @@
 (* Execution units: tool grants, prompt assembly, the provider lanes, the
    harness-owned tool loop, and the validate-and-repair loop
-   (docs/architecture/60-agents.md). *)
+   (docs/architecture/60-agents.md).
+
+   Design discipline: the representation carries the logic. Tools are
+   values in a table derived from the grant (capability IS the table);
+   tool paths parse once into a bounds-carrying type; provider outcomes
+   are a sum whose cases carry exactly their own data. Where a guard used
+   to repeat, a type now stands. *)
 
 let fault origin message = { Ledger.Fault.origin; message }
 
@@ -260,7 +266,7 @@ module Invocation = struct
   }
 end
 
-(* {2 JSON plumbing shared by the provider decoders} *)
+(* {2 JSON plumbing shared by the provider codecs and tool arguments} *)
 
 let jmem key = function
   | `Assoc fields -> List.assoc_opt key fields
@@ -305,14 +311,13 @@ module Provider = struct
       | Tool_results of Tool_result.t list
   end
 
-  type stop = End_turn | Tool_calls | Refused
+  type outcome =
+    | Settled of { text : string }
+    | Refused of { text : string }
+    | Calls of { text : string; first : Call.t; rest : Call.t list }
+    | Suspend
 
-  type reply = {
-    text : string;
-    calls : Call.t list;
-    stop : stop;
-    usage : Ledger.Usage.t;
-  }
+  type reply = { outcome : outcome; usage : Ledger.Usage.t }
 
   type request = {
     pin : Theory.Pin.t;
@@ -330,6 +335,15 @@ module Provider = struct
         { Ledger.Usage.tokens_in = jint "input_tokens" u;
           tokens_out = jint "output_tokens" u }
     | None -> Ledger.Usage.zero
+
+  (* Classify decoded text + calls into the outcome sum: the one place the
+     "did it call tools" judgment lives. *)
+  let classify ~text ~calls ~refused =
+    if refused then Refused { text }
+    else
+      match calls with
+      | [] -> Settled { text }
+      | first :: rest -> Calls { text; first; rest }
 
   (* {3 The Anthropic Messages lane}
 
@@ -443,6 +457,9 @@ module Provider = struct
            ];
          ])
 
+  (* Parse, don't validate: a tool_use block without id or name is a wire
+     fault surfaced loudly, never a "" that breaks result matching three
+     turns later. *)
   let decode_anthropic body =
     match Yojson.Safe.from_string body with
     | exception _ ->
@@ -450,7 +467,7 @@ module Provider = struct
           (fault Ledger.Fault.Executor_error
              "anthropic: unparseable response body")
     | json -> (
-        let text_of_content () =
+        let text =
           jlist "content" json
           |> List.filter_map (fun block ->
                  match jstr "type" block with
@@ -462,38 +479,42 @@ module Provider = struct
            partial content, never parsed as payload. *)
         match jstr "stop_reason" json with
         | Some "refusal" ->
-            Ok
-              {
-                text = text_of_content ();
-                calls = [];
-                stop = Refused;
-                usage = usage_of json;
-              }
-        | _ ->
+            Ok { outcome = Refused { text }; usage = usage_of json }
+        | _ -> (
             let calls =
               jlist "content" json
               |> List.filter_map (fun block ->
                      match jstr "type" block with
                      | Some "tool_use" ->
                          Some
-                           {
-                             Call.id =
-                               Option.value (jstr "id" block) ~default:"";
-                             name =
-                               Option.value (jstr "name" block) ~default:"";
-                             input =
-                               Option.value
-                                 (jmem "input" block)
-                                 ~default:(`Assoc []);
-                           }
+                           (match (jstr "id" block, jstr "name" block) with
+                           | Some id, Some name ->
+                               Ok
+                                 {
+                                   Call.id;
+                                   name;
+                                   input =
+                                     Option.value
+                                       (jmem "input" block)
+                                       ~default:(`Assoc []);
+                                 }
+                           | _ ->
+                               Error
+                                 "anthropic: tool_use block missing id or name")
                      | _ -> None)
             in
-            (* The calls, not the stop_reason, decide: a degenerate
-               tool_use stop with zero blocks must end the turn, never
-               loop an empty assistant message back at the API. *)
-            let stop = if calls <> [] then Tool_calls else End_turn in
-            Ok
-              { text = text_of_content (); calls; stop; usage = usage_of json })
+            match
+              List.partition_map
+                (function Ok c -> Left c | Error e -> Right e)
+                calls
+            with
+            | _, e :: _ -> Error (fault Ledger.Fault.Executor_error e)
+            | calls, [] ->
+                Ok
+                  {
+                    outcome = classify ~text ~calls ~refused:false;
+                    usage = usage_of json;
+                  }))
 
   let anthropic () =
     let turn (req : request) =
@@ -685,7 +706,7 @@ module Provider = struct
             let texts = Buffer.create 256 in
             let refused = ref false in
             let calls = ref [] in
-            let bad_arguments = ref None in
+            let wire_error = ref None in
             List.iter
               (fun item ->
                 match jstr "type" item with
@@ -704,43 +725,33 @@ module Provider = struct
                                  ~default:"")
                         | _ -> ())
                       (jlist "content" item)
-                | Some "function_call" ->
-                    let arguments =
-                      Option.value (jstr "arguments" item) ~default:"{}"
-                    in
-                    (match Yojson.Safe.from_string arguments with
-                    | exception _ ->
-                        bad_arguments :=
-                          Some (excerpt arguments)
-                    | input ->
-                        calls :=
-                          {
-                            Call.id =
-                              Option.value (jstr "call_id" item) ~default:"";
-                            name =
-                              Option.value (jstr "name" item) ~default:"";
-                            input;
-                          }
-                          :: !calls)
+                | Some "function_call" -> (
+                    match (jstr "call_id" item, jstr "name" item) with
+                    | Some id, Some name -> (
+                        let arguments =
+                          Option.value (jstr "arguments" item) ~default:"{}"
+                        in
+                        match Yojson.Safe.from_string arguments with
+                        | exception _ ->
+                            wire_error :=
+                              Some
+                                ("openai: unparseable function_call \
+                                  arguments: " ^ excerpt arguments)
+                        | input ->
+                            calls := { Call.id; name; input } :: !calls)
+                    | _ ->
+                        wire_error :=
+                          Some "openai: function_call missing call_id or name")
                 | _ -> ())
               (jlist "output" json);
-            (match !bad_arguments with
-            | Some raw ->
-                Error
-                  (fault Ledger.Fault.Executor_error
-                     ("openai: unparseable function_call arguments: " ^ raw))
+            (match !wire_error with
+            | Some e -> Error (fault Ledger.Fault.Executor_error e)
             | None ->
-                let calls = List.rev !calls in
-                let stop =
-                  if !refused then Refused
-                  else if calls <> [] then Tool_calls
-                  else End_turn
-                in
                 Ok
                   {
-                    text = Buffer.contents texts;
-                    calls;
-                    stop;
+                    outcome =
+                      classify ~text:(Buffer.contents texts)
+                        ~calls:(List.rev !calls) ~refused:!refused;
                     usage = usage_of json;
                   }))
 
@@ -779,8 +790,29 @@ module Provider = struct
     { turn }
 end
 
+module Stop = struct
+  type t = Step_ceiling of int | Token_ceiling of int
+
+  let step_ceiling n = Step_ceiling n
+  let token_ceiling n = Token_ceiling n
+
+  let why ~steps ~usage = function
+    | Step_ceiling n when steps >= n ->
+        Some (Printf.sprintf "step ceiling reached (%d tool rounds)" n)
+    | Token_ceiling n when Ledger.Usage.total usage >= n ->
+        Some
+          (Printf.sprintf "token ceiling reached (%d of %d)"
+             (Ledger.Usage.total usage) n)
+    | Step_ceiling _ | Token_ceiling _ -> None
+
+  let check conditions ~steps ~usage =
+    List.find_map (why ~steps ~usage) conditions
+end
+
 module Executor = struct
-  type reply = { text : string; usage : Ledger.Usage.t; refusal : bool }
+  type outcome = Text of string | Refusal of string
+
+  type reply = { outcome : outcome; usage : Ledger.Usage.t }
 
   type t = {
     run :
@@ -796,267 +828,371 @@ end
 (* {2 The harness-owned tool surface}
 
    The point of the direct-API rebuild: every load, store, and effect an
-   agent performs is executed HERE and appended to the ledger with its
-   footprint — the mechanized-witness law's substrate
-   (docs/architecture/30-channels.md § mechanized witnesses). Reads resolve
-   within the grant (worktree first — the node snoops its own store buffer
-   — then read_globs against the committed checkout at the process CWD,
-   then snoop mounts); writes land only in the worktree; effects run only
-   through a granted effect tool, behind the machine lock. Out-of-grant
-   actions return a typed in-band tool error, never a silent no-op. *)
+   agent performs is executed HERE, and its ledger event travels as DATA in
+   the tool's outcome — the loop appends it, so an unevented execution is
+   not writable inside a tool (docs/architecture/30-channels.md
+   § mechanized witnesses).
 
-module Tools = struct
-  (* Segment-wise glob matching: '**' spans directory segments; '*' and '?'
-     stay within one segment. *)
-  let glob_matches pattern path =
-    let seg p s =
-      let np = String.length p and ns = String.length s in
-      let rec go pi si =
-        if pi = np then si = ns
-        else
-          match p.[pi] with
-          | '*' -> go (pi + 1) si || (si < ns && go pi (si + 1))
-          | '?' -> si < ns && go (pi + 1) (si + 1)
-          | c -> si < ns && s.[si] = c && go (pi + 1) (si + 1)
-      in
-      go 0 0
-    in
-    let rec go ps ss =
-      match (ps, ss) with
-      | [], [] -> true
-      | [ "**" ], _ -> true
-      | "**" :: prest, [] -> go prest []
-      | "**" :: prest, _ :: srest -> go prest ss || go ps srest
-      | p :: prest, s :: srest -> seg p s && go prest srest
-      | _ :: _, [] | [], _ :: _ -> false
-    in
-    go (String.split_on_char '/' pattern) (String.split_on_char '/' path)
+   Capability is a table: {!Toolset.of_grant} derives the tool values a
+   grant admits, and dispatch is lookup — an ungranted tool has no entry,
+   so there is no run-time grant check to forget. Reads resolve worktree
+   first (the node snoops its own store buffer), then read_globs against
+   the committed checkout at the process CWD, then snoop mounts; writes
+   land only in the worktree. *)
 
-  (* Paths are repo-relative by law: absolute paths and '..' hops are
-     outside every grant by construction. *)
-  let path_in_bounds p =
-    Filename.is_relative p
-    && not (List.mem ".." (String.split_on_char '/' p))
+(* A repo-relative, escape-free path or glob pattern: the bounds proof,
+   carried by the type. Parsed once at the tool-argument boundary;
+   everything downstream takes [Relpath.t] and cannot receive an unchecked
+   string (parse, don't validate). *)
+module Relpath : sig
+  type t
 
-  (* Regular files under [root], as root-relative paths. Dot-entries and
-     _build are pruned: worktrees and checkouts, not build state. *)
-  let walk root =
-    let acc = ref [] in
-    let rec go rel_dir =
-      let abs = if rel_dir = "" then root else Filename.concat root rel_dir in
-      match Sys.readdir abs with
-      | exception Sys_error _ -> ()
-      | entries ->
-          Array.iter
-            (fun entry ->
-              if entry <> "" && entry.[0] <> '.' && entry <> "_build" then begin
-                let rel =
-                  if rel_dir = "" then entry else rel_dir ^ "/" ^ entry
-                in
-                match Sys.is_directory (Filename.concat root rel) with
-                | exception Sys_error _ -> ()
-                | true -> go rel
-                | false -> acc := rel :: !acc
-              end)
-            entries
-    in
-    go "";
-    List.rev !acc
+  val parse : string -> t option
+  (** [None] for absolute paths and any ['..'] hop — outside every grant
+      by construction. *)
 
-  (* The wildcard-free leading segments of a pattern: where a
-     committed-tree walk may start without touching the whole checkout. *)
-  let static_prefix pattern =
-    let rec take acc = function
-      | s :: rest when not (String.exists (fun c -> c = '*' || c = '?') s) ->
-          take (s :: acc) rest
-      | _ -> List.rev acc
-    in
-    String.concat "/" (take [] (String.split_on_char '/' pattern))
+  val to_string : t -> string
+end = struct
+  type t = string
 
-  (* Every (relative path, on-disk path) the grant lets this node read for
-     [pattern], deduped with worktree drafts shadowing committed state
-     shadowing snoop mounts (store-to-load forwarding order,
-     docs/architecture/30-channels.md). *)
-  let readable_matches (type s) (grant : s Grant.t) pattern =
-    let seen = Hashtbl.create 16 in
-    let add acc rel abs =
-      if Hashtbl.mem seen rel then acc
-      else begin
-        Hashtbl.add seen rel ();
-        (rel, abs) :: acc
-      end
-    in
-    let acc =
-      List.fold_left
-        (fun acc rel ->
-          if glob_matches pattern rel then
-            add acc rel (Filename.concat grant.Grant.worktree_root rel)
-          else acc)
-        []
-        (walk grant.Grant.worktree_root)
-    in
-    let committed =
-      let prefix = static_prefix pattern in
-      let base = if prefix = "" then "." else prefix in
-      match Sys.is_directory base with
-      | exception Sys_error _ -> []
-      | true ->
-          walk base
-          |> List.map (fun rel ->
-                 if prefix = "" then rel else prefix ^ "/" ^ rel)
-      | false -> if Sys.file_exists base then [ base ] else []
-    in
-    let acc =
-      List.fold_left
-        (fun acc rel ->
-          if
-            glob_matches pattern rel
-            && List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
-          then add acc rel rel
-          else acc)
-        acc committed
-    in
-    let acc =
-      List.fold_left
-        (fun acc mount ->
-          List.fold_left
-            (fun acc rel ->
-              if glob_matches pattern rel then
-                add acc rel (Filename.concat mount rel)
-              else acc)
-            acc (walk mount))
-        acc grant.Grant.snoop_mounts
-    in
-    List.rev acc
+  let parse p =
+    if
+      Filename.is_relative p
+      && not (List.mem ".." (String.split_on_char '/' p))
+    then Some p
+    else None
 
-  (* Where one relative path may be read from, if anywhere. *)
-  let readable_source (type s) (grant : s Grant.t) rel =
-    let in_worktree = Filename.concat grant.Grant.worktree_root rel in
-    if Sys.file_exists in_worktree then Some in_worktree
-    else if
+  let to_string t = t
+end
+
+(* Segment-wise glob matching: '**' spans directory segments; '*' and '?'
+   stay within one segment. *)
+let glob_matches pattern path =
+  let seg p s =
+    let np = String.length p and ns = String.length s in
+    let rec go pi si =
+      if pi = np then si = ns
+      else
+        match p.[pi] with
+        | '*' -> go (pi + 1) si || (si < ns && go pi (si + 1))
+        | '?' -> si < ns && go (pi + 1) (si + 1)
+        | c -> si < ns && s.[si] = c && go (pi + 1) (si + 1)
+    in
+    go 0 0
+  in
+  let rec go ps ss =
+    match (ps, ss) with
+    | [], [] -> true
+    | [ "**" ], _ -> true
+    | "**" :: prest, [] -> go prest []
+    | "**" :: prest, _ :: srest -> go prest ss || go ps srest
+    | p :: prest, s :: srest -> seg p s && go prest srest
+    | _ :: _, [] | [], _ :: _ -> false
+  in
+  go (String.split_on_char '/' pattern) (String.split_on_char '/' path)
+
+(* Regular files under [root], as root-relative paths. Dot-entries and
+   _build are pruned: worktrees and checkouts, not build state. *)
+let walk root =
+  let acc = ref [] in
+  let rec go rel_dir =
+    let abs = if rel_dir = "" then root else Filename.concat root rel_dir in
+    match Sys.readdir abs with
+    | exception Sys_error _ -> ()
+    | entries ->
+        Array.iter
+          (fun entry ->
+            if entry <> "" && entry.[0] <> '.' && entry <> "_build" then begin
+              let rel =
+                if rel_dir = "" then entry else rel_dir ^ "/" ^ entry
+              in
+              match Sys.is_directory (Filename.concat root rel) with
+              | exception Sys_error _ -> ()
+              | true -> go rel
+              | false -> acc := rel :: !acc
+            end)
+          entries
+  in
+  go "";
+  List.rev !acc
+
+(* Where one in-bounds path reads from, decided once: worktree draft, then
+   the committed checkout when a read_glob admits it, then snoop mounts.
+   [`Missing] (in-grant, absent on disk) and [`Outside_grant] carry the
+   distinction the two failure messages need — no caller re-derives it. *)
+module Source = struct
+  type t = { rel : string; disk : string }
+
+  let resolve (grant : _ Grant.t) (path : Relpath.t) =
+    let rel = Relpath.to_string path in
+    let draft = Filename.concat grant.Grant.worktree_root rel in
+    let in_globs =
       List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
-      && Sys.file_exists rel
-    then Some rel
+    in
+    if Sys.file_exists draft then Ok { rel; disk = draft }
+    else if in_globs && Sys.file_exists rel then Ok { rel; disk = rel }
     else
-      List.find_map
-        (fun mount ->
-          let p = Filename.concat mount rel in
-          if Sys.file_exists p then Some p else None)
-        grant.Grant.snoop_mounts
+      match
+        List.find_map
+          (fun mount ->
+            let disk = Filename.concat mount rel in
+            if Sys.file_exists disk then Some { rel; disk } else None)
+          grant.Grant.snoop_mounts
+      with
+      | Some source -> Ok source
+      | None -> if in_globs then Error `Missing else Error `Outside_grant
+end
 
-  let rec mkdirs dir =
-    if dir = "." || dir = "/" || Sys.file_exists dir then ()
+(* The wildcard-free leading segments of a pattern: where a committed-tree
+   walk may start without touching the whole checkout. *)
+let static_prefix pattern =
+  let rec take acc = function
+    | s :: rest when not (String.exists (fun c -> c = '*' || c = '?') s) ->
+        take (s :: acc) rest
+    | _ -> List.rev acc
+  in
+  String.concat "/" (take [] (String.split_on_char '/' pattern))
+
+(* Every (relative path, on-disk path) the grant lets this node read for
+   [pattern], deduped with worktree drafts shadowing committed state
+   shadowing snoop mounts (store-to-load forwarding order,
+   docs/architecture/30-channels.md). *)
+let readable_matches (grant : _ Grant.t) pattern =
+  let seen = Hashtbl.create 16 in
+  let add acc rel disk =
+    if Hashtbl.mem seen rel then acc
     else begin
-      mkdirs (Filename.dirname dir);
-      try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+      Hashtbl.add seen rel ();
+      (rel, disk) :: acc
     end
+  in
+  let acc =
+    List.fold_left
+      (fun acc rel ->
+        if glob_matches pattern rel then
+          add acc rel (Filename.concat grant.Grant.worktree_root rel)
+        else acc)
+      []
+      (walk grant.Grant.worktree_root)
+  in
+  let committed =
+    let prefix = static_prefix pattern in
+    let base = if prefix = "" then "." else prefix in
+    match Sys.is_directory base with
+    | exception Sys_error _ -> []
+    | true ->
+        walk base
+        |> List.map (fun rel ->
+               if prefix = "" then rel else prefix ^ "/" ^ rel)
+    | false -> if Sys.file_exists base then [ base ] else []
+  in
+  let acc =
+    List.fold_left
+      (fun acc rel ->
+        if
+          glob_matches pattern rel
+          && List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
+        then add acc rel rel
+        else acc)
+      acc committed
+  in
+  let acc =
+    List.fold_left
+      (fun acc mount ->
+        List.fold_left
+          (fun acc rel ->
+            if glob_matches pattern rel then
+              add acc rel (Filename.concat mount rel)
+            else acc)
+          acc (walk mount))
+      acc grant.Grant.snoop_mounts
+  in
+  List.rev acc
 
-  let count_occurrences ~needle hay =
-    let n = String.length needle and h = String.length hay in
-    if n = 0 then 0
-    else begin
-      let rec go i acc =
-        if i + n > h then acc
-        else if String.sub hay i n = needle then go (i + n) (acc + 1)
-        else go (i + 1) acc
-      in
-      go 0 0
-    end
+let rec mkdirs dir =
+  if dir = "." || dir = "/" || Sys.file_exists dir then ()
+  else begin
+    mkdirs (Filename.dirname dir);
+    try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  end
 
-  let replace_first ~needle ~replacement hay =
-    let n = String.length needle and h = String.length hay in
-    let rec find i =
-      if n = 0 || i + n > h then None
-      else if String.sub hay i n = needle then Some i
-      else find (i + 1)
+let count_occurrences ~needle hay =
+  let n = String.length needle and h = String.length hay in
+  if n = 0 then 0
+  else begin
+    let rec go i acc =
+      if i + n > h then acc
+      else if String.sub hay i n = needle then go (i + n) (acc + 1)
+      else go (i + 1) acc
     in
-    Option.map
-      (fun i ->
-        String.sub hay 0 i ^ replacement
-        ^ String.sub hay (i + n) (h - i - n))
-      (find 0)
+    go 0 0
+  end
 
-  let contains ~needle hay = count_occurrences ~needle hay > 0
+let replace_first ~needle ~replacement hay =
+  let n = String.length needle and h = String.length hay in
+  let rec find i =
+    if n = 0 || i + n > h then None
+    else if String.sub hay i n = needle then Some i
+    else find (i + 1)
+  in
+  Option.map
+    (fun i ->
+      String.sub hay 0 i ^ replacement ^ String.sub hay (i + n) (h - i - n))
+    (find 0)
 
-  (* The mkdir-atomic, holder-named machine lock every effect runs behind:
-     shared machine state is outside every worktree, so effects serialize
-     machine-wide (docs/architecture/30-channels.md § event taxonomy). *)
-  let effect_lock_dir =
-    Filename.concat (Filename.get_temp_dir_name ()) "goatcode-effect.lock"
+let contains ~needle hay = count_occurrences ~needle hay > 0
 
-  let with_effect_lock ~holder f =
-    let holder_file = Filename.concat effect_lock_dir "holder" in
-    let rec acquire budget =
-      match Unix.mkdir effect_lock_dir 0o755 with
-      | () ->
-          write_file_bytes holder_file holder;
-          Ok ()
-      | exception Unix.Unix_error (Unix.EEXIST, _, _) ->
-          if budget <= 0 then
-            Error
-              (Printf.sprintf
-                 "effect lock busy (held by %s); no action was taken"
-                 (try String.trim (read_file_bytes holder_file)
-                  with Sys_error _ -> "unknown"))
-          else begin
-            Unix.sleepf 0.05;
-            acquire (budget - 1)
-          end
-      | exception Unix.Unix_error (_, _, _) ->
-          Error "effect lock: cannot create lock directory"
-    in
-    match acquire 600 with
-    | Error m -> Error m
-    | Ok () ->
-        Fun.protect
-          ~finally:(fun () ->
-            remove_quietly holder_file;
-            try Unix.rmdir effect_lock_dir
-            with Unix.Unix_error (_, _, _) -> ())
-          (fun () -> Ok (f ()))
+(* The mkdir-atomic, holder-named machine lock every effect runs behind:
+   shared machine state is outside every worktree, so effects serialize
+   machine-wide (docs/architecture/30-channels.md § event taxonomy). *)
+let effect_lock_dir =
+  Filename.concat (Filename.get_temp_dir_name ()) "goatcode-effect.lock"
 
-  (* {3 Declarations: what the model is told it may call} *)
+let with_effect_lock ~holder f =
+  let holder_file = Filename.concat effect_lock_dir "holder" in
+  let rec acquire budget =
+    match Unix.mkdir effect_lock_dir 0o755 with
+    | () ->
+        write_file_bytes holder_file holder;
+        Ok ()
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) ->
+        if budget <= 0 then
+          Error
+            (Printf.sprintf
+               "effect lock busy (held by %s); no action was taken"
+               (try String.trim (read_file_bytes holder_file)
+                with Sys_error _ -> "unknown"))
+        else begin
+          Unix.sleepf 0.05;
+          acquire (budget - 1)
+        end
+    | exception Unix.Unix_error (_, _, _) ->
+        Error "effect lock: cannot create lock directory"
+  in
+  match acquire 600 with
+  | Error m -> Error m
+  | Ok () ->
+      Fun.protect
+        ~finally:(fun () ->
+          remove_quietly holder_file;
+          try Unix.rmdir effect_lock_dir
+          with Unix.Unix_error (_, _, _) -> ())
+        (fun () -> Ok (f ()))
 
-  let decl name description props ~required : Provider.Tool_decl.t =
-    {
-      name;
-      description;
-      input_schema =
-        `Assoc
-          [
-            ("type", `String "object");
-            ( "properties",
-              `Assoc
-                (List.map
-                   (fun (pname, doc) ->
-                     ( pname,
-                       `Assoc
-                         [
-                           ("type", `String "string");
-                           ("description", `String doc);
-                         ] ))
-                   props) );
-            ("required", `List (List.map (fun r -> `String r) required));
-            ("additionalProperties", `Bool false);
-          ];
-    }
+(* One harness tool: a declaration plus a run function with the grant
+   already bound. Events travel in the outcome as data; the loop appends
+   them (the fetchmail move: variation lives in the table, not a match). *)
+module Tool = struct
+  type outcome = { payload : string; events : Ledger.Event.kind list }
+  type failure = Refused of Grant.Refusal.t | Errored of string
 
-  let run_command_granted (type s) (grant : s Grant.t) =
-    List.find_map
-      (fun (e : s Grant.Effect_tool.t) ->
-        match e with
-        | Grant.Effect_tool.Idempotent { name = "run_command"; _ } ->
-            Some true
-        | Grant.Effect_tool.Non_idempotent { name = "run_command" } ->
-            Some false
-        | _ -> None)
-      grant.Grant.effects
+  type t = {
+    decl : Provider.Tool_decl.t;
+    run : Yojson.Safe.t -> (outcome, failure) result;
+  }
+end
 
-  let declarations (type s) (grant : s Grant.t) =
-    [
+let ( let* ) = Result.bind
+
+(* {3 Tool arguments: parsed once at the boundary, refined values flow} *)
+
+let str_arg name input : (string, Tool.failure) result =
+  match jmem name input with
+  | Some (`String s) -> Ok s
+  | Some _ ->
+      Error (Tool.Errored (Printf.sprintf "argument %S must be a string" name))
+  | None -> Error (Tool.Errored ("missing required argument: " ^ name))
+
+let path_arg ~tool ~boundary name input : (Relpath.t, Tool.failure) result =
+  let* raw = str_arg name input in
+  match Relpath.parse raw with
+  | Some p -> Ok p
+  | None ->
+      Error
+        (Tool.Refused
+           { Grant.Refusal.requested = tool ^ " " ^ raw; boundary })
+
+let read_boundary = "reads: read_globs + your worktree + snoop mounts"
+let write_boundary = "writes: your worktree only"
+
+(* Observed witness triples for tool loads carry the content hash by
+   observation; the generation is [zero] until the engine threads
+   committed-state lookups through the executor (the recorded B2/B7
+   rewiring — the event and its footprint are what this layer owes). *)
+let load_triple rel bytes =
+  ( Ledger.Address.File rel,
+    Ledger.Generation.zero,
+    Ledger.Content_hash.of_string bytes )
+
+let decl name description props ~required : Provider.Tool_decl.t =
+  {
+    name;
+    description;
+    input_schema =
+      `Assoc
+        [
+          ("type", `String "object");
+          ( "properties",
+            `Assoc
+              (List.map
+                 (fun (pname, doc) ->
+                   ( pname,
+                     `Assoc
+                       [
+                         ("type", `String "string");
+                         ("description", `String doc);
+                       ] ))
+                 props) );
+          ("required", `List (List.map (fun r -> `String r) required));
+          ("additionalProperties", `Bool false);
+        ];
+  }
+
+let read_file_tool (grant : _ Grant.t) : Tool.t =
+  {
+    decl =
       decl "read_file" "Read one file within your grant."
         [ ("path", "Repo-relative path.") ]
         ~required:[ "path" ];
+    run =
+      (fun input ->
+        let* path =
+          path_arg ~tool:"read_file" ~boundary:read_boundary "path" input
+        in
+        match Source.resolve grant path with
+        | Error `Outside_grant ->
+            Error
+              (Tool.Refused
+                 {
+                   Grant.Refusal.requested =
+                     "read_file " ^ Relpath.to_string path;
+                   boundary = read_boundary;
+                 })
+        | Error `Missing ->
+            Error
+              (Tool.Errored
+                 ("read_file: no such file: " ^ Relpath.to_string path))
+        | Ok { Source.rel; disk } -> (
+            match read_file_bytes disk with
+            | exception Sys_error m -> Error (Tool.Errored ("read_file: " ^ m))
+            | bytes ->
+                Ok
+                  {
+                    Tool.payload = bytes;
+                    events =
+                      [
+                        Ledger.Event.Load
+                          {
+                            tool = "read_file";
+                            observed = [ load_triple rel bytes ];
+                          };
+                      ];
+                  }));
+  }
+
+let write_file_tool (grant : _ Grant.t) : Tool.t =
+  {
+    decl =
       decl "write_file"
         "Write one file in your worktree (the only writable root), creating \
          parent directories as needed."
@@ -1065,6 +1201,40 @@ module Tools = struct
           ("content", "The full file contents to write.");
         ]
         ~required:[ "path"; "content" ];
+    run =
+      (fun input ->
+        let* path =
+          path_arg ~tool:"write_file" ~boundary:write_boundary "path" input
+        in
+        let* content = str_arg "content" input in
+        let rel = Relpath.to_string path in
+        let target = Filename.concat grant.Grant.worktree_root rel in
+        match
+          mkdirs (Filename.dirname target);
+          write_file_bytes target content
+        with
+        | exception Sys_error m -> Error (Tool.Errored ("write_file: " ^ m))
+        | () ->
+            Ok
+              {
+                Tool.payload =
+                  Printf.sprintf "wrote %d bytes to %s"
+                    (String.length content) rel;
+                events =
+                  [
+                    Ledger.Event.Store
+                      {
+                        tool = "write_file";
+                        address = Ledger.Address.File rel;
+                        delta = Ledger.Delta_ref.v rel;
+                      };
+                  ];
+              });
+  }
+
+let str_replace_edit_tool (grant : _ Grant.t) : Tool.t =
+  {
+    decl =
       decl "str_replace_edit"
         "Replace one exact occurrence of old_str with new_str; the edited \
          file lands in your worktree."
@@ -1074,9 +1244,119 @@ module Tools = struct
           ("new_str", "Replacement text.");
         ]
         ~required:[ "path"; "old_str"; "new_str" ];
+    run =
+      (fun input ->
+        let* path =
+          path_arg ~tool:"str_replace_edit" ~boundary:write_boundary "path"
+            input
+        in
+        let* old_str = str_arg "old_str" input in
+        let* new_str = str_arg "new_str" input in
+        match Source.resolve grant path with
+        | Error `Outside_grant ->
+            Error
+              (Tool.Refused
+                 {
+                   Grant.Refusal.requested =
+                     "str_replace_edit " ^ Relpath.to_string path;
+                   boundary = read_boundary;
+                 })
+        | Error `Missing ->
+            Error
+              (Tool.Errored
+                 ("str_replace_edit: no such file: " ^ Relpath.to_string path))
+        | Ok { Source.rel; disk } -> (
+            match read_file_bytes disk with
+            | exception Sys_error m ->
+                Error (Tool.Errored ("str_replace_edit: " ^ m))
+            | bytes -> (
+                (* An edit is a read of the source (committed or draft)
+                   plus a store into the draft — both evented. *)
+                let read_event =
+                  Ledger.Event.Load
+                    {
+                      tool = "str_replace_edit";
+                      observed = [ load_triple rel bytes ];
+                    }
+                in
+                match count_occurrences ~needle:old_str bytes with
+                | 0 ->
+                    Error
+                      (Tool.Errored
+                         ("str_replace_edit: old_str not found in " ^ rel))
+                | n when n > 1 ->
+                    Error
+                      (Tool.Errored
+                         (Printf.sprintf
+                            "str_replace_edit: old_str occurs %d times in %s; \
+                             it must occur exactly once"
+                            n rel))
+                | _ -> (
+                    let edited =
+                      Option.get
+                        (replace_first ~needle:old_str ~replacement:new_str
+                           bytes)
+                    in
+                    let target =
+                      Filename.concat grant.Grant.worktree_root rel
+                    in
+                    match
+                      mkdirs (Filename.dirname target);
+                      write_file_bytes target edited
+                    with
+                    | exception Sys_error m ->
+                        Error (Tool.Errored ("str_replace_edit: " ^ m))
+                    | () ->
+                        Ok
+                          {
+                            Tool.payload = "edited " ^ rel;
+                            events =
+                              [
+                                read_event;
+                                Ledger.Event.Store
+                                  {
+                                    tool = "str_replace_edit";
+                                    address = Ledger.Address.File rel;
+                                    delta = Ledger.Delta_ref.v rel;
+                                  };
+                              ];
+                          }))));
+  }
+
+let glob_list_tool (grant : _ Grant.t) : Tool.t =
+  {
+    decl =
       decl "glob_list" "List readable files matching a glob pattern."
         [ ("pattern", "Glob; ** spans directories, * and ? stay in one.") ]
         ~required:[ "pattern" ];
+    run =
+      (fun input ->
+        let* pattern =
+          path_arg ~tool:"glob_list" ~boundary:read_boundary "pattern" input
+        in
+        let matches = readable_matches grant (Relpath.to_string pattern) in
+        Ok
+          {
+            Tool.payload =
+              Yojson.Safe.to_string
+                (`List (List.map (fun (rel, _) -> `String rel) matches));
+            (* The observation a glob contributes is the listing itself:
+               which paths exist. *)
+            events =
+              [
+                Ledger.Event.Load
+                  {
+                    tool = "glob_list";
+                    observed =
+                      List.map (fun (rel, _) -> load_triple rel rel) matches;
+                  };
+              ];
+          });
+  }
+
+let grep_tool (grant : _ Grant.t) : Tool.t =
+  {
+    decl =
       decl "grep"
         "Search readable files for a substring; returns path:line: text \
          matches."
@@ -1085,288 +1365,177 @@ module Tools = struct
           ("glob", "Optional file glob to search within; defaults to **.");
         ]
         ~required:[ "pattern" ];
-    ]
-    @
-    match run_command_granted grant with
-    | None -> []
-    | Some _ ->
-        [
-          decl "run_command"
-            "Run one shell command in your worktree, behind the machine \
-             effect lock; exit status and output come back."
-            [ ("command", "The shell command line.") ]
-            ~required:[ "command" ];
-        ]
-
-  (* {3 Execution: grant enforcement + ledger eventing, one tool call in,
-     one typed result out} *)
-
-  let arg name input =
-    match jmem name input with Some (`String s) -> Some s | _ -> None
-
-  let ok output = (output, false)
-  let error output = (output, true)
-
-  let refuse ~requested ~boundary =
-    error (Grant.Refusal.render { Grant.Refusal.requested; boundary })
-
-  let read_boundary = "reads: read_globs + your worktree + snoop mounts"
-  let write_boundary = "writes: your worktree only"
-
-  (* Observed witness triples for tool loads carry the content hash by
-     observation; the generation is [zero] until the engine threads
-     committed-state lookups through the executor (the recorded B2/B7
-     rewiring — the event and its footprint are what Phase A owes). *)
-  let load_triple rel bytes =
-    ( Ledger.Address.File rel,
-      Ledger.Generation.zero,
-      Ledger.Content_hash.of_string bytes )
-
-  let execute (type s) ~(grant : s Grant.t) ~ledger ~node
-      (call : Provider.Call.t) : Provider.Tool_result.t =
-    let record kind =
-      ignore (Ledger.append ledger ~node kind : Ledger.Event.t)
-    in
-    let output, is_error =
-      match call.Provider.Call.name with
-      | "read_file" -> (
-          match arg "path" call.input with
-          | None -> error "read_file: missing required argument: path"
-          | Some path when not (path_in_bounds path) ->
-              refuse ~requested:("read_file " ^ path) ~boundary:read_boundary
-          | Some path -> (
-              match readable_source grant path with
-              | Some source -> (
-                  match read_file_bytes source with
-                  | exception Sys_error m -> error ("read_file: " ^ m)
-                  | bytes ->
-                      record
-                        (Ledger.Event.Load
-                           {
-                             tool = "read_file";
-                             observed = [ load_triple path bytes ];
-                           });
-                      ok bytes)
-              | None ->
-                  if
-                    List.exists
-                      (fun g -> glob_matches g path)
-                      grant.Grant.read_globs
-                  then error ("read_file: no such file: " ^ path)
-                  else
-                    refuse
-                      ~requested:("read_file " ^ path)
-                      ~boundary:read_boundary))
-      | "write_file" -> (
-          match (arg "path" call.input, arg "content" call.input) with
-          | None, _ | _, None ->
-              error "write_file: missing required arguments: path, content"
-          | Some path, _ when not (path_in_bounds path) ->
-              refuse ~requested:("write_file " ^ path) ~boundary:write_boundary
-          | Some path, Some content -> (
-              let target = Filename.concat grant.Grant.worktree_root path in
-              match
-                mkdirs (Filename.dirname target);
-                write_file_bytes target content
-              with
-              | exception Sys_error m -> error ("write_file: " ^ m)
-              | () ->
-                  record
-                    (Ledger.Event.Store
-                       {
-                         tool = "write_file";
-                         address = Ledger.Address.File path;
-                         delta = Ledger.Delta_ref.v path;
-                       });
-                  ok
-                    (Printf.sprintf "wrote %d bytes to %s"
-                       (String.length content) path)))
-      | "str_replace_edit" -> (
-          match
-            ( arg "path" call.input,
-              arg "old_str" call.input,
-              arg "new_str" call.input )
-          with
-          | None, _, _ | _, None, _ | _, _, None ->
-              error
-                "str_replace_edit: missing required arguments: path, \
-                 old_str, new_str"
-          | Some path, _, _ when not (path_in_bounds path) ->
-              refuse
-                ~requested:("str_replace_edit " ^ path)
-                ~boundary:write_boundary
-          | Some path, Some old_str, Some new_str -> (
-              match readable_source grant path with
-              | None ->
-                  if
-                    List.exists
-                      (fun g -> glob_matches g path)
-                      grant.Grant.read_globs
-                  then error ("str_replace_edit: no such file: " ^ path)
-                  else
-                    refuse
-                      ~requested:("str_replace_edit " ^ path)
-                      ~boundary:read_boundary
-              | Some source -> (
-                  match read_file_bytes source with
-                  | exception Sys_error m -> error ("str_replace_edit: " ^ m)
-                  | bytes -> (
-                      (* An edit is a read of the source (committed or
-                         draft) plus a store into the draft — both
-                         evented. *)
-                      record
-                        (Ledger.Event.Load
-                           {
-                             tool = "str_replace_edit";
-                             observed = [ load_triple path bytes ];
-                           });
-                      match count_occurrences ~needle:old_str bytes with
-                      | 0 ->
-                          error
-                            ("str_replace_edit: old_str not found in " ^ path)
-                      | n when n > 1 ->
-                          error
-                            (Printf.sprintf
-                               "str_replace_edit: old_str occurs %d times in \
-                                %s; it must occur exactly once"
-                               n path)
-                      | _ -> (
-                          let edited =
-                            Option.get
-                              (replace_first ~needle:old_str
-                                 ~replacement:new_str bytes)
-                          in
-                          let target =
-                            Filename.concat grant.Grant.worktree_root path
-                          in
-                          match
-                            mkdirs (Filename.dirname target);
-                            write_file_bytes target edited
-                          with
-                          | exception Sys_error m ->
-                              error ("str_replace_edit: " ^ m)
-                          | () ->
-                              record
-                                (Ledger.Event.Store
-                                   {
-                                     tool = "str_replace_edit";
-                                     address = Ledger.Address.File path;
-                                     delta = Ledger.Delta_ref.v path;
-                                   });
-                              ok ("edited " ^ path))))))
-      | "glob_list" -> (
-          match arg "pattern" call.input with
-          | None -> error "glob_list: missing required argument: pattern"
-          | Some pattern when not (path_in_bounds pattern) ->
-              refuse
-                ~requested:("glob_list " ^ pattern)
-                ~boundary:read_boundary
-          | Some pattern ->
-              let matches = readable_matches grant pattern in
-              (* The observation a glob contributes is the listing itself:
-                 which paths exist. *)
-              record
-                (Ledger.Event.Load
-                   {
-                     tool = "glob_list";
-                     observed =
-                       List.map (fun (rel, _) -> load_triple rel rel) matches;
-                   });
-              ok
-                (Yojson.Safe.to_string
-                   (`List
-                     (List.map (fun (rel, _) -> `String rel) matches))))
-      | "grep" -> (
-          match arg "pattern" call.input with
-          | None -> error "grep: missing required argument: pattern"
-          | Some pattern ->
-              let glob =
-                Option.value (arg "glob" call.input) ~default:"**"
+    run =
+      (fun input ->
+        let* pattern = str_arg "pattern" input in
+        let* glob =
+          match jmem "glob" input with
+          | None -> Ok "**"
+          | Some _ ->
+              let* g =
+                path_arg ~tool:"grep" ~boundary:read_boundary "glob" input
               in
-              if not (path_in_bounds glob) then
-                refuse ~requested:("grep in " ^ glob) ~boundary:read_boundary
-              else begin
-                let files = readable_matches grant glob in
-                let out = Buffer.create 256 in
-                let observed = ref [] in
-                let hits = ref 0 in
-                List.iter
-                  (fun (rel, abs) ->
-                    if !hits < 200 then
-                      match read_file_bytes abs with
-                      | exception Sys_error _ -> ()
-                      | bytes ->
-                          observed := load_triple rel bytes :: !observed;
-                          List.iteri
-                            (fun i line ->
-                              if !hits < 200 && contains ~needle:pattern line
-                              then begin
-                                incr hits;
-                                Buffer.add_string out
-                                  (Printf.sprintf "%s:%d: %s\n" rel (i + 1)
-                                     line)
-                              end)
-                            (String.split_on_char '\n' bytes))
-                  files;
-                record
-                  (Ledger.Event.Load
-                     { tool = "grep"; observed = List.rev !observed });
-                ok
-                  (if Buffer.length out = 0 then "no matches"
-                   else Buffer.contents out)
-              end)
-      | "run_command" -> (
-          match run_command_granted grant with
-          | None ->
-              refuse ~requested:"run_command"
-                ~boundary:
-                  "effects: only tools granted with an idempotence stamp"
-          | Some idempotent -> (
-              match arg "command" call.input with
-              | None -> error "run_command: missing required argument: command"
-              | Some command -> (
-                  let out_file = Filename.temp_file "goat-cmd-" ".txt" in
-                  let run () =
-                    Fun.protect
-                      ~finally:(fun () -> remove_quietly out_file)
-                      (fun () ->
-                        let status =
-                          Sys.command
-                            (Printf.sprintf "cd %s && ( %s ) > %s 2>&1"
-                               (Filename.quote grant.Grant.worktree_root)
-                               command (Filename.quote out_file))
-                        in
-                        (status, read_file_bytes out_file))
-                  in
-                  match with_effect_lock ~holder:(Id.to_string node) run with
-                  | Error m -> error ("run_command: " ^ m)
-                  | Ok (status, output) ->
-                      record
-                        (Ledger.Event.Effect
-                           {
-                             tool = "run_command";
-                             resource = "machine";
-                             idempotent;
-                           });
-                      ok
-                        (Yojson.Safe.to_string
-                           (`Assoc
-                             [
-                               ("exit_status", `Int status);
-                               ("output", `String output);
-                             ])))))
-      | other -> error ("unknown tool: " ^ other)
+              Ok (Relpath.to_string g)
+        in
+        let files = readable_matches grant glob in
+        let out = Buffer.create 256 in
+        let observed = ref [] in
+        let hits = ref 0 in
+        List.iter
+          (fun (rel, disk) ->
+            if !hits < 200 then
+              match read_file_bytes disk with
+              | exception Sys_error _ -> ()
+              | bytes ->
+                  observed := load_triple rel bytes :: !observed;
+                  List.iteri
+                    (fun i line ->
+                      if !hits < 200 && contains ~needle:pattern line then begin
+                        incr hits;
+                        Buffer.add_string out
+                          (Printf.sprintf "%s:%d: %s\n" rel (i + 1) line)
+                      end)
+                    (String.split_on_char '\n' bytes))
+          files;
+        Ok
+          {
+            Tool.payload =
+              (if Buffer.length out = 0 then "no matches"
+               else Buffer.contents out);
+            events =
+              [ Ledger.Event.Load { tool = "grep"; observed = List.rev !observed } ];
+          });
+  }
+
+let run_command_tool (grant : _ Grant.t) ~idempotent ~holder : Tool.t =
+  {
+    decl =
+      decl "run_command"
+        "Run one shell command in your worktree, behind the machine effect \
+         lock; exit status and output come back."
+        [ ("command", "The shell command line.") ]
+        ~required:[ "command" ];
+    run =
+      (fun input ->
+        let* command = str_arg "command" input in
+        let out_file = Filename.temp_file "goat-cmd-" ".txt" in
+        let run () =
+          Fun.protect
+            ~finally:(fun () -> remove_quietly out_file)
+            (fun () ->
+              let status =
+                Sys.command
+                  (Printf.sprintf "cd %s && ( %s ) > %s 2>&1"
+                     (Filename.quote grant.Grant.worktree_root)
+                     command (Filename.quote out_file))
+              in
+              (status, read_file_bytes out_file))
+        in
+        match with_effect_lock ~holder run with
+        | Error m -> Error (Tool.Errored ("run_command: " ^ m))
+        | Ok (status, output) ->
+            Ok
+              {
+                Tool.payload =
+                  Yojson.Safe.to_string
+                    (`Assoc
+                      [
+                        ("exit_status", `Int status);
+                        ("output", `String output);
+                      ]);
+                events =
+                  [
+                    Ledger.Event.Effect
+                      {
+                        tool = "run_command";
+                        resource = "machine";
+                        idempotent;
+                      };
+                  ];
+              });
+  }
+
+(* The capability table. Derivation is the ONLY place grant becomes
+   ability: run_command appears exactly when the grant's effects carry it
+   (with the idempotence its constructor declared — the F12/F15 index
+   already screened what could be constructed), and an absent entry is an
+   undeclared tool the model was never shown. *)
+module Toolset = struct
+  type t = (string * Tool.t) list
+
+  (* [holder] names the node on the effect lock (holder-named by law). *)
+  let of_grant ~holder (grant : _ Grant.t) : t =
+    let base =
+      [
+        read_file_tool grant;
+        write_file_tool grant;
+        str_replace_edit_tool grant;
+        glob_list_tool grant;
+        grep_tool grant;
+      ]
     in
-    { Provider.Tool_result.call_id = call.id; output; is_error }
+    let effects =
+      List.filter_map
+        (fun (e : _ Grant.Effect_tool.t) ->
+          match e with
+          | Grant.Effect_tool.Idempotent { name = "run_command"; _ } ->
+              Some (run_command_tool grant ~idempotent:true ~holder)
+          | Grant.Effect_tool.Non_idempotent { name = "run_command" } ->
+              Some (run_command_tool grant ~idempotent:false ~holder)
+          | _ -> None)
+        grant.Grant.effects
+    in
+    List.map (fun (t : Tool.t) -> (t.decl.Provider.Tool_decl.name, t)) (base @ effects)
+
+  let decls (t : t) = List.map (fun (_, tool) -> tool.Tool.decl) t
+
+  (* One call in, one typed result plus its events out. Dispatch is
+     lookup; the grant was consulted at derivation, not here. *)
+  let execute (t : t) (call : Provider.Call.t) :
+      Provider.Tool_result.t * Ledger.Event.kind list =
+    match List.assoc_opt call.Provider.Call.name t with
+    | None ->
+        ( {
+            Provider.Tool_result.call_id = call.id;
+            output =
+              Printf.sprintf
+                "unknown tool: %s (not declared in this node's grant)"
+                call.name;
+            is_error = true;
+          },
+          [] )
+    | Some tool -> (
+        match tool.Tool.run call.input with
+        | Ok { Tool.payload; events } ->
+            ( {
+                Provider.Tool_result.call_id = call.id;
+                output = payload;
+                is_error = false;
+              },
+              events )
+        | Error (Tool.Refused r) ->
+            ( {
+                Provider.Tool_result.call_id = call.id;
+                output = Grant.Refusal.render r;
+                is_error = true;
+              },
+              [] )
+        | Error (Tool.Errored m) ->
+            ( {
+                Provider.Tool_result.call_id = call.id;
+                output = m;
+                is_error = true;
+              },
+              [] ))
 end
 
 (* {2 The agent layer}
 
    One tool loop shared by every provider lane — which is exactly what
-   makes the loop's ledger eventing and grant enforcement a single
-   boundary rather than per-lane copies. *)
+   makes the loop's ledger eventing, grant boundary, and stop policy a
+   single implementation rather than per-lane copies. *)
 
-let agent ~provider =
+let agent ~stop ~provider =
   let run :
       type s.
       s Invocation.t ->
@@ -1378,55 +1547,70 @@ let agent ~provider =
     let record kind =
       ignore (Ledger.append ledger ~node kind : Ledger.Event.t)
     in
-    let tools = Tools.declarations inv.Invocation.grant in
-    let rec turn ~usage messages =
-      match
-        provider.Provider.turn
-          {
-            Provider.pin = inv.Invocation.pin;
-            system = "";
-            messages;
-            tools;
-            schema = inv.Invocation.schema;
-          }
-      with
-      | Error f -> Error f
-      | Ok (r : Provider.reply) ->
-          (* A bare yield point (rigged [Yield]: zero calls, zero usage) is
-             a suspension, not a model turn — it bills no [Agent_turn]. *)
-          if not (r.stop = Provider.Tool_calls && r.calls = []) then
-            record (Ledger.Event.Agent_turn { usage = r.usage });
-          let usage = Ledger.Usage.add usage r.usage in
-          (match r.stop with
-          | Provider.End_turn ->
-              Ok { Executor.text = r.text; usage; refusal = false }
-          | Provider.Refused ->
-              Ok { Executor.text = r.text; usage; refusal = true }
-          | Provider.Tool_calls ->
-              let results =
-                List.map
-                  (Tools.execute ~grant:inv.Invocation.grant ~ledger ~node)
-                  r.calls
-              in
-              (* Between tool calls: the fiber's suspension point, where
-                 drift notes land (docs/architecture/60-agents.md § drift
-                 notes at yield). *)
-              if stop_requested (on_yield ()) then
-                Ok { Executor.text = ""; usage; refusal = false }
-              else begin
-                let followup =
-                  match results with
-                  | [] -> []
-                  | _ -> [ Provider.Message.Tool_results results ]
-                in
-                turn ~usage
-                  (messages
-                  @ Provider.Message.Assistant
-                      { text = r.text; calls = r.calls }
-                    :: followup)
-              end)
+    let toolset =
+      Toolset.of_grant ~holder:(Id.to_string node) inv.Invocation.grant
     in
-    turn ~usage:Ledger.Usage.zero
+    let tools = Toolset.decls toolset in
+    let conditions =
+      Stop.step_ceiling
+        (opt_int inv.Invocation.pin.Theory.Pin.options "max_steps" ~default:32)
+      :: stop
+    in
+    let rec turn ~steps ~usage messages =
+      match Stop.check conditions ~steps ~usage with
+      | Some why -> Error (fault Ledger.Fault.Context_exhausted why)
+      | None -> (
+          match
+            provider.Provider.turn
+              {
+                Provider.pin = inv.Invocation.pin;
+                system = "";
+                messages;
+                tools;
+                schema = inv.Invocation.schema;
+              }
+          with
+          | Error f -> Error f
+          | Ok (r : Provider.reply) -> (
+              let usage = Ledger.Usage.add usage r.usage in
+              match r.outcome with
+              | Provider.Suspend ->
+                  (* A work-free suspension bills no model turn; the
+                     script continues unless a note says stop. *)
+                  if stop_requested (on_yield ()) then
+                    Ok { Executor.outcome = Executor.Text ""; usage }
+                  else turn ~steps ~usage messages
+              | Provider.Settled { text } ->
+                  record (Ledger.Event.Agent_turn { usage = r.usage });
+                  Ok { Executor.outcome = Executor.Text text; usage }
+              | Provider.Refused { text } ->
+                  record (Ledger.Event.Agent_turn { usage = r.usage });
+                  Ok { Executor.outcome = Executor.Refusal text; usage }
+              | Provider.Calls { text; first; rest } ->
+                  record (Ledger.Event.Agent_turn { usage = r.usage });
+                  let calls = first :: rest in
+                  let results =
+                    List.map
+                      (fun call ->
+                        let result, events = Toolset.execute toolset call in
+                        List.iter record events;
+                        result)
+                      calls
+                  in
+                  (* Between tool calls: the fiber's suspension point,
+                     where drift notes land (docs/architecture/60-agents.md
+                     § drift notes at yield). *)
+                  if stop_requested (on_yield ()) then
+                    Ok { Executor.outcome = Executor.Text ""; usage }
+                  else
+                    turn ~steps:(steps + 1) ~usage
+                      (messages
+                      @ [
+                          Provider.Message.Assistant { text; calls };
+                          Provider.Message.Tool_results results;
+                        ])))
+    in
+    turn ~steps:0 ~usage:Ledger.Usage.zero
       [ Provider.Message.User (Prompt.render inv.Invocation.prompt) ]
   in
   { Executor.run }
@@ -1444,9 +1628,9 @@ module Rigged = struct
   (* Steps live in a ref shared by every turn of the same provider value: a
      repair re-invocation consumes the next step, so F10 scripts "invalid,
      invalid, valid" and counts attempts. [Delay_s] is consumed without
-     sleeping — scheduling pressure, never wall-clock cost. [Yield] is a
-     turn that requests no tool and bills nothing: the agent loop's
-     between-tools suspension fires and the script continues. *)
+     sleeping — scheduling pressure, never wall-clock cost. [Yield] is
+     {!Provider.Suspend}: the agent loop's suspension fires and the script
+     continues. *)
   let provider ~script =
     let remaining = ref script in
     let turn _request =
@@ -1456,6 +1640,9 @@ module Rigged = struct
             Error (fault Ledger.Fault.Executor_error "rigged script exhausted")
         | s :: rest -> (
             remaining := rest;
+            let scripted_usage text =
+              { Ledger.Usage.tokens_in = 0; tokens_out = approx_tokens text }
+            in
             match s with
             | Reply text | Invalid text ->
                 (* Reply and Invalid differ only in the scripted text's fate
@@ -1463,26 +1650,14 @@ module Rigged = struct
                    return the turn's final text. *)
                 Ok
                   {
-                    Provider.text;
-                    calls = [];
-                    stop = Provider.End_turn;
-                    usage =
-                      {
-                        Ledger.Usage.tokens_in = 0;
-                        tokens_out = approx_tokens text;
-                      };
+                    Provider.outcome = Provider.Settled { text };
+                    usage = scripted_usage text;
                   }
             | Refuse text ->
                 Ok
                   {
-                    Provider.text;
-                    calls = [];
-                    stop = Provider.Refused;
-                    usage =
-                      {
-                        Ledger.Usage.tokens_in = 0;
-                        tokens_out = approx_tokens text;
-                      };
+                    Provider.outcome = Provider.Refused { text };
+                    usage = scripted_usage text;
                   }
             | Fault message ->
                 Error (fault Ledger.Fault.Executor_error message)
@@ -1490,17 +1665,19 @@ module Rigged = struct
             | Yield ->
                 Ok
                   {
-                    Provider.text = "";
-                    calls = [];
-                    stop = Provider.Tool_calls;
+                    Provider.outcome = Provider.Suspend;
                     usage = Ledger.Usage.zero;
                   }
             | Call_tool { name; input } ->
                 Ok
                   {
-                    Provider.text = "";
-                    calls = [ { Provider.Call.id = "rigged"; name; input } ];
-                    stop = Provider.Tool_calls;
+                    Provider.outcome =
+                      Provider.Calls
+                        {
+                          text = "";
+                          first = { Provider.Call.id = "rigged"; name; input };
+                          rest = [];
+                        };
                     usage = Ledger.Usage.zero;
                   })
       in
@@ -1508,7 +1685,7 @@ module Rigged = struct
     in
     { Provider.turn }
 
-  let executor ~script = agent ~provider:(provider ~script)
+  let executor ~script = agent ~stop:[] ~provider:(provider ~script)
 end
 
 (* Host OCaml as an executor: the witnessed operand section (codec-rendered
@@ -1552,9 +1729,9 @@ let pure_fn f =
             | Ok head ->
                 Ok
                   {
-                    Executor.text = Yojson.Safe.to_string head;
+                    Executor.outcome =
+                      Executor.Text (Yojson.Safe.to_string head);
                     usage = Ledger.Usage.zero;
-                    refusal = false;
                   }
             | Error message ->
                 Error (fault Ledger.Fault.Executor_error message)))
@@ -1574,7 +1751,7 @@ let shell_gate =
       _ =
    fun invocation ~ledger:_ ~node:_ ~on_yield ->
     if stop_requested (on_yield ()) then
-      Ok { Executor.text = ""; usage = Ledger.Usage.zero; refusal = false }
+      Ok { Executor.outcome = Executor.Text ""; usage = Ledger.Usage.zero }
     else
       match invocation.Invocation.grant.Grant.shell_gates with
       | [] | [] :: _ ->
@@ -1599,9 +1776,9 @@ let shell_gate =
               in
               Ok
                 {
-                  Executor.text = Yojson.Safe.to_string head;
+                  Executor.outcome =
+                    Executor.Text (Yojson.Safe.to_string head);
                   usage = Ledger.Usage.zero;
-                  refusal = false;
                 })
   in
   { Executor.run }
@@ -1658,21 +1835,22 @@ let[@warning "-16"] invoke_parsed ~executor ?fallback ~parse ~invocation
   let run_once (exec : Executor.t) inv =
     match exec.run inv ~ledger ~node ~on_yield with
     | Error f -> `Fault f
-    | Ok (reply : Executor.reply) ->
+    | Ok (reply : Executor.reply) -> (
         (* Provider-typed refusals never reach the parser; marker-recognized
            ones surface from the parse as diagnostics with [refusal] set —
            both route the same way below. *)
-        if reply.refusal then
-          `Invalid
-            {
-              Contract.Repair.raw_reply = reply.text;
-              complaints = [];
-              refusal = true;
-            }
-        else
-          match parse reply.text with
-          | Ok v -> `Parsed v
-          | Error d -> `Invalid d
+        match reply.outcome with
+        | Executor.Refusal text ->
+            `Invalid
+              {
+                Contract.Repair.raw_reply = text;
+                complaints = [];
+                refusal = true;
+              }
+        | Executor.Text text -> (
+            match parse text with
+            | Ok v -> `Parsed v
+            | Error d -> `Invalid d))
   in
   let repair_invocation (d : Contract.Repair.diagnostics) =
     {

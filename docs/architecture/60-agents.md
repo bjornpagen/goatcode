@@ -96,6 +96,27 @@ Recorded when the executor layer moved from a `claude`-CLI shell-out to
 direct Messages/Responses calls; the rigged lane sits behind the same tool
 loop, so falsifiers exercise the one boundary the live lanes use.
 
+**Decision.** The layer's shapes were audited against the Vercel AI SDK's
+agent abstractions (`ToolLoopAgent`, `tool()`, `stopWhen`, the
+`LanguageModel` provider spec, middleware, mock models) — the closest
+widely-deployed design for this exact layer. Adopted, re-expressed
+representationally (README rule 8): tools are first-class values in a
+table derived from the grant, so capability *is* the table and an
+ungranted action has no entry to dispatch to; loop bounds are data
+(`Agent.Stop`, a per-pin step ceiling by default, exhaustion faulting as
+`Context_exhausted`); the offline lane is a scripted provider behind the
+same interface (their mock-model pattern, which validates the falsifier
+discipline). **Alternatives lost:** per-step model/tool switching
+(`prepareStep`) — conflicts with § model pins: routing is a theory
+decision, and per-call switching corrupts per-pin predictor history; a
+composable middleware stack (`wrapLanguageModel`) — the pin record plus
+two named lanes is the entire abstraction, permanently (see the OPEN-item
+resolution below); execute-less "done-tool" termination — settlement is
+structured output against the wire schema, never a sentinel tool call.
+**Reverses if:** a third provider lane forces shared request-transform
+logic (the middleware trigger), or live smoke shows
+structured-output-plus-tools needs a forced-tool settlement lane.
+
 ## Drift notes at yield
 
 Between tool calls, a speculative node may receive **drift notes** —
