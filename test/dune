@@ -11,6 +11,7 @@
   test_drift
   test_boundary
   test_admission
+  test_fiber
   test_probes)
  ; The preview ppx_expect on this switch resolves source files relative to
  ; the runner's cwd (the library dir), not the workspace root that dune's
@@ -20,7 +21,9 @@
  ; unix: falsifier F4 instruments the settlement-to-issue path (stderr
  ; capture via dup2, ledger-file stat); F1 bounds real wall clock; F9's
  ; churn-evidence construction uses millisecond sleeps for
- ; strictly-increasing ledger timestamps.
+ ; strictly-increasing ledger timestamps; FB7's poll-pumped loopback
+ ; server (the genuinely-multi curl falsifier's peer — single-threaded,
+ ; because the scheduler under test owns the only domain).
  (libraries goatcode yojson unix)
  (preprocess
   (pps ppx_expect)))
