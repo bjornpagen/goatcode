@@ -255,10 +255,16 @@ also write theories by hand (`70-api.md`); the planner exists so "here's a
 spec, build it" is one invocation. Planner outputs pass the same admission
 judgment as hand-written theories (weak acyclicity, acceptance gate, schema
 lint) — **the planner earns no trust the operator doesn't have.** A rejected
-theory returns to the planner with admission diagnostics through the
-standard repair lane. Reader: admission (`10-theory.md`), which sees no
-difference; the falsifier suite, which fuzzes admission with
-planner-shaped garbage (`80-validation.md`).
+theory returns to the planner with admission diagnostics in the
+repair-lane shape — stateless-with-diagnostics: its original operand,
+its own invalid emission, the complaints — bounded to ONE re-invocation,
+run as a second planning run (run-granular rather than a
+`Repair_attempt` inside the first turn, because admission is judged
+after the bootstrap run settles: the head boundary proves shape, never
+theory semantics); a second rejection is the typed failure
+(`bin/main.ml`, `70-api.md` § the CLI). Reader: admission
+(`10-theory.md`), which sees no difference; the falsifier suite, which
+fuzzes admission with planner-shaped garbage (`80-validation.md`).
 
 ## OPEN items
 

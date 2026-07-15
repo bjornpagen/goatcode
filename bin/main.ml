@@ -5,17 +5,24 @@
    holding no semantics of its own. [report]/[explain]/[replay] are ledger
    readers ([Report.summarize], [Report.explain], [Run.replay]); [plan] seeds
    the one-statement bootstrap theory whose single node is the planner
-   template emitting a theory through the meta-catalog, then runs admission
-   and, on success, the emitted theory — the full loop in one command
-   (docs/architecture/70-api.md § the CLI).
+   template emitting a theory through the meta-catalog, runs admission on
+   the emission (a rejected emission returns to the planner ONCE,
+   stateless-with-diagnostics, as a second planning run — the
+   admission-repair lane), and prints the admitted roster plus the
+   run-it-yourself guidance — it does NOT run the emitted theory (its
+   seed surface is undesigned; [~seed:[]] would fire nothing and print
+   success vacuously — docs/architecture/70-api.md § the CLI, OPEN: the
+   plan-to-run seed surface).
 
    The exit-code contract (every command; an operator at a shell never
    parses stdout to learn whether the command went wrong):
-   - 0 — success. For [plan]: the emitted theory's run quiesced with no
-     faulted node and no violated law (squashes alone are speculation's
-     normal business, not errors).
+   - 0 — success. For [plan]: the bootstrap (planning) run quiesced with
+     no faulted node and no violated law (squashes alone are speculation's
+     normal business, not errors) and the emission passed admission.
    - 1 — any typed error path: config parse/bind errors, admission
-     rejection, run-level misuse, a missing ledger or node, a coherence
+     rejection, run-level misuse, a missing ledger or node, an
+     existing-ledger collision ([refuse_existing_ledger] — a ledger is
+     one run's journal, never appended to, never truncated), a coherence
      divergence under [replay], the planner emitting no theory, or a
      final settled map carrying a faulted node or violated law.
    - 2 — argv did not parse (usage).
@@ -742,6 +749,24 @@ let plan_bootstrap ~spec ~pin =
 (* Command bodies. Each returns the process exit code.                 *)
 (* ------------------------------------------------------------------ *)
 
+(* A ledger is ONE run's replayable journal: node identity is per run,
+   so a second run appended to an existing file would make [goat replay]
+   report false divergences. The CLI refuses the collision up front —
+   fix-forward: the operator picks a fresh path; the existing journal is
+   never truncated. CLI layer only: library callers and tests manage
+   their own paths. *)
+let refuse_existing_ledger ~command path =
+  if Sys.file_exists path then begin
+    Printf.eprintf
+      "goat %s: refusing to write ledger %s — the path already exists, and \
+       a ledger is one run's replayable journal (a second run in the same \
+       file would make goat replay report false divergences). Choose a \
+       fresh ledger path; the existing file is never truncated.\n"
+      command path;
+    false
+  end
+  else true
+
 (* Theories compile to executables that link the library and call
    [Run.exec]; run spawns exactly that, holding no semantics of its
    own. The child's exit code is the answer. *)
@@ -755,10 +780,21 @@ let cmd_run ~theory_exe ~seed ~config =
   | (field, path) :: _ ->
       Printf.eprintf "goat run: %s path does not exist: %s\n" field path;
       1
-  | [] ->
-      Sys.command
-        (Filename.quote_command theory_exe
-           [ "--seed"; seed; "--config"; config ])
+  | [] -> (
+      (* The one config key this wrapper reads: the ledger-collision
+         refusal belongs at the CLI (above); everything else is the
+         linked binary's own bind-time judgment. *)
+      match Config_file.load config with
+      | Error msg ->
+          Printf.eprintf "goat run: %s\n" msg;
+          1
+      | Ok file -> (
+          match Config_file.str file "ledger_path" with
+          | Some p when not (refuse_existing_ledger ~command:"run" p) -> 1
+          | Some _ | None ->
+              Sys.command
+                (Filename.quote_command theory_exe
+                   [ "--seed"; seed; "--config"; config ])))
 
 let cmd_report ~ledger_path =
   if not (Sys.file_exists ledger_path) then begin
@@ -818,108 +854,199 @@ let cmd_replay ~ledger_path =
           (List.length divergences);
         1
 
-(* The full planner loop: bootstrap run, meta-catalog parse, the same
-   admission judgment a hand-written theory faces, then the emitted
-   theory — one command, the admission-repair cycle visible in the
-   ledger like any other repair (70-api § the CLI).
+(* The planner lane: bootstrap run, meta-catalog parse, the same
+   admission judgment a hand-written theory faces, then the roster and
+   the run-it-yourself guidance — never a vacuous run of the emission
+   (70-api § the CLI).
 
-   Two runs, two ledgers: the bootstrap (planning) run journals at
-   [ledger_path ^ ".plan"], the emitted theory's run at [ledger_path]
-   itself — each ledger is one run's replayable journal (node identity is
-   per run; interleaving two runs in one file would make [goat replay]
-   report false divergences), and [goat report <ledger>] reads the run
-   the operator asked for. *)
+   The bootstrap (planning) run journals at [ledger_path ^ ".plan"] —
+   [ledger_path] itself stays free for the emitted theory's own run
+   (each ledger is one run's replayable journal: node identity is per
+   run; interleaving two runs in one file would make [goat replay]
+   report false divergences). *)
+
+(* One planning attempt: bootstrap run against [spec_text], journaled at
+   [plan_ledger], then meta parse and admission on the emission. *)
+let plan_attempt ~file ~config_path ~plan_ledger ~spec_text =
+  let prepared =
+    let* bootstrap, seed =
+      plan_bootstrap ~spec:spec_text ~pin:(planner_pin_of file)
+    in
+    let* config = run_config_of ~path:config_path ~file ~theory:bootstrap in
+    Ok (bootstrap, seed, { config with Run.ledger_path = plan_ledger })
+  in
+  match prepared with
+  | Error msg -> `Config_error msg
+  | Ok (bootstrap, seed, config) -> (
+      match Run.exec ~theory:bootstrap ~seed ~config with
+      | Error misuse -> `Misuse misuse
+      | Ok settled -> (
+          match
+            List.find_opt
+              (fun (t : Retire.Committed.tuple) ->
+                String.equal t.relation "theory")
+              settled.tuples
+          with
+          | None -> `No_theory settled
+          | Some tuple -> (
+              match
+                Contract.Codec.parse_json
+                  (Contract.codec (Theory.Meta.contract ()))
+                  ~registry:(Id.Registry.create ())
+                  tuple.payload
+              with
+              | Error diagnostics -> `Bad_meta diagnostics
+              | Ok meta -> (
+                  match Theory.Meta.admit meta with
+                  | Error errs -> `Inadmissible (settled, tuple.payload, errs)
+                  | Ok emitted -> `Admitted (settled, emitted)))))
+
+(* The admission-repair spec: the planner re-invoked
+   stateless-with-diagnostics — its original operand, its own invalid
+   emission, and the admission complaints, exactly the repair-lane shape
+   (60-agents.md § the planner; the preamble already instructs "repair
+   the named offense and nothing else"). *)
+let repair_spec ~spec ~emission ~errs =
+  String.concat "\n"
+    ([
+       spec;
+       "";
+       "Your previous theory emission failed admission. Repair the named \
+        offenses and nothing else.";
+       "Previous emission (verbatim):";
+       Yojson.Safe.to_string emission;
+       "Admission diagnostics:";
+     ]
+    @ List.map (fun e -> "- " ^ Theory.Admission.to_string e) errs)
+
 let cmd_plan ~spec ~config_path =
   if not (Sys.file_exists config_path) then begin
     Printf.eprintf "goat plan: config path does not exist: %s\n" config_path;
     1
   end
   else
-    let prepared =
-      let* file = Config_file.load config_path in
-      let* bootstrap, seed = plan_bootstrap ~spec ~pin:(planner_pin_of file) in
-      let* config = run_config_of ~path:config_path ~file ~theory:bootstrap in
-      Ok (file, bootstrap, seed, config)
-    in
-    match prepared with
+    match Config_file.load config_path with
     | Error msg ->
         Printf.eprintf "goat plan: %s\n" msg;
         1
-    | Ok (file, bootstrap, seed, config) -> (
-        let plan_ledger = config.Run.ledger_path ^ ".plan" in
-        let config = { config with Run.ledger_path = plan_ledger } in
-        match Run.exec ~theory:bootstrap ~seed ~config with
-        | Error misuse ->
+    | Ok file -> (
+        let ledger_path =
+          match Config_file.str file "ledger_path" with
+          | Some p -> p
+          | None -> "goat-ledger" (* run_config_of rejects this case. *)
+        in
+        let plan_ledger = ledger_path ^ ".plan" in
+        if not (refuse_existing_ledger ~command:"plan" plan_ledger) then 1
+        else
+        let finish ~ledgers settled emitted =
+          match run_config_of ~path:config_path ~file ~theory:emitted with
+          | Error msg ->
+              Printf.eprintf "goat plan: %s\n" msg;
+              1
+          | Ok (_ : Run.config) ->
+              (* Binding the emitted theory validates its executor pins
+                 (providers known, keys present) at plan time; the config
+                 value is discarded — [plan] does NOT run the emitted
+                 theory. Its seed relations are the operator's next move
+                 (the bootstrap spec tuple was consumed by the planner),
+                 and the plan-to-run seed surface is undesigned: running
+                 with [~seed:[]] would fire nothing and print success
+                 vacuously. Admission is the honest boundary of this
+                 command (70-api.md § the CLI, OPEN: the plan-to-run seed
+                 surface). *)
+              Printf.printf
+                "planner emitted an admitted theory: %d relations, \
+                 statements [%s]\n"
+                (List.length (Theory.relations emitted))
+                (String.concat ", "
+                   (List.map
+                      (fun (sid, _) -> Theory.Statement.to_string sid)
+                      (Theory.statements emitted)));
+              List.iter
+                (fun (label, path) -> Printf.printf "%s: %s\n" label path)
+                ledgers;
+              Printf.printf
+                "the emitted theory was NOT run (its seeds are yours to \
+                 supply).\n\
+                 next: compile it against the library and run with:\n\
+                \  goat run <theory.exe> --seed <seed.json> --config %s\n"
+                config_path;
+              (* The map is the answer; the exit code is the successful
+                 planning run's terminal rendering — the bootstrap run is
+                 what this command ran. *)
+              exit_of_settled settled
+        in
+        match plan_attempt ~file ~config_path ~plan_ledger ~spec_text:spec with
+        | `Config_error msg ->
+            Printf.eprintf "goat plan: %s\n" msg;
+            1
+        | `Misuse misuse ->
             Printf.eprintf "goat plan: %s\n" (render_misuse misuse);
             1
-        | Ok settled -> (
+        | `No_theory settled ->
+            prerr_endline
+              "goat plan: the planner emitted no theory tuple; bootstrap \
+               settlements follow";
+            print_settled settled;
+            1
+        | `Bad_meta diagnostics ->
+            Printf.eprintf "goat plan: %s\n" (render_diagnostics diagnostics);
+            1
+        | `Admitted (settled, emitted) ->
+            finish ~ledgers:[ ("plan ledger", plan_ledger) ] settled emitted
+        | `Inadmissible (_, emission, errs) -> (
+            (* The admission-repair lane, one bounded re-invocation
+               (60-agents.md § the planner): the rejected emission returns
+               to the planner with its diagnostics as a fresh planning run
+               journaled at [<plan_ledger>.repair] — run-granular because
+               admission is judged after the bootstrap run settles (the
+               head boundary proves shape, never theory semantics), and a
+               CLI-side re-entry into the settled turn's repair loop would
+               be a second invocation lane, the divergent copy the
+               executor rebuild deleted. A second rejection is the typed
+               failure. *)
+            Printf.printf
+              "goat plan: the emitted theory failed admission; re-invoking \
+               the planner once with the diagnostics\n%s\n"
+              (render_admission_errors errs);
+            let repair_ledger = plan_ledger ^ ".repair" in
+            if not (refuse_existing_ledger ~command:"plan" repair_ledger)
+            then 1
+            else
             match
-              List.find_opt
-                (fun (t : Retire.Committed.tuple) ->
-                  String.equal t.relation "theory")
-                settled.tuples
+              plan_attempt ~file ~config_path ~plan_ledger:repair_ledger
+                ~spec_text:(repair_spec ~spec ~emission ~errs)
             with
-            | None ->
+            | `Config_error msg ->
+                Printf.eprintf "goat plan: %s\n" msg;
+                1
+            | `Misuse misuse ->
+                Printf.eprintf "goat plan: %s\n" (render_misuse misuse);
+                1
+            | `No_theory settled ->
                 prerr_endline
-                  "goat plan: the planner emitted no theory tuple; bootstrap \
-                   settlements follow";
+                  "goat plan: the planner emitted no theory tuple on the \
+                   admission repair; settlements follow";
                 print_settled settled;
                 1
-            | Some tuple -> (
-                match
-                  Contract.Codec.parse_json
-                    (Contract.codec (Theory.Meta.contract ()))
-                    ~registry:(Id.Registry.create ())
-                    tuple.payload
-                with
-                | Error diagnostics ->
-                    Printf.eprintf "goat plan: %s\n"
-                      (render_diagnostics diagnostics);
-                    1
-                | Ok meta -> (
-                    match Theory.Meta.admit meta with
-                    | Error errs ->
-                        Printf.eprintf "goat plan: the emitted theory failed \
-                                        admission\n%s\n"
-                          (render_admission_errors errs);
-                        1
-                    | Ok emitted -> (
-                        match
-                          run_config_of ~path:config_path ~file ~theory:emitted
-                        with
-                        | Error msg ->
-                            Printf.eprintf "goat plan: %s\n" msg;
-                            1
-                        | Ok config' -> (
-                            Printf.printf
-                              "planner emitted an admitted theory: %d \
-                               relations, statements [%s]\n"
-                              (List.length (Theory.relations emitted))
-                              (String.concat ", "
-                                 (List.map
-                                    (fun (sid, _) ->
-                                      Theory.Statement.to_string sid)
-                                    (Theory.statements emitted)));
-                            (* The emitted theory carries its own spawn
-                               structure; its seed relations, if any, are
-                               the operator's next move — the bootstrap
-                               spec tuple was consumed by the planner. *)
-                            match
-                              Run.exec ~theory:emitted ~seed:[] ~config:config'
-                            with
-                            | Error misuse ->
-                                Printf.eprintf "goat plan: %s\n"
-                                  (render_misuse misuse);
-                                1
-                            | Ok settled' ->
-                                print_settled settled';
-                                Printf.printf
-                                  "plan ledger: %s\nrun ledger: %s\n"
-                                  plan_ledger config'.Run.ledger_path;
-                                (* The map is the answer; the exit code is
-                                   its terminal rendering — a faulted node
-                                   or violated law must not exit 0. *)
-                                exit_of_settled settled'))))))
+            | `Bad_meta diagnostics ->
+                Printf.eprintf "goat plan: %s\n"
+                  (render_diagnostics diagnostics);
+                1
+            | `Inadmissible (_, _, errs') ->
+                Printf.eprintf
+                  "goat plan: the emitted theory failed admission again \
+                   after one repair\n%s\n"
+                  (render_admission_errors errs');
+                1
+            | `Admitted (settled, emitted) ->
+                finish
+                  ~ledgers:
+                    [
+                      ("plan ledger", plan_ledger);
+                      ("admission-repair ledger", repair_ledger);
+                    ]
+                  settled emitted))
 
 (* ------------------------------------------------------------------ *)
 (* Entry.                                                              *)

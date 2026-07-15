@@ -193,14 +193,23 @@ Theories compile to executables that link the library and call `Run.exec` —
 the CLI's `run` is a convenience runner around exactly that, holding no
 semantics of its own. The planner path (`goat plan "<spec>"`) seeds a
 one-statement bootstrap theory whose single node is the planner template
-emitting a theory through the meta-catalog, then runs admission and, on
-success, the emitted theory — the full loop in one command, with the
-admission-repair cycle visible in the ledger like any other repair. The
-two runs journal separately (node identity is per run, so one file
-holding two runs would make `goat replay` report false divergences): the
-planning turn at `<ledger_path>.plan`, the emitted theory's run at
-`<ledger_path>`. On success `plan` prints the emitted theory's statement
-roster, the settled map, any law verdicts, and both ledger locations.
+emitting a theory through the meta-catalog, runs admission on the
+emission (a rejected emission returns to the planner **once**,
+stateless-with-diagnostics — the original spec, the invalid emission
+verbatim, and the admission complaints — as a second planning run
+journaled at `<ledger_path>.plan.repair`; a second rejection is the
+typed failure), and — on success — prints the emitted theory's statement
+roster, validates that its executor pins bind under the same config
+(providers known, keys present), and hands the operator the
+run-it-yourself guidance (`goat run <theory.exe> --seed <seed.json>
+--config <run.toml>`). **`plan` does not run the emitted theory**: its
+seed relations are the operator's to supply (the bootstrap spec tuple
+was consumed by the planner), and the plan-to-run seed surface is
+undesigned — a run with an empty seed would fire nothing and print
+success vacuously (OPEN item below). The planning run journals at
+`<ledger_path>.plan`; `<ledger_path>` itself stays free for the emitted
+theory's own run (node identity is per run, so one file holding two runs
+would make `goat replay` report false divergences).
 
 **`run.toml` is the CLI's config subset**, parsed once and entirely at
 bind time — `examples/run.toml` documents every key. Top level:
@@ -222,9 +231,16 @@ set; a pin routing to a provider whose API key variable
 (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`) is unset names the variable — all
 judged at bind time, before any node runs, so a dry `goat plan` with no
 key exits on the typed key error without a single model call or worktree
-touch. Exit codes are a contract: 0 is success (for `plan`, the emitted
-run quiesced with no faulted node and no violated law — squashes alone
-are speculation's normal business); 1 is any typed error path, including
+touch. A ledger path that already exists is refused up front by `plan`
+and `run` with the path named — a ledger is one run's replayable journal
+(node identity is per run; a second run appended to the same file would
+make `goat replay` report false divergences), so the operator picks a
+fresh path and the existing journal is never truncated (fix-forward).
+The refusal is the CLI's: library callers and tests manage their own
+paths. Exit codes are a contract: 0 is success (for `plan`, the
+bootstrap run quiesced with no faulted node and no violated law —
+squashes alone are speculation's normal business — and the emission
+passed admission); 1 is any typed error path, including
 a final settled map carrying a faulted node or violated law; 2 is an
 argv parse failure. `goat run` returns the theory executable's own exit
 code — the same contract, owed by the linked binary.
@@ -242,3 +258,11 @@ code — the same contract, owed by the linked binary.
   boundary; sugar for common seeds (a git diff as a `change` tuple) belongs
   in `bin/goat` once patterns repeat. *Trigger: the third hand-written
   seed file with the same shape.*
+- **The plan-to-run seed surface.** `goat plan` stops at admission plus
+  the run guidance; nothing yet designs how an emitted theory's seed
+  relations get populated (the planner could emit example seeds through
+  the meta-catalog, or `plan` could prompt for them, or the guidance
+  stays the surface). Deliberately undesigned rather than run vacuously
+  with an empty seed. *Trigger: the first operator who takes a `plan`
+  emission all the way to a real run and reports the seed-authoring
+  friction.*

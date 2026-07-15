@@ -80,9 +80,9 @@ cp examples/run.toml run.toml
 mkdir -p /tmp/goat-worktrees
 ```
 
-Plan and run a toy spec — one command runs the full loop (planner emits a
-theory through the meta-catalog, admission judges it, the emitted theory
-runs):
+Plan a toy spec — the planner emits a theory through the meta-catalog and
+admission judges it (`plan` stops there: the emitted theory's seeds are
+yours to supply, so it is never run vacuously):
 
 ```
 ./_build/default/bin/main.exe plan \
@@ -92,18 +92,18 @@ runs):
 ```
 
 Expect on stdout: a `planner emitted an admitted theory: …` line naming
-the emitted statements, then the settled map (one line per node —
-`retired`/`faulted`/`squashed`, with the blocked/queued/run decomposition
-and token bill), any law verdicts, and the two ledger locations (the
-planning turn journals at `<ledger_path>.plan`, the emitted theory's run
-at `<ledger_path>`). The committed work lands on the `committed_branch`
-of the config's repo. Then read the run back — these are offline ledger
-readers:
+the emitted statements, the planning ledger's location (the planning turn
+journals at `<ledger_path>.plan`; `<ledger_path>` itself stays free for
+the emitted theory's own run), and the run-it-yourself guidance
+(`goat run <theory.exe> --seed <seed.json> --config run.toml` — compile
+the emitted theory against the library and seed it; the plan-to-run seed
+surface is a recorded OPEN item in `docs/architecture/70-api.md`). Then
+read the planning turn back — these are offline ledger readers:
 
 ```
-./_build/default/bin/main.exe report /tmp/goat-ledger.bin    # wall clock, parallelism, speculation account
-./_build/default/bin/main.exe explain /tmp/goat-ledger.bin node#0
-./_build/default/bin/main.exe replay /tmp/goat-ledger.bin    # ledger-coherence audit
+./_build/default/bin/main.exe report /tmp/goat-ledger.bin.plan    # wall clock, parallelism, speculation account
+./_build/default/bin/main.exe explain /tmp/goat-ledger.bin.plan node#0
+./_build/default/bin/main.exe replay /tmp/goat-ledger.bin.plan    # ledger-coherence audit
 ```
 
 ## Toolchain
