@@ -162,6 +162,58 @@ module Settlement = struct
   type t = Retired | Faulted of Fault.t | Squashed of Squash_cause.t
 end
 
+module Decision = struct
+  type t =
+    | Queued of { port : string }
+    | Admitted of { port : string }
+    | Dispatched
+    | Suspended
+    | Resumed
+    | Serialize_reissue
+    | Flush_subtree
+    | Abort_suspended
+    | Ceiling_bound
+
+  let to_string = function
+    | Queued { port } -> "queued:" ^ port
+    | Admitted { port } -> "admitted:" ^ port
+    | Dispatched -> "dispatched"
+    | Suspended -> "suspended"
+    | Resumed -> "resumed"
+    | Serialize_reissue -> "serialize-reissue"
+    | Flush_subtree -> "flush-subtree"
+    | Abort_suspended -> "abort-suspended"
+    | Ceiling_bound -> "token-ceiling-bound"
+end
+
+module Drift = struct
+  type cls =
+    | Schema_identical
+    | Additive
+    | Breaking_narrow
+    | Breaking_broad
+    | Producer_squashed
+
+  type route =
+    | Discharge_silently
+    | Reconcile_note
+    | Reconcile_delta
+    | Flush_subtree
+
+  let cls_to_string = function
+    | Schema_identical -> "schema_identical"
+    | Additive -> "additive"
+    | Breaking_narrow -> "breaking_narrow"
+    | Breaking_broad -> "breaking_broad"
+    | Producer_squashed -> "producer_squashed"
+
+  let route_to_string = function
+    | Discharge_silently -> "discharge_silently"
+    | Reconcile_note -> "reconcile_note"
+    | Reconcile_delta -> "reconcile_delta"
+    | Flush_subtree -> "flush_subtree"
+end
+
 module Event = struct
   type kind =
     | Load of {
@@ -184,18 +236,26 @@ module Event = struct
         address : Address.t;
         new_generation : Generation.t;
       }
-    | Drift_note of { address : Address.t; cls : string; route : string }
+    | Drift_note of {
+        address : Address.t;
+        cls : Drift.cls;
+        route : Drift.route;
+      }
     | Repair_attempt of { attempt : int; refusal : bool }
     | Settled of Settlement.t
     | Decision of {
-        action : string;
+        action : Decision.t;
         reason : string;
         counters : (string * float) list;
       }
-    | Pin_bump of { statement : string; executor : string; pin : string }
+    | Pin_bump of {
+        statement : Theory.Statement.id;
+        executor : Theory.Executor.id;
+        pin : string;
+      }
     | Switch_thrown of {
-        statement : string;
-        executor : string;
+        statement : Theory.Statement.id;
+        executor : Theory.Executor.id;
         churn : float;
       }
     | Law_verdict of { law : string; satisfied : bool }
@@ -294,17 +354,25 @@ let sum_usage events =
 module Telemetry = struct
   type timing = { blocked_s : float; queued_s : float; run_s : float }
 
-  (* The taxonomy has no dedicated lifecycle constructors; the scheduler
-     records lifecycle transitions as [Decision] events with these actions
-     ("every scheduler decision with its reason" —
-     40-scheduling.md § drift routing).  The decomposition is:
-       queued  = time between "queued" and the matching "admitted"
-       blocked = time between "suspended" and the matching "resumed"
-       run     = the node's span minus both. *)
-  let queued_action = "queued"
-  let admitted_action = "admitted"
-  let suspended_action = "suspended"
-  let resumed_action = "resumed"
+  (* The node's span, partitioned by a fold over its lifecycle markers
+     ([Decision] actions): at every instant the node is in exactly one of
+     three phases, so the decomposition is total and the three components
+     sum to the span by construction.  A marker outside the lifecycle's
+     grammar (a resume with no suspend) changes phase and nothing else. *)
+  type phase = Running | In_queue | Blocked
+
+  let phase_after phase (kind : Event.kind) =
+    match kind with
+    | Event.Decision { action; _ } -> (
+        match action with
+        | Decision.Queued _ -> In_queue
+        | Decision.Admitted _ | Decision.Dispatched -> Running
+        | Decision.Suspended -> Blocked
+        | Decision.Resumed -> Running
+        | Decision.Serialize_reissue | Decision.Flush_subtree
+        | Decision.Abort_suspended | Decision.Ceiling_bound ->
+            phase)
+    | _ -> phase
 
   let timing t node =
     match events_of_node t node with
@@ -325,36 +393,23 @@ module Telemetry = struct
                 (fun acc (e : Event.t) -> Float.max acc e.at)
                 start events
         in
-        let close since stop acc =
-          match since with
-          | Some opened when stop > opened -> acc +. (stop -. opened)
-          | _ -> acc
+        let charge (blocked, queued, run) phase dt =
+          let dt = Float.max 0. dt in
+          match phase with
+          | Blocked -> (blocked +. dt, queued, run)
+          | In_queue -> (blocked, queued +. dt, run)
+          | Running -> (blocked, queued, run +. dt)
         in
-        let blocked, queued, suspended_since, queued_since =
+        let sums, phase, since =
           List.fold_left
-            (fun (blocked, queued, suspended_since, queued_since)
-                 (e : Event.t) ->
-              match e.kind with
-              | Event.Decision { action; _ }
-                when String.equal action suspended_action ->
-                  (blocked, queued, Some e.at, queued_since)
-              | Event.Decision { action; _ }
-                when String.equal action resumed_action ->
-                  (close suspended_since e.at blocked, queued, None,
-                   queued_since)
-              | Event.Decision { action; _ }
-                when String.equal action queued_action ->
-                  (blocked, queued, suspended_since, Some e.at)
-              | Event.Decision { action; _ }
-                when String.equal action admitted_action ->
-                  (blocked, close queued_since e.at queued, suspended_since,
-                   None)
-              | _ -> (blocked, queued, suspended_since, queued_since))
-            (0., 0., None, None) events
+            (fun (sums, phase, since) (e : Event.t) ->
+              let stop = Float.min e.at fin in
+              (charge sums phase (stop -. since), phase_after phase e.kind,
+               stop))
+            ((0., 0., 0.), Running, start)
+            events
         in
-        let blocked_s = close suspended_since fin blocked in
-        let queued_s = close queued_since fin queued in
-        let run_s = Float.max 0. (fin -. start -. blocked_s -. queued_s) in
+        let blocked_s, queued_s, run_s = charge sums phase (fin -. since) in
         Some { blocked_s; queued_s; run_s }
 
   let usage t node = sum_usage (events_of_node t node)
@@ -393,6 +448,13 @@ module Predictor_history = struct
   let samples t ~statement ~executor ~pin =
     let all = Replay.events t in
     let shaped_nodes =
+      (* Newest bump first, so the head match is the most recent pin. *)
+      let current_pin pins s =
+        List.find_map
+          (fun (s', xp) ->
+            if Theory.Statement.equal s' s then Some xp else None)
+          pins
+      in
       let _, nodes =
         List.fold_left
           (fun (pins, nodes) (e : Event.t) ->
@@ -400,14 +462,13 @@ module Predictor_history = struct
             | Event.Pin_bump { statement = s; executor = x; pin = p } ->
                 ((s, (x, p)) :: pins, nodes)
             | Event.Fired { provenance; _ } -> (
-                let s =
-                  Theory.Statement.to_string provenance.Provenance.statement
-                in
-                if not (String.equal s statement) then (pins, nodes)
+                let s = provenance.Provenance.statement in
+                if not (Theory.Statement.equal s statement) then (pins, nodes)
                 else
-                  match (List.assoc_opt s pins, e.node) with
+                  match (current_pin pins s, e.node) with
                   | Some (x, p), Some n
-                    when String.equal x executor && String.equal p pin ->
+                    when Theory.Executor.id_equal x executor
+                         && String.equal p pin ->
                       (pins, n :: nodes)
                   | _ -> (pins, nodes))
             | _ -> (pins, nodes))

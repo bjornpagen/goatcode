@@ -192,6 +192,14 @@ let print_summary (s : Report.summary) =
 let print_story (st : Report.story) =
   Printf.printf "node %s\n" (Id.to_string st.node);
   Printf.printf "fired because: %s\n" st.fired_because;
+  (match st.decisions with
+  | [] -> ()
+  | decisions ->
+      print_endline "scheduler decisions:";
+      List.iter
+        (fun (at, action, reason) ->
+          Printf.printf "  [%s] %s (%s)\n" (render_timestamp at) action reason)
+        decisions);
   (match st.drift_notes with
   | [] -> print_endline "drift notes: none"
   | notes ->

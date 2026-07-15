@@ -11,6 +11,7 @@
   test_drift
   test_boundary
   test_admission
+  test_report
   test_probes)
  ; The preview ppx_expect on this switch resolves source files relative to
  ; the runner's cwd (the library dir), not the workspace root that dune's

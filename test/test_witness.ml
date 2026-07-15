@@ -103,10 +103,10 @@ let gen_str = function
   | Some g -> Format.asprintf "%a" Ledger.Generation.pp g
 
 let route_name = function
-  | Speculate.Drift.Route.Discharge_silently -> "discharge_silently"
-  | Speculate.Drift.Route.Reconcile_note -> "reconcile_note"
-  | Speculate.Drift.Route.Reconcile_delta -> "reconcile_delta"
-  | Speculate.Drift.Route.Flush_subtree -> "flush_subtree"
+  | Ledger.Drift.Discharge_silently -> "discharge_silently"
+  | Ledger.Drift.Reconcile_note -> "reconcile_note"
+  | Ledger.Drift.Reconcile_delta -> "reconcile_delta"
+  | Ledger.Drift.Flush_subtree -> "flush_subtree"
 
 (* ------------------------------------------------------------------ *)
 (* The rigged executor lane: the lie crosses the REAL invoke path — the

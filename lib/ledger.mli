@@ -17,7 +17,10 @@
 
     This module also owns the spatial vocabulary the movement and commit
     layers share (addresses, generations, content hashes, footprints, delta
-    refs) and the identity realms for nodes and hypotheses. *)
+    refs), the identity realms for nodes and hypotheses, and the
+    scheduler's decision and drift vocabularies ({!Decision}, {!Drift}) —
+    sums, never wire strings, so a reader matches constructors and an
+    unknown action is unrepresentable. *)
 
 type node
 (** The {!Id} realm of nodes: one firing of a dependency statement. A node
@@ -174,6 +177,71 @@ module Settlement : sig
     | Squashed of Squash_cause.t
 end
 
+(** The scheduler-decision vocabulary: the lifecycle every node walks
+    (queued → admitted → dispatched; suspended ↔ resumed at blocking
+    reads) plus the reissue/flush/abort rulings and the ceiling anomaly.
+    A sum, never a string — an unknown action is unrepresentable, and
+    {!Telemetry.timing} decomposes blocked/queued/run from these typed
+    markers (docs/architecture/40-scheduling.md § ports and priority,
+    § settlement). Throwing the per-shape speculation off switch is not
+    here: it is its own event ({!Event.kind.Switch_thrown}), with the
+    churn evidence attached. *)
+module Decision : sig
+  type t =
+    | Queued of { port : string }
+        (** Entered the named port's queue (ports are structural hazards,
+            declared — docs/architecture/40-scheduling.md § ports). *)
+    | Admitted of { port : string }  (** Won a slot on the named port. *)
+    | Dispatched  (** Execution began; the run clock starts here. *)
+    | Suspended  (** A read blocked with no hypothesis source; parked. *)
+    | Resumed  (** The awaited operand landed; unparked. *)
+    | Serialize_reissue
+        (** Conflict loser reissued against the winner's state — the v0
+            route for every write conflict
+            (docs/architecture/50-commit.md § conflicts). *)
+    | Flush_subtree
+        (** A dead hypothesis's derivation subtree squashed
+            (docs/architecture/40-scheduling.md § drift routing). *)
+    | Abort_suspended
+        (** A suspended read with no remaining producer settled so the
+            run can quiesce. *)
+    | Ceiling_bound
+        (** The token ceiling bound: only witnessed work admitted until
+            discharges catch up — an anomaly with a named cause, never a
+            cost-control success
+            (docs/architecture/40-scheduling.md § backstops). *)
+
+  val to_string : t -> string
+  (** The one wire rendering, for reports and replay divergence messages;
+      never re-parsed. *)
+end
+
+(** Drift, as ledger events carry it: the class and the route, typed. The
+    evidence-carrying parse ([Speculate.Drift.cls]) and the policy table
+    live upstream in [Speculate]; events carry these compact forms because
+    payloads never ride inline ({!Delta_ref}) — and replay re-judges each
+    recorded route against the table without re-parsing any wire string
+    (docs/architecture/40-scheduling.md § drift routing). *)
+module Drift : sig
+  type cls =
+    | Schema_identical
+    | Additive
+    | Breaking_narrow
+    | Breaking_broad
+    | Producer_squashed
+
+  type route =
+    | Discharge_silently
+    | Reconcile_note
+    | Reconcile_delta
+    | Flush_subtree
+
+  val cls_to_string : cls -> string
+  (** The one wire rendering, for reports; never re-parsed. *)
+
+  val route_to_string : route -> string
+end
+
 (** The event taxonomy. Tool calls classify as exactly one of load / store /
     effect (docs/architecture/30-channels.md § event taxonomy); engine
     events record firings, hypotheses, invalidations, settlements, and
@@ -215,25 +283,30 @@ module Event : sig
         address : Address.t;
         new_generation : Generation.t;
       }
-    | Drift_note of { address : Address.t; cls : string; route : string }
-        (** A drift note delivered at yield; [cls]/[route] are the wire
-            renderings of [Speculate.Drift]'s typed forms. *)
+    | Drift_note of { address : Address.t; cls : Drift.cls; route : Drift.route }
+        (** A drift note delivered at yield; the class's diff evidence
+            stays with the note's out-of-line delta, never in the event. *)
     | Repair_attempt of { attempt : int; refusal : bool }
     | Settled of Settlement.t
     | Decision of {
-        action : string;
+        action : Decision.t;
         reason : string;
         counters : (string * float) list;
             (** The counters consulted, attached to the throw — reissue,
                 flush, and switch decisions are explainable or they don't
                 land. *)
       }
-    | Pin_bump of { statement : string; executor : string; pin : string }
-        (** Resets the shape's predictor counters
+    | Pin_bump of {
+        statement : Theory.Statement.id;
+        executor : Theory.Executor.id;
+        pin : string;
+      }
+        (** Resets the shape's predictor counters. Carries the typed
+            identities — a reader reconstructs no id from a wire string
             (docs/architecture/60-agents.md § model pins). *)
     | Switch_thrown of {
-        statement : string;
-        executor : string;
+        statement : Theory.Statement.id;
+        executor : Theory.Executor.id;
         churn : float;
       }
         (** The per-shape speculation off switch, with the evidence
@@ -283,6 +356,13 @@ module Telemetry : sig
   type timing = { blocked_s : float; queued_s : float; run_s : float }
 
   val timing : t -> node Id.t -> timing option
+  (** The node's span, partitioned by its {!Decision} lifecycle markers:
+      queued between [Queued] and the next [Admitted]/[Dispatched], blocked
+      between [Suspended] and the next [Resumed], running otherwise. The
+      span opens at the node's first event and closes at its [Settled]
+      event (or its last event, for a node still in flight). [None] for a
+      node the ledger never saw. *)
+
   val usage : t -> node Id.t -> Usage.t
   val run_usage : t -> Usage.t
 end
@@ -300,7 +380,14 @@ module Predictor_history : sig
   }
 
   val samples :
-    t -> statement:string -> executor:string -> pin:string -> sample list
+    t ->
+    statement:Theory.Statement.id ->
+    executor:Theory.Executor.id ->
+    pin:string ->
+    sample list
+  (** The shape's hypothesis lifecycles, keyed by the typed identities
+      {!Event.kind.Pin_bump} records — no id is rebuilt from a wire
+      string. *)
 end
 
 (** Reader 4: the witness index. Read-set and write-set extraction per

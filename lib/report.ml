@@ -34,6 +34,7 @@ type scoreboard = {
 type story = {
   node : Ledger.node Id.t;
   fired_because : string;
+  decisions : (Ledger.Timestamp.t * string * string) list;
   drift_notes : (Ledger.Timestamp.t * string * string) list;
   witness : Witness.triple list;
   settlement : Ledger.Settlement.t;
@@ -47,13 +48,9 @@ let sec = Ledger.Timestamp.to_seconds
 let node_key (n : Ledger.node Id.t) = Id.to_string n
 let hyp_key (h : Ledger.hypothesis Id.t) = Id.to_string h
 
-(* The scheduler-decision vocabulary this reader recognizes. [Decision]
-   events are stringly by the ledger's design (action, reason, counters);
-   the port lifecycle and the ceiling anomaly are recovered from these
-   actions. [reason] on enqueue/admit is the port name. *)
-let action_enqueue = "enqueue"
-let action_admit = "admit"
-let action_ceiling_bound = "token_ceiling_bound"
+(* The token-ceiling counter, when a decision records the ceiling among the
+   numbers it consulted ([Ledger.Event.Decision] counters are free-form by
+   design; the lifecycle itself is typed — [Ledger.Decision]). *)
 let counter_token_ceiling = "token_ceiling"
 
 let tuple_key (relation, id) = relation ^ "\000" ^ id
@@ -168,10 +165,11 @@ let critical_path events =
 
 (* {2 Port queue accounting}
 
-   Queue time is recovered from the scheduler's own decisions: an
-   [enqueue] decision opens a node's wait on a port, the matching [admit]
-   closes it. A node enqueued and never admitted (squashed while queued)
-   waits until its settlement, or the run's last event. *)
+   Queue time is recovered from the scheduler's own lifecycle markers: a
+   [Queued] decision opens a node's wait on a port, the matching
+   [Admitted] (or [Dispatched]) closes it. A node queued and never
+   admitted (squashed while queued) waits until its settlement, or the
+   run's last event. *)
 let port_queue_times events =
   let settles = settle_times events in
   let last_ts =
@@ -187,11 +185,16 @@ let port_queue_times events =
   List.iter
     (fun (e : Ledger.Event.t) ->
       match (e.node, e.kind) with
-      | Some n, Ledger.Event.Decision { action; reason = port; _ }
-        when String.equal action action_enqueue ->
+      | ( Some n,
+          Ledger.Event.Decision { action = Ledger.Decision.Queued { port }; _ }
+        ) ->
           Hashtbl.replace pending (node_key n) (port, e.at)
-      | Some n, Ledger.Event.Decision { action; _ }
-        when String.equal action action_admit -> (
+      | ( Some n,
+          Ledger.Event.Decision
+            {
+              action = Ledger.Decision.Admitted _ | Ledger.Decision.Dispatched;
+              _;
+            } ) -> (
           match Hashtbl.find_opt pending (node_key n) with
           | Some (port, t0) ->
               add port (sec e.at -. sec t0);
@@ -274,25 +277,29 @@ let hypothesis_facts (events : Ledger.Event.t list) =
 (* {2 Shape enumeration}
 
    The ledger's shape-bearing events ([Pin_bump], [Switch_thrown]) carry
-   (statement, executor, pin) as wire strings; typed statement ids come
-   from firing provenance. An executor id is rebuilt from its wire name
-   through the one public path ({!Theory.Executor.id} of a constructed
-   declaration). Shapes with no such event in this run's ledger have no
-   breakdown row — their counters live in {!Speculate.Counters.of_ledger}
-   once a shape key exists to ask with. *)
+   the typed (statement, executor) identities, so a shape key is read
+   straight off the event — never rebuilt from a wire string. A shape gets
+   a breakdown row when a pin or switch event names it AND its statement
+   fired in this run; the row's counters live in
+   {!Speculate.Counters.of_ledger} once the key exists to ask with. *)
 let shapes_of (events : Ledger.Event.t list) : Speculate.Shape.t list =
-  let statements = Hashtbl.create 16 in
+  let fired = Hashtbl.create 16 in
+  (* statement wire string -> (), for the fired-in-this-run filter *)
   List.iter
     (fun (e : Ledger.Event.t) ->
       match e.kind with
       | Ledger.Event.Fired { provenance; _ } ->
-          Hashtbl.replace statements
+          Hashtbl.replace fired
             (Theory.Statement.to_string provenance.statement)
-            provenance.statement
+            ()
       | _ -> ())
     events;
   let latest_pin = Hashtbl.create 16 in
-  (* (statement, executor) -> pin, last one wins in ledger order *)
+  (* (statement, executor) wire pair -> pin, last one wins in ledger order *)
+  let pair_key statement executor =
+    ( Theory.Statement.to_string statement,
+      Theory.Executor.id_to_string executor )
+  in
   let keys = ref [] in
   let remember statement executor pin =
     keys := (statement, executor, pin) :: !keys
@@ -301,11 +308,11 @@ let shapes_of (events : Ledger.Event.t list) : Speculate.Shape.t list =
     (fun (e : Ledger.Event.t) ->
       match e.kind with
       | Ledger.Event.Pin_bump { statement; executor; pin } ->
-          Hashtbl.replace latest_pin (statement, executor) pin;
+          Hashtbl.replace latest_pin (pair_key statement executor) pin;
           remember statement executor pin
       | Ledger.Event.Switch_thrown { statement; executor; _ } ->
           let pin =
-            match Hashtbl.find_opt latest_pin (statement, executor) with
+            match Hashtbl.find_opt latest_pin (pair_key statement executor) with
             | Some pin -> pin
             | None -> ""
           in
@@ -315,30 +322,22 @@ let shapes_of (events : Ledger.Event.t list) : Speculate.Shape.t list =
   let seen = Hashtbl.create 16 in
   List.rev !keys
   |> List.filter_map (fun (statement, executor, pin) ->
-         if Hashtbl.mem seen (statement, executor, pin) then None
+         let skey = Theory.Statement.to_string statement in
+         let dedup = (skey, Theory.Executor.id_to_string executor, pin) in
+         if Hashtbl.mem seen dedup || not (Hashtbl.mem fired skey) then None
          else begin
-           Hashtbl.replace seen (statement, executor, pin) ();
-           match Hashtbl.find_opt statements statement with
-           | None -> None
-           | Some sid ->
-               Some
-                 Speculate.Shape.
-                   {
-                     statement = sid;
-                     executor =
-                       Theory.Executor.id
-                         (Theory.Executor.Pure_fn { name = executor });
-                     pin;
-                   }
+           Hashtbl.replace seen dedup ();
+           Some Speculate.Shape.{ statement; executor; pin }
          end)
 
 let ceiling_bound (events : Ledger.Event.t list) =
   List.exists
     (fun (e : Ledger.Event.t) ->
       match e.kind with
-      | Ledger.Event.Decision { action; counters; _ } ->
-          String.equal action action_ceiling_bound
-          || List.mem_assoc counter_token_ceiling counters
+      | Ledger.Event.Decision { action = Ledger.Decision.Ceiling_bound; _ } ->
+          true
+      | Ledger.Event.Decision { counters; _ } ->
+          List.mem_assoc counter_token_ceiling counters
       | _ -> false)
     events
 
@@ -393,24 +392,24 @@ let summarize (settled : Run.settled) : summary =
 let scoreboard (handle : Run.handle) : scoreboard =
   let ledger = Run.ledger handle in
   let events = Ledger.Replay.events ledger in
-  (* Per-node port occupancy, replayed to the present: enqueue -> pending
-     on the port, admit -> active on it, settled -> gone. *)
+  (* Per-node port occupancy, replayed to the present: [Queued] -> pending
+     on the port, [Admitted] -> active on it, settled -> gone. *)
   let state = Hashtbl.create 64 in
   (* node key -> [`Pending of port | `Active of port | `Done] *)
   let ports_seen = Hashtbl.create 8 in
   List.iter
     (fun (e : Ledger.Event.t) ->
       match (e.node, e.kind) with
-      | Some n, Ledger.Event.Decision { action; reason = port; _ }
-        when String.equal action action_enqueue ->
+      | ( Some n,
+          Ledger.Event.Decision { action = Ledger.Decision.Queued { port }; _ }
+        ) ->
           Hashtbl.replace ports_seen port ();
           Hashtbl.replace state (node_key n) (`Pending port)
-      | Some n, Ledger.Event.Decision { action; _ }
-        when String.equal action action_admit -> (
-          match Hashtbl.find_opt state (node_key n) with
-          | Some (`Pending port) ->
-              Hashtbl.replace state (node_key n) (`Active port)
-          | Some (`Active _) | Some `Done | None -> ())
+      | ( Some n,
+          Ledger.Event.Decision
+            { action = Ledger.Decision.Admitted { port }; _ } ) ->
+          Hashtbl.replace ports_seen port ();
+          Hashtbl.replace state (node_key n) (`Active port)
       | Some n, Ledger.Event.Settled _ ->
           Hashtbl.replace state (node_key n) `Done
       | _ -> ())
@@ -543,13 +542,29 @@ let explain (settled : Run.settled) ~(node : Ledger.node Id.t) : story option =
             else None)
           events
       in
+      let decisions =
+        List.filter_map
+          (fun (e : Ledger.Event.t) ->
+            if mine e then
+              match e.kind with
+              | Ledger.Event.Decision { action; reason; _ } ->
+                  Some (e.at, Ledger.Decision.to_string action, reason)
+              | _ -> None
+            else None)
+          events
+      in
       let drift_notes =
         List.filter_map
           (fun (e : Ledger.Event.t) ->
             if mine e then
               match e.kind with
               | Ledger.Event.Drift_note { cls; route; _ } ->
-                  Some (e.at, cls, route)
+                  (* Rendered here, at the reader: events carry the typed
+                     forms; the story is prose. *)
+                  Some
+                    ( e.at,
+                      Ledger.Drift.cls_to_string cls,
+                      Ledger.Drift.route_to_string route )
               | _ -> None
             else None)
           events
@@ -594,6 +609,7 @@ let explain (settled : Run.settled) ~(node : Ledger.node Id.t) : story option =
             {
               node;
               fired_because = render_fired_because ~prov ~counters ~taken;
+              decisions;
               drift_notes;
               witness =
                 Witness.triples (Witness.observed settled.ledger ~node);

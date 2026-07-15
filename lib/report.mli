@@ -59,6 +59,10 @@ type story = {
   fired_because : string;
       (** The firing provenance rendered: statement, consumed tuples,
           counters consulted, hypothesis constructed. *)
+  decisions : (Ledger.Timestamp.t * string * string) list;
+      (** Every scheduler ruling recorded against the node, rendered:
+          (when, action, reason). A reissue or flush lands here — "why did
+          this run twice" reads straight off the story. *)
   drift_notes : (Ledger.Timestamp.t * string * string) list;
       (** Each note received: (when, class, route taken). *)
   witness : Witness.triple list;  (** The witness at retire. *)
