@@ -61,9 +61,9 @@ repo for their own semantics.
 
 | Doc | Contents |
 |---|---|
-| `00-product.md` | Product & Philosophy: thesis, the wall-clock objective, the two co-equal bets (work is data; share memory by communicating), the two graphs, the two message modes, the machine analogy, fix-forward, workload census, non-goals, deleted vocabulary, prior art, the substrate decision, success criteria |
+| `00-product.md` | Product & Philosophy: thesis, the wall-clock objective, the two co-equal bets (work is data; share memory by communicating), the two graphs, the medium is a bus (facts vs actuations; agents have no privacy), the machine analogy, fix-forward, workload census, non-goals, deleted vocabulary, prior art, the substrate decision, success criteria |
 | `10-theory.md` | Theory & Contracts: relations with mint/ref slots, the statement grammar, chase semantics, weak acyclicity, feedback-is-forward, the acceptance gate; the one-supply contract law, lowering, the LLM-safe subset, meta-contracts, drift as schema diff |
-| `20-medium.md` | The Medium: the ledger and its five readers, event taxonomy, mechanized witnesses, validity as a ledger coordinate (the frontier), squash without isolation, channels, messages and no walls, invalidate-don't-update, footprint filtering, ambient sensing, the two delivery modes, the subscription discipline |
+| `20-medium.md` | The Medium: the bus and the cache, the ledger and its five readers, event taxonomy, mechanized witnesses, validity as a ledger coordinate (the frontier), squash without isolation, channels as folds, publication and subscription (no walls, no envelopes), invalidate-don't-update, footprint filters as default subscriptions, ambient sensing, delivery levels and the enactor |
 | `30-scheduling.md` | Scheduling & Commit: the chase engine, eager start, read-time binding on the fiber substrate, default-on speculation, ports, the predictor, backstops, drift routing, settlement; retirement, the generation-witness protocol, the landing from ledger blobs, gates on the shared tree, final-state judgment |
 | `40-agents.md` | Agents & Supervision: executors, prompt assembly, the repair lane, tool grants, the git ban, the transport, notes at yield, model pins and provider routing, the planner; the supervisor — push not pull, the fifth reader, the steering vocabulary, unforgeability, session succession, beside the machine |
 | `50-api.md` | API & Validation: declaring, running, and reading a run; the CLI; the settled map; the falsifier roster (F, FL, FB, FM), replay determinism, honest measurement, the counters table |
@@ -116,7 +116,9 @@ Also owed, tracked here so nothing lands silently:
   `Report.summary` gaining the supervision line; falsifiers F18/F19 and
   probes P1–P4.
 - **The message event class** — doc-resident until its trigger
-  (`20-medium.md` § messages); the worker subscription surface with it.
+  (`20-medium.md` § the bus): attributes-only, no addressee field; the
+  worker subscription surface (theory-compiled defaults plus amendments)
+  and falsifier F20 land with it.
 - **The code-comment sweep** — `lib/`, `bin/`, `test/`, and `examples/`
   carry ~450 references to the former doc filenames; they are swept to the
   new names in one mechanical change (no semantics).
@@ -178,15 +180,32 @@ re-litigated by accident:
   filter, never a wall. *(Supersedes "channels are unidirectional,
   permanently," whose derivation half survives verbatim and whose
   communication half was a duplicate coherence mechanism —
-  `00-product.md` § the two graphs, `20-medium.md` § no walls.)*
-- **The two message modes.** Queued (coalesced at yield) and interrupt
-  (kill-now, via discontinue — constitutional because wall clock outranks
-  the tokens a killed turn wastes). *(Supersedes "never mid-flight
+  `00-product.md` § the two graphs, `20-medium.md` § the bus.)*
+- **The medium is a bus.** One totally-ordered stream; publication is
+  appending, delivery is a subscription fold; channels, drift notes,
+  supervisor notes, peer messages, and escalations are one mechanism
+  wearing different rows. A message has no addressee — only attributes;
+  agents have no privacy, so eavesdropping is legal observational
+  learning. Information is universal; authority is typed. *(Supersedes
+  "the two message modes" and completes the no-walls ruling: walls are not
+  merely advisory, they are unrepresentable — no private pipe exists to
+  guard — `00-product.md` § the medium is a bus, `20-medium.md` § the
+  bus.)*
+- **Facts and actuations are essentially different; the bus carries only
+  facts, and the scheduler is the only enactor.** A kill is never
+  delivered — the fiber is discontinued and the settlement publishes;
+  modelling the kill as a message would make squash an escapable
+  convention. Queued delivery is the only delivery; the interrupt survives
+  at full strength as an enactment. *(Supersedes "never mid-flight
   interrupts," whose informational half survives: nothing informational
   crosses a turn boundary — `00-product.md`, `20-medium.md` § delivery.)*
-- **Messages inform; settlements actuate.** No message kills, fires, or
-  commits anything; interrupt-class actuation belongs to the judgment
-  hierarchy (`20-medium.md` § messages).
+- **Messages inform; settlements actuate; the scheduler enacts.** No
+  message kills, fires, or commits anything; interrupt-class actuation
+  belongs to the judgment hierarchy (`20-medium.md` § the bus).
+- **The supervisor steers aggressively.** Err toward intervention, on
+  evidence, early; the interrupt (`Abort`, optionally with a redirect note
+  for the reissue) is its sharpest steer, and passivity is the recorded
+  failure mode (`40-agents.md` § the aggressive posture).
 - **Every boundary parses.** Admission returns `Theory.admitted`; the codec
   boundary returns typed tuples with phantom-typed ref ids; the schema lint
   parses derived schemas into `Wire_schema.t`. No downstream code re-checks

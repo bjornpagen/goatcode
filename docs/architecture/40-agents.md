@@ -242,24 +242,27 @@ lane.
 
 ## Notes at yield
 
-Between tool calls, a node receives its queued deliveries
-(`20-medium.md` § delivery) as one **note sum**:
+Between tool calls, a node drains what its subscription materialized
+(`20-medium.md` § the subscription discipline) as one **note sum**:
 
 ```
 Drift of Speculate.Drift.note
 | Supervisory of { text; delta; disposition : [ `Continue | `Patch_then_continue ] }
-| Message of { from; payload_ref }      (* doc-resident with the message class *)
+| Message of { from; about; payload_ref }   (* doc-resident with the message class *)
 ```
 
-A drift note is a compact rendering of an invalidation that passed the
-node's footprint filter: the address, the diff class, the schema diff or
-delta summary, ending with the routing the scheduler already decided
-(continue / patch-then-continue) — the agent never guesses its own fate. A
-supervisory note is the supervisor's `Note` steer (§ the steering
-vocabulary). A message is a peer's send. Kills never arrive as notes: an
-interrupt is a discontinue, not a disposition (`20-medium.md` § delivery)
-— the fiber settles with its typed cause, finalizers run, nothing further
-executes.
+All three are bus publications distinguished by attributes; the sum is
+what one table materialized for one participant, not three delivery
+mechanisms. A drift note is a compact rendering of an invalidation that
+matched the node's default (footprint-compiled) rows: the address, the
+diff class, the schema diff or delta summary, ending with the routing the
+scheduler already decided (continue / patch-then-continue) — the agent
+never guesses its own fate. A supervisory note is the supervisor's `Note`
+steer (§ the steering vocabulary) — a publication bearing the node's id.
+A message is a peer's publication that matched a row. Kills never arrive
+as notes: a kill is the enactor's discontinue, not a delivery
+(`20-medium.md` § delivery) — the fiber settles with its typed cause,
+finalizers run, nothing further executes.
 
 Delivery has one representation — the node's note-drain closure, built by
 the chase over the consumer's channel end — and two mounts: inside the
@@ -443,9 +446,11 @@ drift note for a moved world, a fault for a dead end (the supervisor sees
 all three). **Reverses if:** live pipelines show a measured class of
 worker distress that never surfaces as any ledger event the subscription
 table can name — evidence that the worker knows something the ledger
-doesn't — then a worker-initiated `distress` *message* (evented, addressed
-to the supervisor, subscription-disciplined like any message —
-`20-medium.md` § messages) is the recorded shape, still not a synchronous
+doesn't — then the bus already carries the fix with no new lane at all: a
+worker *publishes* distress (an attributed fact like any other,
+`20-medium.md` § the bus) and the supervisor's table subscribes to the
+attribute — still push at the decision point (the supervisor's row, not
+the worker's call, decides that it surfaces), still never a synchronous
 advice call.
 
 ## The fifth reader
@@ -453,8 +458,9 @@ advice call.
 **The supervisor reads the ledger through a named reader — `Supervision`,
 joining Replay, Telemetry, Predictor_history, and the Witness index**
 (`20-medium.md` § the ledger). It is not a firehose. What the supervisor
-is *pushed* is governed by a **subscription table as data** — the general
-discipline of `20-medium.md` § the subscription discipline, at the
+is *pushed* is governed by a **subscription table as data** — not a
+supervision-special mechanism but the system's one delivery discipline
+(`20-medium.md` § the subscription discipline) instantiated at the
 supervision plane: rows of event class × threshold → escalation level,
 inspectable, amendable mid-run (the amendment is itself a steer, evented),
 and replayable (the current table is a fold of the default plus the
@@ -571,6 +577,35 @@ attention that buys wall clock, wall clock is the machine's one
 objective, and a supervisor loitering anywhere else is measurably wasting
 its own ledgered bill.
 
+### The aggressive posture
+
+**The supervisor errs toward intervention.** (Operator ruling: the
+supervisor pays attention and steers aggressively, including the
+interrupt.) The payoff is asymmetric by constitution: a steer costs tokens
+— reported, leashed — while under-intervention costs wall clock, the
+objective: a flailing shape left to churn, a known-useless turn left to
+drain a port slot, a mis-routed pin left to burn a run. The module's own
+implementation trigger is the measured form of under-supervision ("nobody
+was watching"), so passivity is the recorded failure mode, not the safe
+default. The same evidence discipline that legalizes a steer ("survival
+0.31 over 14 samples") is what makes aggression safe: an aggressive
+supervisor is one that acts on evidence *early*, never one that acts
+without it.
+
+**The interrupt is the sharpest tool in the vocabulary, and the supervisor
+is expected to use it.** `Abort` kills a turn mid-flight through the
+enactor (the discontinue — `20-medium.md` § delivery), and killing
+known-useless work immediately is constitutionally cheaper than any
+politeness; `Abort` with a redirect note is the steer-*now* form (kill,
+reissue with guidance — the only mid-turn steering an LLM can mechanically
+receive, § the steering vocabulary). What keeps aggression from becoming
+thrash is recorded where the powers are: every steer is evented with its
+evidence (F18), the cadence law keeps every intervention off the dispatch
+path, and steer-versus-outcome is auditable per session — a supervisor
+whose kills cost more than they saved is visible in its own ledgered bill
+(§ the bill), and "who supervises the supervisor" already has its three
+answers (§ beside the machine).
+
 ## The cadence law
 
 **The supervisor lives at settlement granularity and is never on the
@@ -633,17 +668,27 @@ module Steer : sig
         delta : Ledger.Delta_ref.t option;
         disposition : [ `Continue | `Patch_then_continue ];
       }
-        (** Steer a running node: a supervisory note delivered at the
-            node's next yield — the queued lane, the fiber's only
-            listening point (§ notes at yield). A note that kills is
-            [Abort], one act per constructor: kills are interrupts, never
-            dispositions (20-medium.md § delivery). *)
-    | Abort of { node : Ledger.node Id.t }
-        (** Kill: the existing squash path, with the typed cause
+        (** Steer a running node: a bus publication bearing the node's id,
+            materialized by its default subscription and drained at its
+            next yield — the fiber's only listening point (§ notes at
+            yield). [node] is an attribute, never an envelope: any
+            subscriber to the same attribute reads it too. A note that
+            kills is [Abort], one act per constructor: kills are
+            enactments, never dispositions (20-medium.md § delivery). *)
+    | Abort of { node : Ledger.node Id.t; redirect : string option }
+        (** Kill, now: the enactor's discontinue through the existing
+            squash path, with the typed cause
             [Ledger.Squash_cause.Supervisor_abort { reason }] (the reason
-            copied from this steer's event). The interrupt mode's
-            supervisory entry. Squash precision is the engine's,
-            untouched: the provenance-closed subtree, nothing renumbered. *)
+            copied from this steer's event). The supervisor's interrupt —
+            its sharpest steer (§ the aggressive posture). [redirect],
+            when present, is guidance for the reissue: it rides the
+            reissued node's diagnostics in the repair-lane shape
+            (30-scheduling.md § the repair lane), because
+            kill-and-reissue-with-guidance is the only mid-turn steering
+            an LLM can mechanically receive. The act is still one act —
+            the kill; reissue remains the scheduler's recorded decision,
+            and squash precision is the engine's, untouched: the
+            provenance-closed subtree, nothing renumbered. *)
     | Bump_pin of {
         statement : Theory.Statement.id;
         executor : Theory.Executor.id;

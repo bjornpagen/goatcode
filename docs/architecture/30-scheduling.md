@@ -255,10 +255,13 @@ perspective*, and routes as such. Drift class is judged per consumer, not
 per contract.
 
 **The engine ships signals; the scheduler owns the loop.** No retry,
-reissue, or repair happens below the scheduler. Every route above is a
-scheduler decision appended to the ledger with its reason (the diff class,
-the counters consulted). A node is never surprised by its own re-execution;
-a reader of the ledger can always answer "why did this run twice."
+reissue, or repair happens below the scheduler — the scheduler is the
+bus's one enactor (`00-product.md` § the medium is a bus): facts publish,
+folds deliver, and only this loop dispatches, wakes, kills, or reissues.
+Every route above is a scheduler decision appended to the ledger with its
+reason (the diff class, the counters consulted). A node is never surprised
+by its own re-execution; a reader of the ledger can always answer "why did
+this run twice."
 
 The table has four consumers, one per place drift can surface: the
 **refresher** at a producer's landing (each pending hypothesis judged
@@ -291,8 +294,9 @@ Every node settles exactly once, as one of:
   suspended read whose operand can never be served, settled so the run
   quiesces); **supervisor abort** (`Supervisor_abort { reason }` — the
   supervisor's kill, traceable to the `Steered` event that ordered it,
-  never spelled as an operator abort — `40-agents.md` § the steering
-  vocabulary); or operator abort. Reissue-losers and starved reads are
+  never spelled as an operator abort; when the steer carried a redirect
+  note, the reissue's dispatch carries it as repair-lane diagnostics —
+  `40-agents.md` § the steering vocabulary); or operator abort. Reissue-losers and starved reads are
   never spelled as operator aborts — a reader of the settled map sees the
   real cause, whoever acted.
 

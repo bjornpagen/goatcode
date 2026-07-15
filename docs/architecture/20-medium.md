@@ -1,38 +1,55 @@
 # 20 — The Medium
 
 The movement layer: the two substrates everything travels through — the
-**ledger** (communication) and the **one shared tree** (memory) — and the
-laws that keep them coherent. Facts, progress, drift, and messages all move
-here. Readers: the `Channel`, `Ledger`, `Witness`, and `Retire.Frontier`
-modules; `30-scheduling.md` (which consumes readiness, hypotheses, and
-witnesses); `40-agents.md` (which consumes delivery and grants).
+**bus** (the ledger: communication) and the **one shared tree** (the
+cache: memory) — and the laws that keep them coherent. Facts, progress,
+drift, and messages all move here. Readers: the `Channel`, `Ledger`,
+`Witness`, and `Retire.Frontier` modules; `30-scheduling.md` (which
+consumes readiness, hypotheses, and witnesses); `40-agents.md` (which
+consumes delivery and grants).
 
-## The two substrates
+## The bus and the cache
 
 Pike's proverb is this layer's constitution (`00-product.md` § the two
 co-equal bets): **share memory by communicating, never communicate by
 sharing memory.** The tree is never a coordination channel — no participant
 infers another's progress from bytes; all coherence travels as evented
 facts on the ledger, and the tree is a **cache** of the ledger's live
-frontier. The analogy is exact, and every row is landed or normative
-machinery:
+frontier. And the ledger is not one channel among several — it is **the
+bus**, the system's only communication object (`00-product.md` § the
+medium is a bus): publication is appending to the one totally-ordered
+stream; delivery is a subscription folded over it; every surface this doc
+describes — channels, invalidations, notes, messages, escalations — is a
+fold. One bus, many folds. The coherence analogy is exact, and every row
+is landed or normative machinery:
 
 | Coherence protocol | GOAT CODE |
 |---|---|
 | The shared cache | The one working tree |
-| The directory | The witness index (`Ledger.Witness_index`) |
+| The bus | The ledger: one totally-ordered append-only event stream |
+| The directory (filtered delivery) | Subscription tables; the witness index (`Ledger.Witness_index`) |
 | Bus write traffic | Store events with delta refs |
 | Invalidations | Invalidations (`Channel.invalidate`) |
-| Snoop responses | Drift notes at yield, footprint-filtered |
+| Snoop responses | Drift notes at yield, subscription-filtered |
 | A snoop hit on a dirty line | A read of a neighbor's uncommitted store — a `Store_buffer` hypothesis with the landed refresher |
 | Write-back | Retirement: the committed coordinate advances |
+
+Silicon had to choose between the snoopy bus (everyone sees everything;
+dies on bandwidth) and the directory (filtered delivery; complex). Agents
+lack the constraint that forced the choice — the bus carries small
+payload-free facts and nobody's context window receives anything its
+subscription didn't ask for — so this design takes both: **broadcast
+semantics with directory economics.**
 
 The flat org is not new machinery; it is the recognition that per-node
 isolation (private worktrees) was a *second* coherence mechanism running
 beside the one the ledger already implements, and doc rule 8 says delete
 the duplicate. Same repo, no branches, no worktrees: workers read
 ambiently within their grants, sense each other through witnessed state,
-and converge continuously instead of merging terminally.
+and converge continuously instead of merging terminally. The bus is the
+same recognition one level up: addressed delivery lanes were a *second
+routing mechanism* running beside subscriptions, and the duplicate is
+deleted the same way.
 
 ## The ledger
 
@@ -60,6 +77,13 @@ every settlement, every message and steer is reconstructible from it.
    (below), consumed by conflict detection at retire (`30-scheduling.md`).
 5. **Supervision** — the supervisor's subscription-filtered escalation query
    and drill-down surface, pull-only (`40-agents.md` § the fifth reader).
+
+Beside the named analytical readers, **every delivery to a participant is
+the same shape**: a subscription table folded over the stream (§ the
+subscription discipline). A worker's note drain and the supervisor's
+escalation feed are not two mechanisms — they are two tables on one bus,
+which is what makes every delivery replayable as a pure fold
+(`50-api.md` § replay determinism).
 
 ## Event taxonomy
 
@@ -267,8 +291,10 @@ The falsifiers holding all of this are FL1–FL7 (`50-api.md`).
 
 ## Channels: pre-opened, typed by witness
 
-A channel is a relation's tuple log. **Every channel exists at admission,
-before any node runs.** Inheritance stated once: s6/systemd socket
+A channel is a relation's tuple log — under the bus, the system's oldest
+fold: the theory-compiled standing subscription to one relation's
+committed tuples, typed. **Every channel exists at admission, before any
+node runs.** Inheritance stated once: s6/systemd socket
 activation — the supervisor opens all sockets first, so services start in
 any order and dependency resolves at first read, with the kernel buffering
 in between. Here the theory's relations are all "opened" (allocated, typed,
@@ -310,19 +336,30 @@ relation graph stopped being the *only* legal contact between
 participants. Communication rides messages (§ below), and messages derive
 nothing.
 
-## Messages, and no walls
+## The bus: publication, subscription, no walls
 
-**Any participant may address any other — worker to worker, worker to
-supervisor, on or off the declared dependency edges. Declared structure is
-advisory: a filter that tunes delivery, never a wall that forbids flow.**
-The operator ruling, verbatim: *"just like agents want to, they should be
-able to cut through the crap and talk with anyone they like. there are no
-hard policy walls."*
+**Communication is publication. A participant does not send to anyone; it
+publishes a fact on the bus, and delivery is decided entirely by
+receivers' subscriptions.** The operator rulings, verbatim: *"just like
+agents want to, they should be able to cut through the crap and talk with
+anyone they like. there are no hard policy walls"* — and the completion:
+the entire coherence protocol is an event bus, because *agents have no
+privacy* (`00-product.md` § the medium is a bus).
 
-A **message** is an evented fact:
-`{ from : participant; to : participant | broadcast; payload_ref; provenance }`
-— appended to the ledger before it is anything else, payload in the object
-store, sender provenance total. What makes wall-less messaging safe is the
+A **message** is an evented fact with attributes, not an envelope:
+
+```
+Message { from : participant; about : attribute list; payload_ref; provenance }
+```
+
+— appended to the bus before it is anything else, payload in the object
+store, sender provenance total, **no addressee field**. `about` carries
+attributes a subscription can match — a node id, a relation, a path, a
+topic — so "a note for node n" is a publication bearing n's id that n's
+default subscription materializes, and nothing stops a sibling from
+subscribing to the same attribute. Eavesdropping is not a violation; it is
+the observational-learning capability the bus grants for free, and it is
+witnessed like every other read. What makes the wall-less bus safe is the
 medium, not topology (`00-product.md` § the two graphs):
 
 - **Every message is witnessed on read.** A receiver's pull of a message is
@@ -337,34 +374,45 @@ medium, not topology (`00-product.md` § the two graphs):
   them (`10-theory.md` § feedback is forward, scope note). A message that
   needs to *produce work* is a forward relation the theory hasn't declared
   yet.
-- **Messages inform; settlements actuate.** No message kills, re-fires, or
-  commits anything. Interrupt-class actuation (§ delivery) belongs to the
-  judgment hierarchy — scheduler, supervisor, operator — because a kill
-  spends shared wall clock.
+- **Messages inform; settlements actuate; the scheduler enacts.** No
+  message kills, re-fires, or commits anything — facts and actuations are
+  essentially different, and the bus carries only facts (`00-product.md`
+  § the medium is a bus). Interrupt-class actuation (§ delivery) belongs
+  to the judgment hierarchy — scheduler mechanically, supervisor with
+  evidence, operator sovereignly — because a kill spends shared wall
+  clock.
 
 Engine-authored drift notes, supervisor notes (`40-agents.md` § the
-steering vocabulary, `Note`), and peer messages are **one kind**: they
-share the delivery lane (the yield-time note sum), the subscription
-discipline (§ below), and the eventing. The supervisor's `Note` steer is
-simply the first message class built.
+steering vocabulary, `Note`), and peer messages are **one kind**: bus
+publications distinguished by attributes, materialized by the receiver's
+table, drained at yield as one note sum. Four delivery mechanisms
+collapsed into rows.
 
-**Decision — no walls.** **Alternative:** flow only on declared edges
-(the prior "unidirectional, permanently" ruling read as a communication
-law) — lost because the protection it bought (squash precision) is a
-provenance-and-witness property the medium already provides, making the
-topology wall a duplicate coherence mechanism (doc rule 8: delete the
-duplicate — the argument that killed worktrees, applied to routing); and
-because walls forbid the ambient sensing the flat org exists to grant.
-The derivation half of the old ruling is retained permanently
-(`10-theory.md`). **The honest cost:** off-edge chatter has no static
-termination story; the backstops own it (`30-scheduling.md`), and message
-volume is a counter (`50-api.md`). **Reverses (walls return) if:** ledger
-evidence shows off-edge messaging producing coherence failures the witness
-machinery cannot convict, or message-driven token spend that the
-subscription discipline cannot bound.
+**Decision — the bus: no walls, and no envelopes either.**
+**Alternative:** flow only on declared edges (the prior "unidirectional,
+permanently" ruling read as a communication law) — lost because the
+protection it bought (squash precision) is a provenance-and-witness
+property the medium already provides, making the topology wall a duplicate
+coherence mechanism (doc rule 8: delete the duplicate — the argument that
+killed worktrees, applied to routing); and because walls forbid the
+ambient sensing the flat org exists to grant. **Alternative:** wall-less
+but addressed — keep a `to:` field and per-pair delivery lanes — lost
+because the envelope is a second routing mechanism beside subscriptions
+(the same duplicate, one layer up), because it re-imports a privacy
+distinction no agent holds (an addressed message a third party may not
+read is confidentiality machinery serving nobody), and because it
+preserves the drift-note/supervisor-note/peer-message/escalation split as
+four mechanisms where one table suffices. The derivation half of the old
+unidirectionality ruling is retained permanently (`10-theory.md`).
+**The honest cost:** off-edge chatter has no static termination story; the
+backstops own it (`30-scheduling.md`), and publication volume is a counter
+(`50-api.md`). **Reverses (walls or envelopes return) if:** ledger
+evidence shows bus traffic producing coherence failures the witness
+machinery cannot convict, or message-driven token spend the subscription
+discipline cannot bound — the counters name the evidence.
 
 **Status: doc-resident until its trigger.** The message event class and
-peer-to-peer sends are unbuilt; the delivered note sum and the supervisor's
+peer publications are unbuilt; the delivered note sum and the supervisor's
 `Note` are the designed carriers (`40-agents.md`). *Trigger: the first
 censused workload where a worker's knowledge would change a sibling's
 in-flight work and the drift machinery doesn't already carry it — or the
@@ -392,17 +440,21 @@ which changes the economics, not the semantics.
 
 ## Footprint filtering, and the escape surfaces
 
-Forwarding every event to every dependent is snooping without a filter. Each
-edge carries a **footprint declaration** compiled from its contract: the ref
-slots it reads plus a file-glob grant. An invalidation forwards down an edge
-only when its address intersects the edge's declared footprint. Two
-consequences:
+Delivering every publication to every participant is a bus without a
+directory. Each edge carries a **footprint declaration** compiled from its
+contract — the ref slots it reads plus a file-glob grant — and the
+compilation target is the subscription discipline: the declaration becomes
+the consumer's **default subscription rows** (§ the subscription
+discipline), so an invalidation is materialized for a consumer only when
+its address matches a row. Two consequences:
 
-- The theory author never writes routing; routing is derived from what the
-  contract says the consumer depends on.
+- The theory author never writes routing; the default routing is derived
+  from what the contract says the consumer depends on, and the participant
+  amends from there (widening is legal — that is what "cut through the
+  crap" compiles to).
 - **The declaration is a filter, never a wall** — the general principle the
-  no-walls ruling elevated to doctrine. Correctness comes from the observed
-  witness; the declaration only tunes delivery and attribution.
+  bus ruling made structural. Correctness comes from the observed witness;
+  the declaration only tunes delivery and attribution.
 
 Two escape classes, two mechanisms:
 
@@ -438,7 +490,9 @@ dies with it, and provenance already links them.
 it is three channels, now ambient: (a) snoop reads of the shared tree —
 every read of in-flight state is a tracked hypothesis; (b) drift notes and
 messages at yield, footprint-filtered; (c) the operand and channel
-machinery. Full visibility, leveled interruption (§ delivery).
+machinery. Full visibility, leveled delivery (§ the subscription
+discipline) — and nothing informational ever crosses a turn boundary
+(§ delivery).
 
 **Decision — snoop mounts deleted.** **Alternative:** keep explicit snoop
 mounts as an opt-in sensing surface — lost because the mount was a
@@ -458,86 +512,105 @@ is usually already conforming — making the free-commit case
 (`30-scheduling.md` § the generation-witness protocol) the common case.
 Reader: `30-scheduling.md`'s hypothesis refresher.
 
-## Delivery: the two modes
+## Delivery: subscription levels, and the enactor
 
-The constitutional derivation is in `00-product.md` § the two message
-modes; the mechanics:
+The constitutional derivation is in `00-product.md` § the medium is a bus;
+the mechanics:
 
-**Queued (the default): check-on-yield.** Invalidations, drift notes, and
-messages are delivered at the receiver's yield points — between tool calls,
-at its fiber's suspension — coalesced, read together. The delivered form is
-compact (a contract-drift note, a schema diff, a message digest); the agent
-decides pull-now vs finish-current-step. The receiving fiber has exactly
-one listening point, and everything queued arrives there as one note sum
-(`40-agents.md` § notes at yield).
+**Delivery is queued, always: check-on-yield.** Invalidations, drift
+notes, and messages are materialized by the receiver's subscription and
+drained at its yield points — between tool calls, at its fiber's
+suspension — coalesced, read together. The delivered form is compact (a
+contract-drift note, a schema diff, a message digest); the agent decides
+pull-now vs finish-current-step. The receiving fiber has exactly one
+listening point, and everything queued arrives there as one note sum
+(`40-agents.md` § notes at yield). There is no second delivery mode:
+nothing informational ever crosses a turn boundary.
 
-**Interrupt (the exception): kill-now.** An interrupt is delivered *now*,
-mid-turn, by discontinuing the fiber — the squash path, already built: the
-stack unwinds, finalizers run, the node settles with its typed cause, and
-reissue (with the redirect in the new dispatch) is the scheduler's
-recorded decision. An LLM cannot absorb a mid-token interrupt — the call
-completes or is wasted — so there is no "pause and reconsider" middle
+**The kill is not a delivery: it is the enactor's act.** When a turn must
+stop *now* — a dead hypothesis, a known-useless turn, a wall-clock
+emergency — nothing is sent to the agent at all: the scheduler
+discontinues the fiber (the squash path, already built — stack unwinds,
+finalizers run, the node settles with its typed cause) and the settlement
+fact publishes on the bus for everyone else's folds. Reissue — with the
+supervisor's redirect guidance in the new dispatch, when the kill carried
+one (`40-agents.md` § the steering vocabulary) — is the scheduler's
+recorded decision. An LLM cannot absorb a mid-token interrupt (the call
+completes or is wasted), so there is no "pause and reconsider" middle
 state: interrupt ≡ discontinue, abort by construction, applied to
 attention. Wasting the in-flight turn's tokens is the point, and it is
 constitutional: wall clock outranks spend, and a turn known to be useless
-is cheapest dead. Who may interrupt: the scheduler (mechanically, via the
-drift table and squash causes), the supervisor (an `Abort` steer, evented
-with evidence), the operator (sovereign). A worker may not — it sends a
-message and the judgment hierarchy decides (§ messages).
+is cheapest dead. Who commands the enactor: the scheduler itself
+(mechanically, via the drift table and squash causes), the supervisor (an
+`Abort` steer, evented with evidence — its sharpest tool, and it is
+expected to use it, `40-agents.md` § the aggressive posture), the operator
+(sovereign). A worker may not — it publishes, and the judgment hierarchy
+decides (§ the bus).
 
-**Decision — interrupts are first-class, overturning check-on-yield-only.**
-The prior ruling deferred mid-flight interruption ("an agent mid-tool-call
-cannot absorb an interrupt anyway; turn-restarts cost a full context
-replay") and recorded hypothesis-killing invalidations as the upgrade
-class. The upgrade is hereby taken, on the recorded path: the one class
-worth a wasted call is exactly the kill — a dead hypothesis, a
-known-useless turn, a wall-clock emergency — and the fiber substrate
-delivers it as discontinue with real finalizers, already falsified
-(FB2/FM2). What check-on-yield protected survives intact: nothing
-*informational* interrupts a turn; reconsideration is always queued.
-**Alternative:** stay yield-only and let a known-dead turn run to
-completion — lost by constitution: it waits to save tokens.
-**Reverses if:** measured interrupt-reissue cycles (kill, redispatch,
-re-acquire context) exceeding the cost of letting turns drain, per shape —
-the ledger names the comparison; the concession would be raising the
-interrupt threshold, never deleting the mode.
+**Decision — the interrupt is first-class, as an enactment, overturning
+check-on-yield-only.** The prior ruling deferred mid-flight interruption
+("an agent mid-tool-call cannot absorb an interrupt anyway; turn-restarts
+cost a full context replay") and recorded hypothesis-killing invalidations
+as the upgrade class. The upgrade is hereby taken, on the recorded path:
+the one class worth a wasted call is exactly the kill, and the fiber
+substrate delivers it as discontinue with real finalizers, already
+falsified (FB2/FM2). The bus reframe then classified it correctly: the
+kill was never a message — modelling it as one (a "stop" delivery the
+receiver honors) would make squash a convention an agent could catch and
+swallow, which is precisely what the squash-mark exists to prevent
+(`docs/effects-evaluation.md`, sharp edge 5). What check-on-yield
+protected survives intact: nothing informational interrupts a turn;
+reconsideration is always queued. **Alternative:** stay yield-only and let
+a known-dead turn run to completion — lost by constitution: it waits to
+save tokens. **Reverses if:** measured interrupt-reissue cycles (kill,
+redispatch, re-acquire context) exceeding the cost of letting turns drain,
+per shape — the ledger names the comparison; the concession would be
+raising the kill threshold, never deleting the enactment.
 
 ## The subscription discipline
 
-**Every participant has a subscription table — rows of event class ×
-threshold → level — and the levels are one closed scale:**
+**Every participant has a subscription table — rows of attribute/class ×
+threshold → level — and it is the only delivery mechanism in the system.**
+The levels are one closed scale:
 
-- **Mute** — ledger-only: available to pull, never delivered.
+- **Mute** — bus-only: available to pull, never delivered.
 - **Digest** — coalesced into the receiver's next yield (a worker's note
   drain, the supervisor's next turn).
-- **Wake** — act now: resume a suspended fiber to read it; queue a
-  supervisor turn immediately; for a mid-turn worker, Wake cannot cross
-  the turn boundary — only a kill can (§ delivery), so a Wake-leveled row
-  for a running worker means "first thing at the next yield, and wake the
-  fiber if suspended."
+- **Wake** — act at the earliest legal moment: resume a suspended fiber to
+  read it; queue a supervisor turn immediately. For a mid-turn worker,
+  Wake cannot cross the turn boundary — only the enactor's kill can
+  (§ delivery) — so a Wake row for a running worker means "first thing at
+  the next yield, and wake the fiber if suspended."
 
 The table is data — inspectable, amendable mid-run (the amendment is
 itself an evented act), replayable as a fold of the default plus recorded
-amendments. The supervisor's table (`40-agents.md` § the fifth reader) is
-this mechanism at the supervision plane; workers get the same shape with
-template-declared rows, defaulting to Digest for drift notes and addressed
-messages, Mute for everything else. This is the invalidate-don't-update
-posture applied to every context window in the system: the scarcest
-resource a standing participant has is its context, and per-event
-play-by-play fills it exactly the way update-flooding fills a bus.
+amendments. **Defaults are compiled from the theory**: a node's declared
+footprint (§ footprint filtering) compiles to its default Digest rows —
+in-footprint invalidations, drift notes, publications bearing its id — and
+everything else defaults Mute; declared structure is thereby exactly what
+the two-graphs ruling says it is, a delivery *default*, widened or
+narrowed by amendment because structure is advisory. The supervisor's
+table (`40-agents.md` § the fifth reader) is this same mechanism at the
+supervision plane — one discipline, no worker/supervisor asymmetry. This
+is the invalidate-don't-update posture applied to every context window in
+the system: the scarcest resource a standing participant has is its
+context, and per-event play-by-play fills it exactly the way
+update-flooding floods a bus.
 
 ## OPEN items
 
-- **The message event class** — doc-resident, trigger recorded (§ messages).
+- **The message event class** — doc-resident, trigger recorded (§ the
+  bus); attributes-only, no addressee field.
 - **Invalidation coalescing window.** A producer emitting ten stores to one
   address in one turn should invalidate once. v0: coalesce per yield (the
   producer's own turn boundary). *Trigger: measured invalidation volume
   annoying consumers (token cost of drift notes in agent context, a ledger
   query).*
 - **Worker subscription surface.** The supervisor's table is designed; the
-  worker-side declaration (template-declared rows) has no surface yet.
-  *Trigger: the message event class landing — the first sender needs a
-  receiver discipline.*
+  worker-side table (theory-compiled defaults plus amendments) has no
+  declaration surface yet — today the compiled footprint filter IS the
+  worker's effective table, unamendable. *Trigger: the message event class
+  landing — the first publisher needs a receiver discipline.*
 - **Hygiene cadence.** Lazy convergence runs at boot and quiescence;
   whether long runs want a mid-run sweep (port-idle moments) is unmeasured.
   *Trigger: FL-suite or live evidence of agents reading dead bytes in the

@@ -87,16 +87,19 @@ unrepresentable (`10-theory.md` § feedback is forward). This is what makes
 termination statically decidable (weak acyclicity at admission) and squash
 precision provable. It never softens. **Reverses if: never.**
 
-**The communication graph is wall-less.** Any participant — worker,
-supervisor, operator — may read about or address any other, on or off the
-declared dependency edges. Declared structure (footprints, edges,
-subscriptions) is **advisory: a filter that tunes delivery, never a wall
-that forbids flow.** What makes this safe is not topology but the medium:
-every message is an evented fact with provenance, every read of one is a
-witnessed observation, so a squashed sender's messages are dead provenance
-and their consumers are cascade-squashed or refused at retire exactly as if
-they had read a dead file draft (`20-medium.md` § no walls). The machinery
-that makes the shared tree safe makes the message layer safe, unchanged.
+**The communication graph is the bus — wall-less by representation.** Any
+participant — worker, supervisor, operator — reads any other's published
+facts, on or off the declared dependency edges. Declared structure
+(footprints, edges, subscriptions) is **advisory: a filter that tunes
+delivery, never a wall that forbids flow** — and under the bus (§ the
+medium is a bus) this is not a permission but a fact of the medium: there
+is no addressed pipe for a wall to guard. What makes it safe is not
+topology: every publication is an evented fact with provenance, every read
+of one is a witnessed observation, so a squashed sender's publications are
+dead provenance and their consumers are cascade-squashed or refused at
+retire exactly as if they had read a dead file draft (`20-medium.md`
+§ the bus). The machinery that makes the shared tree safe makes the
+message layer safe, unchanged.
 
 **Decision — walls fall at the communication layer.** The prior doctrine
 ("channels are unidirectional, permanently; message/mailbox is deleted
@@ -121,32 +124,63 @@ witness machinery cannot convict, or backstop-bound runaways dominated by
 message-driven firings — the counters name the evidence
 (`50-api.md` § the speculation counters).
 
-## The two message modes
+## The medium is a bus
 
-Both modes exist because a system whose scarce resource is wall clock needs
-both; mechanics live in `20-medium.md` § delivery, the constitutional
-derivation lives here:
+Pike's bet, taken to its fixed point: **the ledger is not one communication
+channel among several — it is the only one.** The medium is an event bus:
+publication is appending a fact to the one totally-ordered stream; delivery
+is a subscription — a per-participant table of filters folded over that
+stream; and everything these docs once needed as a distinct surface —
+channels, edges, drift notes, supervisor notes, peer messages, escalations
+— is one mechanism wearing different rows. **One bus, many folds**
+(`20-medium.md` § the bus).
 
-- **Queued** (the default): invalidations, drift notes, digests, peer
-  messages — coalesced, delivered at the receiver's yield points, read
-  together at the receiver's leisure. Cheap; share-by-communicating in its
-  ordinary form.
-- **Interrupt** (the exception): urgent stop or redirect, delivered *now*,
-  deliberately wasting the in-flight turn's tokens. This is constitutional,
-  not a policy exception: wall clock outranks token spend, so a killed turn
-  is cheaper than a completed useless one. An LLM cannot absorb a mid-token
-  interrupt — the turn completes or is wasted — so interrupt is
-  fundamentally **kill-now** (discontinue the fiber; reissue if the redirect
-  wants a fresh start), never "gently rethink." Abort by construction,
-  applied to attention.
+This is a coordinate change in the lineage's exact sense (the half-open
+interval, homogeneous coordinates): in point-to-point coordinates, "who
+may talk to whom" is policy — four delivery mechanisms, addressed
+envelopes, walls to argue about. In bus coordinates those cases are not
+handled; they are unrepresentable as distinct things. A message has no
+addressee, only attributes a subscription can match; exclusion is not a
+state the system can express, because no private pipe exists to be
+excluded from.
 
-Every participant has a **subscription discipline** — Mute / Digest / Wake,
-a table as data — governing what reaches it and at which level
-(`20-medium.md` § the subscription discipline). Informing is universal;
-**killing is not**: interrupt-class actuation belongs to the judgment
-hierarchy (the scheduler mechanically, the supervisor with evidence, the
-operator sovereignly), because a kill spends a shared wall-clock resource.
-Messages inform; settlements actuate.
+**Agents have no privacy, and the design says so out loud.** Silicon
+abandoned the snoopy bus for directories because of physical bandwidth;
+organizations avoid broadcast because of confidentiality. Agents have
+neither constraint: the bus carries small payload-free facts (payloads are
+pulled — `20-medium.md` § invalidate, don't update), and no agent holds a
+confidentiality interest against another. So GOAT CODE gets the synthesis
+silicon couldn't have — **broadcast semantics with directory economics** —
+plus a capability nothing had to be built for: any participant may
+subscribe to any other's traffic, so watching a sibling's drift storms and
+repair attempts (and adjusting) is observational learning at zero
+machinery. The line that stays hard: **information is universal; authority
+is typed.** Reading anything is free; causing anything — a mint, a commit,
+a kill — remains a typed power with a named holder (`40-agents.md`
+§ unforgeability).
+
+**Facts and actuations are essentially different, and the bus carries only
+facts.** This is Brooks's essential-complexity line, drawn once, on
+purpose: a delivered fact informs a participant at its own pace; an
+actuation — dispatch a node, wake a fiber, kill a turn — targets one thing
+and takes effect regardless of the target's cooperation. Forcing
+actuations onto the bus as "messages the receiver honors" would hide the
+branching inside a convention (a kill an agent could ignore is not a
+kill). So the bus has exactly one enactor: **the scheduler is the only
+entity with hands.** A kill is never delivered — the fiber is discontinued
+and the settlement fact is published for everyone's folds; nothing was
+"sent" to the dying agent. Interrupt capability survives at full strength:
+it is constitutional (wall clock outranks the tokens a killed turn wastes,
+so a known-useless turn is cheapest dead), it is the supervisor's sharpest
+steer (`40-agents.md` § the aggressive posture), and an LLM mid-token can
+absorb nothing gentler — kill-and-reissue-with-guidance is what "redirect"
+mechanically is. But it is an enactment, not a message mode. **Messages
+inform; settlements actuate; the scheduler enacts.**
+
+Every participant reads the bus through a **subscription discipline** —
+Mute / Digest / Wake, a table as data, defaults compiled from the theory's
+declared structure, amendable because structure is advisory
+(`20-medium.md` § the subscription discipline).
 
 ## The machine analogy, and where it ends
 
@@ -159,7 +193,7 @@ design actually implements:
 | Register rename | Contract issuance; fresh-existential minting (`10-theory.md`) |
 | Issue on operand readiness | Read-time operand binding under eager start (`30-scheduling.md`) |
 | Speculative issue | Hypothesis tuples taken at blocking reads (`30-scheduling.md`) |
-| Bypass network | Invalidation channels + pulled net deltas (`20-medium.md`) |
+| Snoop/bypass network | The event bus: published invalidations + pulled net deltas (`20-medium.md`) |
 | Shared cache + coherence directory | The one working tree + the witness index (`20-medium.md`) |
 | Store buffer | Per-writer blob lineage in the object store; in-flight frontier tops (`20-medium.md`) |
 | Memory disambiguation | Footprint-intersection conflict detection (`30-scheduling.md`) |
@@ -249,11 +283,11 @@ does not exist — every ledger append is monotone.
   replayable by design but resume is an OPEN item. Durability products
   (queues, workflow runtimes) sit around GOAT CODE, never inside it.
 - **Not a general agent framework.** One shape: theory in, settled map out.
-- **Not a chat platform.** Any participant may address any other (§ the two
-  graphs), but every message is a typed, evented fact on the ledger with
-  provenance — an unrecorded conversation is unrepresentable. What is
-  excluded is not communication; it is communication that leaves no
-  evidence.
+- **Not a chat platform.** Any participant may publish for any other
+  (§ the medium is a bus), but every message is a typed, evented fact on
+  the bus with provenance — an unrecorded conversation is unrepresentable,
+  and so is a private one. What is excluded is not communication; it is
+  communication that leaves no evidence.
 - **Not a prompt library.** Prompts are derived artifacts (`10-theory.md`
   § contracts); a hand-authored per-node prompt is a bug.
 - **Not model-agnostic middleware.** Two providers are wired — Anthropic
@@ -278,11 +312,16 @@ concept the design replaces with something sharper:
   session that watches and steers — `40-agents.md`). The word that blurs
   them is banned.
 - **"Chat", "conversation"** (between agents) — a message is a typed,
-  evented, provenance-carrying fact (`20-medium.md` § messages); prose that
+  evented, provenance-carrying fact (`20-medium.md` § the bus); prose that
   lives only in someone's context window is unrepresentable. (*"Message"
   itself is reinstated vocabulary* — it was banned while messages meant
   unevented prose; the medium now defines them as first-class facts, and the
   ban moves to the unevented kind.)
+- **"Envelope", "addressed delivery", "point-to-point"** (as communication
+  mechanisms) — publication and subscription are the only routing. A
+  message's intended reader is an attribute a subscription matches, never
+  a wall around a pipe; the pipe itself is deleted vocabulary
+  (`20-medium.md` § the bus).
 - **"Retry"** (as an engine behavior) — the engine ships typed signals;
   *reissue* is a scheduler decision with a recorded reason.
 - **"Sub-task"** — a node is not a fraction of anything; it is a rule firing
@@ -327,10 +366,21 @@ concept the design replaces with something sharper:
   communicating. GOAT CODE's reading is architectural, not stylistic — the
   ledger is the communication substrate, the tree the shared memory it
   keeps coherent (§ the two co-equal bets).
-- **Directory-based cache coherence (MESI lineage)**: the flat org's exact
-  shape — a shared cache whose coherence lives in a directory (the witness
-  index), invalidation-based, write-back at retirement (`20-medium.md`
-  § the two substrates).
+- **Cache coherence, both families (snoopy bus and MESI-lineage
+  directories)**: the flat org is their synthesis — one broadcast medium
+  (the bus) whose delivery is directory-filtered (subscriptions,
+  invalidations, pulled payloads), because agents lack both constraints
+  that forced silicon and organizations to pick a side: physical bandwidth
+  and privacy (§ the medium is a bus; `20-medium.md`).
+- **The log as the message broker (Kreps, "The Log", 2013; Kafka)**: a
+  single totally-ordered append-only log IS the bus, and consumers are
+  cursors — folds with positions. The ledger-plus-subscriptions shape is
+  this insight applied where the events are agent actions.
+- **Linda tuplespaces (Gelernter) and blackboard architectures**:
+  generative communication — facts published into a shared space with no
+  addressee, consumed by pattern-match. The theory already fires
+  statements by pattern; the bus makes the communication layer speak the
+  derivation layer's own idiom.
 - **Event sourcing**: append-only facts, corrections as new events, state
   as a fold — the ledger's discipline, now extended to the working tree
   itself (validity as a ledger coordinate).

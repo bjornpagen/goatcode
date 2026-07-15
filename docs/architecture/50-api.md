@@ -360,6 +360,13 @@ doc:
   `Supervisor` module). An arbitrarily slow rigged supervisor turn changes
   no unrelated node's dispatch timing; F4's instrumentation extended over
   the feed fold (`40-agents.md` § the cadence law).
+- **F20 — delivery is a fold** (reserved; lands with the message event
+  class and the worker subscription surface). Every materialized delivery
+  — a worker's note drain, a supervisor escalation, an eavesdropper's
+  match — is re-derived from the recorded subscription table folded over
+  the recorded stream, and nothing was delivered that the fold does not
+  re-derive: no unrecorded delivery, no envelope-shaped side lane
+  (`20-medium.md` § the subscription discipline).
 
 **The flat-org roster (FL — lands with the migration steps,
 `README.md` § design of record vs shipped engine):**
@@ -426,8 +433,10 @@ state surfaces as a divergence between the recorded rendering and the
 re-derived one. This is the mechanism behind the no-hidden-state posture
 (`20-medium.md` § the ledger), and the reason `Date.now()`-class
 nondeterminism is banned from the scheduler. It is also what supervision's
-statelessness law leans on (`40-agents.md` § statelessness): supervisor
-escalations are a pure fold over the same trace, re-derived the same way.
+statelessness law leans on (`40-agents.md` § statelessness), and what the
+bus makes universal: every delivery in the system — worker drains,
+supervisor escalations, any subscription's matches — is a pure fold of a
+recorded table over the recorded stream, re-derived the same way (F20).
 
 **What the checker does not do**, stated so the doc and the code cannot
 drift apart: firing order and speculation choices are recorded but *not*
@@ -476,7 +485,7 @@ The ledger-derived counter set, each with its named reader:
 | suspended_reads(shape) | read-suspension time with no hypothesis source | the planner pre-issue OPEN trigger (`30-scheduling.md`) |
 | stale_window | invalidation append → consumer yield latency | the queued-delivery latency evidence (`20-medium.md`) |
 | interrupt_cost(shape) | kill → redispatch → context re-acquisition cost per interrupt | the interrupt-mode reversal trigger (`20-medium.md` § delivery) |
-| message_volume(participant) | messages sent / tokens spent on message-driven work | the no-walls reversal trigger (`00-product.md` § the two graphs); reserved with the message class |
+| publication_volume(participant) | bus publications / tokens spent on message-driven work | the bus ruling's reversal trigger (`20-medium.md` § the bus); reserved with the message class |
 | footprint_escapes(edge) | loads outside the declared footprint | theory authors (`20-medium.md`) |
 | repair_rate(template, pin) | boundary repairs per invocation | the GCD-lane reversal trigger (`40-agents.md`) |
 | retire_latency | ready-to-merged per node | the early-retire reversal trigger (`30-scheduling.md`) |

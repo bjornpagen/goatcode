@@ -113,11 +113,15 @@ objective. Consequences, each a ruling in the architecture docs:
   rollback, no compensation. Witnesses are observed from tool events, never
   self-reported. Retirement is dependency-ordered; squash precision is
   absolute.
-- **Two graphs.** Derivation is a strict forward DAG — feedback is a
-  forward edge firing a new generation, and a backward derivation edge is
-  unrepresentable. Communication is wall-less and witnessed: declared
-  structure filters delivery, never forbids flow; messages are evented
-  facts whose provenance the same squash machinery judges.
+- **Two graphs, one bus.** Derivation is a strict forward DAG — feedback
+  is a forward edge firing a new generation, and a backward derivation
+  edge is unrepresentable. Communication is an event bus: publication and
+  subscription are the only routing, a message has no addressee (agents
+  have no privacy — only attributes a subscription matches), and every
+  publication is a witnessed, provenance-carrying fact the same squash
+  machinery judges. The bus carries facts; the scheduler is the only
+  enactor — a kill is a discontinue plus a published settlement, never a
+  delivered message.
 
 ## The agent harness
 
@@ -230,9 +234,9 @@ the acceptance gate) and the reading order.
 
 | doc | what it owns |
 |---|---|
-| [00 — Product & Philosophy](docs/architecture/00-product.md) | what goat code is and refuses to be: the two co-equal bets (work is data; share memory by communicating), the two graphs, the two message modes, fix-forward |
+| [00 — Product & Philosophy](docs/architecture/00-product.md) | what goat code is and refuses to be: the two co-equal bets (work is data; share memory by communicating), the two graphs, the medium is a bus, fix-forward |
 | [10 — Theory & Contracts](docs/architecture/10-theory.md) | the work representation: relations, spawn statements, laws, admission-as-parse, weak acyclicity; one supply — schema, codec, and prompt prose from one declaration |
-| [20 — The Medium](docs/architecture/20-medium.md) | the ledger and its five readers, mechanized witnesses, validity as a ledger coordinate, channels, messages and no walls, footprint filtering, the two delivery modes |
+| [20 — The Medium](docs/architecture/20-medium.md) | the bus and the cache: the ledger's five readers, mechanized witnesses, validity as a ledger coordinate, publication and subscription (no walls, no envelopes), delivery levels and the enactor |
 | [30 — Scheduling & Commit](docs/architecture/30-scheduling.md) | the chase: eager start, read-time binding, ports, the predictor, backstops, drift routing; retirement, the witness protocol, squash, gates on the shared tree |
 | [40 — Agents & Supervision](docs/architecture/40-agents.md) | executors, tool grants, prompt assembly, model pins, the planner, the git ban; the supervisor — push not pull, the typed steering vocabulary, session succession |
 | [50 — API & Validation](docs/architecture/50-api.md) | declaring, running, and reading a run; the CLI; the falsifier roster, replay determinism, measurement rules |
