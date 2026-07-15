@@ -721,7 +721,7 @@ let build_engine ~repo ~wt ~ledger_path =
         ]
       ~backstops:Speculate.Backstops.default ~switches:[]
       ~merges:Retire.Merge_registry.empty
-      ~seed:[ task_seed "t1" ]
+      ~seed:[ task_seed "t1" ] ()
   in
   (chase, ledger)
 

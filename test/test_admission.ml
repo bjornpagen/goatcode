@@ -106,7 +106,7 @@ let drive_bounded ~theory ~seed ~bindings =
     Chase.create ~theory ~ledger ~committed ~channels
       ~worktree_root:(Filename.concat dir "wt") ~ports ~executors:bindings
       ~backstops:Speculate.Backstops.default ~switches:[]
-      ~merges:Retire.Merge_registry.empty ~seed
+      ~merges:Retire.Merge_registry.empty ~seed ()
   in
   let budget = 10_000 in
   let rec go n =

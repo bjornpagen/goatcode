@@ -70,9 +70,12 @@ val exec :
   (settled, misuse) result
 (** Run one theory to quiescence: pre-open channels, start every derivable
     node at t=0, chase, retire in dependency order, judge laws once
-    against final state, and return the map. Blocking in v0; the fiber
-    substrate is an implementation fact
-    (docs/architecture/70-api.md § running). *)
+    against final state, and return the map. Runs on the cooperative
+    fiber substrate ({!Fiber}): reads park mid-flight, provider calls
+    overlap on one domain, squash discontinues — [exec] drives the
+    scheduler to quiescence. Still one process, one domain
+    (docs/architecture/70-api.md § running;
+    docs/architecture/40-scheduling.md § read-time binding). *)
 
 (** {2 In-flight observation} *)
 

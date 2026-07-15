@@ -461,13 +461,20 @@ let rec map_result f = function
    [provider] field at BIND time — an unknown provider is a config error
    before any node runs, never a mid-run surprise. Both lanes are direct
    API calls behind the harness-owned tool loop (agent.mli owns the
-   no-shell-out ruling). *)
+   no-shell-out ruling), and both post through [Fiber.http_post]: the
+   engine runs every node as a fiber, so the POST is the [Http_post]
+   suspension the scheduler overlaps — N provider turns in flight on one
+   domain (chase.mli [create]). *)
 let provider_runtime (pin : Theory.Pin.t) =
   match pin.provider with
   | "anthropic" ->
-      Ok (Agent.agent ~stop:[] ~provider:(Agent.Provider.anthropic ()))
+      Ok
+        (Agent.agent ~stop:[]
+           ~provider:(Agent.Provider.anthropic ~post:Fiber.http_post ()))
   | "openai" ->
-      Ok (Agent.agent ~stop:[] ~provider:(Agent.Provider.openai ()))
+      Ok
+        (Agent.agent ~stop:[]
+           ~provider:(Agent.Provider.openai ~post:Fiber.http_post ()))
   | other ->
       Error
         (Printf.sprintf

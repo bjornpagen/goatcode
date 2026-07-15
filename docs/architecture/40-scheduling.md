@@ -73,6 +73,22 @@ moment it exists — never the moment its operands are ready:**
   turn is parked at a yield) and resumes on the operand's first
   invalidation.
 
+**The fiber is real, not a figure of speech.** Every dispatched node runs
+as a fiber on the engine's single-domain cooperative scheduler (`Fiber`,
+OCaml 5 effects): the read itself parks mid-flight — continuation held,
+keyed by the awaited address — and a landing wakes exactly the fibers
+parked on the addresses it committed, never a requeue of the whole parked
+population. A woken read holds its admitted slot (the wake key is a
+committed address, so it is witnessed work by construction). Provider
+calls suspend on the `Http_post` instruction, so N model turns overlap on
+one domain with zero preemption and no threads. Squash discontinues the
+fiber: its stack unwinds, `Fun.protect` finalizers (the worktree drop)
+run before the squash returns, and a squashed node cannot execute another
+instruction — squash is scheduler state, never a convention the node
+honors. Scheduling stays deterministic and replay-coherent: FIFO ready
+queue, spawn and wake order fixed by the trace, completion order owned by
+the transport (curl-multi live; scripted in falsifiers FM1–FM4).
+
 **Read-time hypotheses dominate issue-time hypotheses, by construction.**
 The hypothesis is taken as late as the work allows — after the eager prefix,
 often minutes into the producer's own run — so it is taken against a richer
@@ -213,10 +229,12 @@ consumer's suspension point becomes a typed note carrying the class and
 the table's route), and the **rejection site** at retire (a moved witness
 is classified per consumer before anything reissues). Every surfacing
 appends the typed drift note; replay re-judges each recorded route against
-the table. In the v0 synchronous engine a completed attempt cannot patch
-mid-flight, so both reconcile rows route as reissue-with-the-diagnostics —
-the note records the narrower intent; the mechanism converges when the
-fiber substrate makes mid-flight patching real.
+the table. In v0 both reconcile rows route as
+reissue-with-the-diagnostics — a completed attempt cannot patch, and an
+in-flight fiber receives the note at its next yield but has no patch
+protocol yet; the note records the narrower intent, and the substrate now
+carries the suspension points mid-flight patching needs (the remaining
+work is the patch contract, not the scheduler).
 
 ## Settlement
 

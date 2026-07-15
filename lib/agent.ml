@@ -329,6 +329,17 @@ module Provider = struct
 
   type t = { turn : request -> (reply, Ledger.Fault.t) result }
 
+  (* The transport seam: each constructed lane carries its POST as data —
+     blocking for callers outside any fiber scheduler, [Fiber.http_post]
+     when the executor runs inside the chase's fibers (the perform is the
+     suspension the scheduler overlaps). Never a global flag. *)
+  type post = Http.Request.t -> (int * string, Http.error) result
+
+  let blocking_post : post =
+   fun (r : Http.Request.t) ->
+    Http.post_json ~headers:r.headers ~url:r.url ~body:r.body
+      ~timeout_s:r.timeout_s
+
   let usage_of j =
     match jmem "usage" j with
     | Some u ->
@@ -516,7 +527,7 @@ module Provider = struct
                     usage = usage_of json;
                   }))
 
-  let anthropic () =
+  let anthropic ?(post = blocking_post) () =
     let turn (req : request) =
       match Sys.getenv_opt "ANTHROPIC_API_KEY" with
       | None | Some "" ->
@@ -530,14 +541,18 @@ module Provider = struct
               (opt_int req.pin.Theory.Pin.options "timeout_s" ~default:600)
           in
           match
-            Http.post_json
-              ~headers:
-                [
-                  ("x-api-key", key);
-                  ("anthropic-version", "2023-06-01");
-                  ("content-type", "application/json");
-                ]
-              ~url:"https://api.anthropic.com/v1/messages" ~body ~timeout_s
+            post
+              {
+                Http.Request.headers =
+                  [
+                    ("x-api-key", key);
+                    ("anthropic-version", "2023-06-01");
+                    ("content-type", "application/json");
+                  ];
+                url = "https://api.anthropic.com/v1/messages";
+                body;
+                timeout_s;
+              }
           with
           | Error (e : Http.error) ->
               Error
@@ -755,7 +770,7 @@ module Provider = struct
                     usage = usage_of json;
                   }))
 
-  let openai () =
+  let openai ?(post = blocking_post) () =
     let turn (req : request) =
       match Sys.getenv_opt "OPENAI_API_KEY" with
       | None | Some "" ->
@@ -769,13 +784,17 @@ module Provider = struct
               (opt_int req.pin.Theory.Pin.options "timeout_s" ~default:600)
           in
           match
-            Http.post_json
-              ~headers:
-                [
-                  ("authorization", "Bearer " ^ key);
-                  ("content-type", "application/json");
-                ]
-              ~url:"https://api.openai.com/v1/responses" ~body ~timeout_s
+            post
+              {
+                Http.Request.headers =
+                  [
+                    ("authorization", "Bearer " ^ key);
+                    ("content-type", "application/json");
+                  ];
+                url = "https://api.openai.com/v1/responses";
+                body;
+                timeout_s;
+              }
           with
           | Error (e : Http.error) ->
               Error

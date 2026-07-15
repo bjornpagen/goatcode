@@ -19,11 +19,11 @@
 
     Waiting happens at reads, never at issue: a parked fiber costs nothing
     and resumes on an external {!wake} — this module is the runtime
-    chase.mli's parking story mounts on. Where [chase.ml] today keeps
-    [mutable parked : instance list (* suspended reads: cost nothing *)]
-    and requeues the whole list on any retirement, the mount parks {e the
-    read itself} (continuation held, keyed by the address it waits on) and
-    {!wake} resumes exactly the fibers waiting on the address that changed
+    chase.ml's parking story RUNS on. Every dispatched node is a fiber:
+    the read itself parks (continuation held, keyed by the address it
+    waits on) and {!wake} resumes exactly the fibers waiting on the
+    address that changed — the engine's old whole-instance parked list
+    and its requeue-everything-on-any-retirement are gone
     (docs/architecture/40-scheduling.md § read-time binding;
     docs/architecture/30-channels.md § pre-opened channels). *)
 
@@ -211,6 +211,13 @@ val step : t -> [ `Progressed | `Quiescent ]
 
 val run_until_quiescent : t -> unit
 val quiescent : t -> bool
+
+val has_ready : t -> bool
+(** Something is in the ready queue — the next {!step} will run a fiber,
+    not touch the transport. The mount's drain loop (run every ready fiber
+    to its next suspension, then return to the engine) needs exactly this
+    distinction: a drain that reached for the transport would serialize
+    the very calls the substrate exists to overlap. *)
 
 (** {2 Inspection}
 

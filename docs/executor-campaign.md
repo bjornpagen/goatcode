@@ -161,6 +161,48 @@ skeleton. The evaluation doc is a first-class deliverable: what effects
 bought, every sharp edge (untyped effects, one-shot continuations,
 Unhandled, OxCaml quirks), and what it implies for the Rust port trigger.
 
+STATUS: INTEGRATION LANDED (effects-integration pass, 2026-07-14). The
+chase runs every node as a fiber: `dispatch_node` spawns; the body binds
+operands at its own `Fiber.read`s (the whole-instance parked list, its
+requeue-everything on any retirement, and the resume re-read are
+deleted); the substrate's read policy (`policy_read`) answers witnessed/
+hypothesis or parks exactly the fiber on exactly the missing address;
+`retire_success` wakes exactly the fibers parked on the addresses the
+landing committed (`Fiber.wake` per committed head). Squash goes through
+`Fiber.squash`/discontinue everywhere (`purge` carries the settlement's
+cause to every live fiber of a dead node; `resolve_parked` discontinues
+the starved read): worktree custody rides the body's `Fun.protect`, so a
+mid-flight squash drops the store buffer before the squash returns and
+the node cannot run further. Provider lanes take the transport as a
+parameter (`Agent.Provider.post`: `blocking_post` default;
+`Fiber.http_post` inside the engine — `bin/main.ml` passes it), so N
+provider turns overlap on one domain; `Chase.create` gained
+`?transport` (lazy curl-multi default; scripted in tests) and a trailing
+`()`. The executor's yields perform `Fiber.Yield` in-engine (one
+delivery representation — the chase's per-consumer closure — mounted at
+spawn; `Executor.run`'s callback signature unchanged for direct
+callers); a stop-cleanly disposition is now a discontinue, not a
+convention. `run.mli`'s "Blocking in v0" comment amended per the
+evaluation doc's recorded handoff; 40-scheduling § read-time binding and
+60-agents (§ executor transport, § drift notes at yield) amended.
+Falsifiers in test/test_mount.ml: FM1 (engine-level overlap under the
+real Anthropic Messages encoder over a rigged-slow transport; completion
+order, not submit order, decides turn order; replay coherent), FM2
+(mid-flight squash end-to-end: hypothesis taken, squashed while the POST
+is in flight, `Fun.protect` worktree drop observed on disk, abandoned
+completion dropped, zero turns billed), FM3 (wake precision: one
+suspension and one resumption per consumer, each on ITS producer's
+landing), FM4 (stop-cleanly is a discontinue: a breaking-broad note at a
+yield — the moved file provably read, in the same tool batch that
+drafted it — ends the fiber at the yield; no further submit reaches the
+transport, the worktree drops, the body match reissues bounded). The
+pre-existing suite reproduced with ZERO expect diffs —
+F1/F2/F4/F5 step counts and traces identical, which is the measured
+confirmation that the blocking engine was the defunctionalized form of
+this scheduler. Remaining on this front: nothing owed; mid-flight
+patching (reconcile without reissue) stays the recorded convergence in
+40-scheduling § drift routing.
+
 ## The plan — three phases
 
 ### Phase A — executor rebuild (executor layer only) — DONE, see "Where we are"

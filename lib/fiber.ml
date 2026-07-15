@@ -347,6 +347,8 @@ let rec run_until_quiescent t =
 let quiescent t =
   List.is_empty t.ready && List.is_empty t.in_flight_tbl
 
+let has_ready t = not (List.is_empty t.ready)
+
 (* {2 External wake and squash} *)
 
 let wake t ~key operand =

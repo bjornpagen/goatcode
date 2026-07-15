@@ -101,6 +101,7 @@ val create :
   ledger:Ledger.t ->
   committed:Retire.Committed.t ->
   channels:Channel.registry ->
+  ?transport:Fiber.Transport.t ->
   worktree_root:string ->
   ports:Port.t list ->
   executors:executor_binding list ->
@@ -108,6 +109,7 @@ val create :
   switches:Speculate.Switch.t list ->
   merges:Retire.Merge_registry.t ->
   seed:Theory.Tuple.t list ->
+  unit ->
   t
 (** Assemble the engine. Channels are already open (admission pre-opened
     them); every statement instance derivable from the seed starts at t=0 —
@@ -118,15 +120,29 @@ val create :
     committed state here, at the primordial generation: seeds are facts,
     not work product, so where-filters match their fields, agents read
     their payloads, and law judgment counts seeded referents
-    (docs/architecture/70-api.md § running). *)
+    (docs/architecture/70-api.md § running).
+
+    Every dispatched node runs as a fiber on the {!Fiber} substrate: its
+    operand reads park mid-flight on exactly the missing address (a
+    landing wakes exactly the fibers that address names), its provider
+    calls perform [Http_post] and overlap on one domain, and squash
+    discontinues — a squashed node cannot run further, and its worktree
+    drop rides the fiber's own [Fun.protect]. [transport] is the
+    [Http_post] lane: curl-multi by default (created lazily, at the first
+    transfer); falsifiers rig a scripted one to prove overlap and
+    completion-order determinism without a network. *)
 
 val step : t -> [ `Progressed | `Quiescent ]
-(** Advance the engine by one scheduling action. The dispatch path is
-    pure: between a settlement and the dispatch of its dependents, no I/O,
-    no logging, no awaits beyond the ledger append (falsifier F4). Every
-    reissue, flush, and reconcile is a [Decision] ledger event with its
-    reason — the engine ships typed signals; the scheduler owns the loop,
-    and no retry exists below it. *)
+(** Advance the engine by one scheduling action: fire a body match, run
+    ready fibers to their next suspensions, admit and spawn one queued
+    instance, retire, pump the transport for completions (only when
+    nothing else can progress — never in a way that would serialize
+    in-flight calls), or abort one unservable parked read. The dispatch
+    path is pure: between a settlement and the dispatch of its
+    dependents, no I/O, no logging, no awaits beyond the ledger append
+    (falsifier F4). Every reissue, flush, and reconcile is a [Decision]
+    ledger event with its reason — the engine ships typed signals; the
+    scheduler owns the loop, and no retry exists below it. *)
 
 val run_to_quiescence : t -> unit
 (** Drive {!step} until no statement can fire, no reads are left to serve,

@@ -228,17 +228,32 @@ module Provider : sig
 
   type t = { turn : request -> (reply, Ledger.Fault.t) result }
 
-  val anthropic : unit -> t
+  type post = Http.Request.t -> (int * string, Http.error) result
+  (** The transport seam: how a lane's one POST reaches the wire. A
+      parameter, never a global flag — each constructed provider value
+      carries its transport. Two instances exist: {!blocking_post}
+      (default; [Http.post_json], for non-fiber callers) and
+      [Fiber.http_post] (performs the [Http_post] instruction, so N
+      provider turns overlap on one domain when the executor runs inside
+      the chase's fiber scheduler). The rigged lane performs nothing —
+      scripted turns never construct a request. *)
+
+  val blocking_post : post
+  (** [Http.post_json] over the reified request: the blocking lane, which
+      stands for callers outside any fiber scheduler. *)
+
+  val anthropic : ?post:post -> unit -> t
   (** Anthropic Messages API, direct ([POST /v1/messages]). Reads
       [ANTHROPIC_API_KEY] from the environment at turn time; an unset key
       is an executor fault, never a crash. Fable-5 rules are encoded here:
       no [thinking] parameter, no sampling knobs, [output_config] carries
-      effort and the json_schema format. *)
+      effort and the json_schema format. [post] defaults to
+      {!blocking_post}. *)
 
-  val openai : unit -> t
+  val openai : ?post:post -> unit -> t
   (** OpenAI Responses API, direct ([POST /v1/responses], stateless:
       [store: false], full history each turn). Reads [OPENAI_API_KEY] at
-      turn time. *)
+      turn time. [post] defaults to {!blocking_post}. *)
 end
 
 (** Loop bounds as data, checked by the agent loop before each model turn

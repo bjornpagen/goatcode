@@ -96,6 +96,16 @@ Recorded when the executor layer moved from a `claude`-CLI shell-out to
 direct Messages/Responses calls; the rigged lane sits behind the same tool
 loop, so falsifiers exercise the one boundary the live lanes use.
 
+**The transport is a parameter of the constructed lane, never a global
+flag.** Each provider value carries its POST (`Agent.Provider.post`): the
+blocking lane (`blocking_post`, over `Http.post_json`) stands for callers
+outside any fiber scheduler; inside the engine — where every node is a
+fiber — the lanes post through `Fiber.http_post`, and the POST becomes the
+suspension the scheduler overlaps: N provider turns simultaneously in
+flight on one domain (falsifier FM1 proves the overlap through the engine
+with the real Messages encoder over a rigged transport). The rigged lane
+performs nothing — scripted turns construct no request.
+
 **Decision.** The layer's shapes were audited against the Vercel AI SDK's
 agent abstractions (`ToolLoopAgent`, `tool()`, `stopWhen`, the
 `LanguageModel` provider spec, middleware, mock models) — the closest
@@ -127,6 +137,16 @@ decided (continue / patch-then-continue / stop-cleanly), so the agent never
 guesses its own fate. A stop-cleanly note is the humane form of squash for
 an agent mid-turn: finish no further work, emit nothing; the worktree drop
 does the rest.
+
+Delivery has one representation — the node's `unit -> Drift.note list`
+closure, built by the chase over the consumer's channel end — and two
+mounts. Inside the engine the executor's yield performs the fiber's
+`Yield` instruction and the handler runs that closure; a stop-cleanly
+disposition there is not a convention the executor honors but a
+discontinue it cannot escape (the fiber settles with the note; nothing
+further runs; finalizers drop the worktree). Where tests drive an
+executor directly, `Executor.run`'s `on_yield` callback takes the same
+closure and the loop's stop-cleanly discipline stands as written above.
 
 ## Model pins and provider routing
 

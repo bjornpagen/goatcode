@@ -521,7 +521,7 @@ let%expect_test "F4 dispatch purity: settlement-to-issue is the ledger append an
             ~script:[ R.Reply {|{"msg":"out landed"}|} ];
         ]
       ~backstops:Speculate.Backstops.default ~switches:[]
-      ~merges:Retire.Merge_registry.empty ~seed:(seed_task task)
+      ~merges:Retire.Merge_registry.empty ~seed:(seed_task task) ()
   in
   let retired_count () =
     List.length

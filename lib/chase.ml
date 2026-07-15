@@ -3,11 +3,15 @@
    docs/architecture/10-theory.md § chase semantics). chase.mli is the
    contract; this file owns only private machinery.
 
-   v0 engine shape: one process, synchronous dispatch — a scheduling action
-   is one [step]. Fire (body match -> node), dispatch (port admission ->
-   executor run -> boundary parse), retire (dependency order, via
-   [Retire.step]), then stall resolution. The engine ships typed signals and
-   appends every decision to the ledger; no retry exists below it. *)
+   Engine shape: one process, one domain, and every node is a fiber on the
+   [Fiber] substrate — a scheduling action is one [step]. Fire (body match
+   -> node), run ready fibers (each to its next suspension), dispatch
+   (port admission -> spawn -> the fiber binds operands at its own reads),
+   retire (dependency order, via [Retire.step]; landings wake exactly the
+   fibers parked on the addresses that moved), transport pump (curl-multi
+   completions when nothing else is ready — where N provider calls overlap
+   on one domain), then stall resolution. The engine ships typed signals
+   and appends every decision to the ledger; no retry exists below it. *)
 
 module Port = struct
   (* The house posture is no limits: a bound exists only with its forcing
@@ -112,7 +116,7 @@ type instance = {
       (* (relation, id) head existentials filled at firing time. *)
   minted_ids : tuple_realm Id.t list;
   shape : Speculate.Shape.t;
-  mutable cls : Priority.cls;
+  cls : Priority.cls;
   seq : int; (* FIFO tiebreak within a priority class. *)
 }
 
@@ -135,6 +139,18 @@ type completed = {
 type any_tx = Any_tx : 'a Theory.Relation.t * 'a Channel.tx -> any_tx
 type any_rx = Any_rx : 'a Theory.Relation.t * 'a Channel.rx -> any_rx
 
+(* One dispatched node's fiber, in the engine's books. [reaped] marks
+   settlements the engine already reacted to. Worktree custody lives in
+   the body's own [Fun.protect] cell (see [node_body]): while the body
+   owns the worktree, an external squash's discontinue drops it — abort
+   by construction; custody transfers to the retire queue at
+   completion. *)
+type fiber_entry = {
+  f_inst : instance;
+  handle : unit Fiber.handle;
+  mutable reaped : bool;
+}
+
 type t = {
   theory : Theory.admitted;
   ledger : Ledger.t;
@@ -153,12 +169,16 @@ type t = {
   predictor : Speculate.Predictor.t;
   txs : (string * any_tx) list; (* relation name -> writer end *)
   rxs : (string * any_rx) list; (* statement -> its consumer edge's end *)
+  sched : Fiber.t;
+      (* The substrate: every dispatched node runs as one fiber; parked
+         reads and in-flight transfers live in ITS tables, not here
+         (docs/architecture/40-scheduling.md § read-time binding). *)
+  mutable fiber_nodes : (Fiber.id * fiber_entry) list; (* spawn order *)
   mutable seq : int;
   mutable tuples : tuple_entry list; (* the body-match feed *)
   mutable fired : (string * string) list; (* consumed (statement, tuple) *)
   mutable reissues : ((string * string) * int) list;
   mutable queue : instance list; (* fired, not yet admitted to a port *)
-  mutable parked : instance list; (* suspended reads: cost nothing *)
   mutable retire_queue : completed list;
   mutable settled : (Ledger.node Id.t * Settlement.t) list;
   mutable undischarged : (Speculate.Hypothesis.t * Yojson.Safe.t) list;
@@ -307,12 +327,28 @@ let settle t node settlement ~seal =
     t.settled <- (node, settlement) :: t.settled
   end
 
-let purge t nodes =
+(* Remove a squashed set from every engine table. A dead node's live fiber
+   is discontinued NOW, with the settlement's own cause: its stack unwinds,
+   [Fun.protect] drops any worktree the body still owns, an in-flight
+   transfer is abandoned, and the fiber cannot run further — squash is a
+   state, never a convention (fiber.mli; docs/architecture/50-commit.md
+   § abort by construction). Callers settle the nodes before purging. *)
+let purge t nodes ~cause =
   let dead n = List.exists (Id.equal n) nodes in
   t.queue <- List.filter (fun i -> not (dead i.node)) t.queue;
-  t.parked <- List.filter (fun i -> not (dead i.node)) t.parked;
   t.retire_queue <-
-    List.filter (fun c -> not (dead c.inst.node)) t.retire_queue
+    List.filter (fun c -> not (dead c.inst.node)) t.retire_queue;
+  List.iter
+    (fun (fid, entry) ->
+      if
+        (not entry.reaped)
+        && dead entry.f_inst.node
+        && Option.is_none (Fiber.result entry.handle)
+      then begin
+        entry.reaped <- true;
+        Fiber.squash t.sched fid ~cause
+      end)
+    t.fiber_nodes
 
 (* A node's own failure: the fault is raw, never wrapped; the transitive
    dependents squash with provenance-walk precision (Retire owns the walk)
@@ -337,7 +373,7 @@ let settle_fault t (inst : instance) worktree fault =
         (fun n -> settle t n (Settlement.Squashed cause) ~seal:false)
         dependents;
       drop_speculative_state t dependents;
-      purge t dependents
+      purge t dependents ~cause
 
 (* {2 Read-time operand binding}
    The unit of waiting is the read (docs/architecture/40-scheduling.md
@@ -393,6 +429,92 @@ let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
                   confidence;
                 }
           | Some _ | None -> Read.Suspended))
+
+(* The substrate's read-time binding policy (fiber.mli [create ~read]):
+   [Some] answers the fiber's read now — witnessed or hypothesis; [None]
+   parks exactly this fiber on exactly this address until a landing wakes
+   it. The policy sees which fiber asks, so the per-consumer judgment
+   (shape switch, chain confidence) stays here, with the mount. *)
+let policy_read t fid address =
+  match List.find_opt (fun (f, _) -> Fiber.id_equal f fid) t.fiber_nodes with
+  | None -> None
+  | Some (_, entry) -> (
+      let inst = entry.f_inst in
+      match
+        List.find_opt
+          (fun e -> Ledger.Address.equal (addr_of e) address)
+          inst.consumed
+      with
+      | None -> None
+      | Some e -> (
+          match read_operand t ~consumer:inst.node ~shape:inst.shape e with
+          | Read.Witnessed { generation; content } ->
+              Some (Fiber.Operand.Witnessed { generation; content })
+          | Read.Hypothesis h -> Some (Fiber.Operand.Hypothesis h)
+          | Read.Suspended ->
+              decide t ~node:inst.node Ledger.Decision.Suspended
+                ~reason:"read blocked with no hypothesis source" ~counters:[];
+              None))
+
+(* A stop-cleanly drift note delivered at a fiber's yield: the handler
+   discontinued the fiber (it performed nothing further; Fun.protect
+   dropped its worktree), and the engine settles the abandoned attempt so
+   its body match can reissue against the state that stopped it — bounded,
+   exactly like any other reissue (docs/architecture/40-scheduling.md
+   § drift routing, § settlement). *)
+let stop_cleanly_settle t (inst : instance) (note : Speculate.Drift.note) =
+  let count =
+    match List.assoc_opt inst.fired_key t.reissues with
+    | Some n -> n
+    | None -> 0
+  in
+  decide t ~node:inst.node Ledger.Decision.Flush_subtree
+    ~reason:
+      ("stop-cleanly drift note at "
+      ^ Ledger.Address.to_string note.Speculate.Drift.address)
+    ~counters:[ ("reissues", float_of_int count) ];
+  Id.Registry.drop_provisional t.registry inst.minted_ids;
+  settle t inst.node
+    (Settlement.Squashed Ledger.Squash_cause.Reissue_loser)
+    ~seal:true;
+  drop_speculative_state t [ inst.node ];
+  if count < 3 then begin
+    let key = inst.fired_key in
+    t.fired <- List.filter (fun k -> not (k = key)) t.fired;
+    t.reissues <- (key, count + 1) :: List.remove_assoc key t.reissues
+  end
+
+(* React to fiber settlements the engine has not seen yet. A [Returned]
+   body did its own completion bookkeeping; an engine-initiated squash was
+   settled by its initiator; the two settlements only the substrate can
+   deliver — a stop-cleanly discontinue and the fiber's own fault (its
+   raise, or a rogue effect contained as a value) — are handled here. *)
+let reap t =
+  List.iter
+    (fun ((_ : Fiber.id), entry) ->
+      if not entry.reaped then
+        match Fiber.result entry.handle with
+        | None -> ()
+        | Some settlement -> (
+            entry.reaped <- true;
+            match settlement with
+            | Fiber.Returned () -> ()
+            | Fiber.Stopped (Fiber.Squashed _) -> ()
+            | Fiber.Stopped (Fiber.Stopped_cleanly note) ->
+                stop_cleanly_settle t entry.f_inst note
+            | Fiber.Faulted fault -> settle_fault t entry.f_inst None fault))
+    t.fiber_nodes
+
+(* Run every ready fiber to its next suspension — park, in-flight
+   transfer, or settlement — WITHOUT touching the transport: reaching for
+   completions here would serialize the very calls the substrate overlaps.
+   The transport is driven only by [pump_transport], when nothing else in
+   the engine can progress. *)
+let drain t =
+  while Fiber.has_ready t.sched do
+    ignore (Fiber.step t.sched : [ `Progressed | `Quiescent ])
+  done;
+  reap t
 
 (* {2 Drift classification and check-on-yield delivery}
    Drift class is judged per consumer, against what this consumer
@@ -749,32 +871,40 @@ let feed_heads t (inst : instance)
           })
         heads
 
-let dispatch_node t (inst : instance) =
-  match port_capacity t inst with
-  | Error message ->
-      settle_fault t inst None
-        { Ledger.Fault.origin = Ledger.Fault.Executor_error; message }
-  | Ok () -> (
-      (* Read-time binding of every operand. *)
+(* One node, as one fiber body. Every operand binds at the fiber's own
+   [Fiber.read]: the policy answers witnessed or hypothesis, or the read
+   parks THIS fiber mid-flight on exactly the missing address, resuming
+   when a landing wakes it with the committed operand — the whole-instance
+   parking list, its wholesale requeue on any retirement, and the
+   re-dispatch re-read are gone (docs/architecture/40-scheduling.md
+   § read-time binding). The executor's yields perform [Fiber.Yield]
+   (delivery is the fiber's [on_yield], mounted at spawn), and its
+   provider turns may perform [Http_post] — the suspension the scheduler
+   overlaps. [owned] worktree custody makes external squash total: the
+   discontinue unwinds through [Fun.protect] and the store buffer is gone
+   before the squash returns. *)
+let node_body t (inst : instance) (owned : Retire.Worktree.t option ref) () =
+  Fun.protect
+    ~finally:(fun () ->
+      match !owned with
+      | Some worktree ->
+          owned := None;
+          Retire.Worktree.drop worktree
+      | None -> ())
+    (fun () ->
       let outcomes =
         List.map
           (fun entry ->
-            (entry, read_operand t ~consumer:inst.node ~shape:inst.shape entry))
+            let outcome =
+              match Fiber.read (addr_of entry) with
+              | Fiber.Operand.Witnessed { generation; content } ->
+                  Read.Witnessed { generation; content }
+              | Fiber.Operand.Hypothesis h -> Read.Hypothesis h
+            in
+            (entry, outcome))
           inst.consumed
       in
-      let suspended =
-        List.exists
-          (fun (_, o) -> match o with Read.Suspended -> true | _ -> false)
-          outcomes
-      in
-      if suspended then begin
-        (* The fiber parks, costing nothing; it resumes when the operand
-           space next changes (a retirement). *)
-        decide t ~node:inst.node Ledger.Decision.Suspended
-          ~reason:"read blocked with no hypothesis source" ~counters:[];
-        t.parked <- t.parked @ [ inst ]
-      end
-      else begin
+      begin
         decide t ~node:inst.node Ledger.Decision.Dispatched
           ~reason:"operands bound" ~counters:[];
         let hyp_pairs =
@@ -841,7 +971,12 @@ let dispatch_node t (inst : instance) =
         let worktree =
           Retire.Worktree.create ~root:t.worktree_root ~node:inst.node
         in
-        let on_yield = on_yield_of t inst in
+        owned := Some worktree;
+        (* The executor's yield suspension IS the fiber's [Yield]
+           instruction: delivery rides the handler (the closure mounted at
+           spawn), and a stop-cleanly disposition discontinues instead of
+           returning — the fiber cannot run further, by construction. *)
+        let on_yield () = Fiber.yield () in
         let result =
           match hyps with
           | [] ->
@@ -855,6 +990,7 @@ let dispatch_node t (inst : instance) =
                   (grant_of inst worktree
                     : Agent.Grant.speculative Agent.Grant.t)
         in
+        owned := None;
         match result with
         | Ok (heads, late_minted) ->
             feed_heads t inst
@@ -865,6 +1001,27 @@ let dispatch_node t (inst : instance) =
               t.retire_queue @ [ { inst; heads; worktree; late_minted } ]
         | Error fault -> settle_fault t inst (Some worktree) fault
       end)
+
+let dispatch_node t (inst : instance) =
+  match port_capacity t inst with
+  | Error message ->
+      settle_fault t inst None
+        { Ledger.Fault.origin = Ledger.Fault.Executor_error; message }
+  | Ok () ->
+      let owned = ref None in
+      let handle =
+        Fiber.spawn t.sched
+          ~name:(Id.to_string inst.node)
+          ~on_yield:(on_yield_of t inst)
+          (node_body t inst owned)
+      in
+      t.fiber_nodes <-
+        t.fiber_nodes
+        @ [ (Fiber.id handle, { f_inst = inst; handle; reaped = false }) ];
+      (* Run the spawned fiber now, to its first suspension or settlement:
+         dispatch stays one scheduling action, and an in-flight provider
+         call returns control here — the overlap window. *)
+      drain t
 
 let try_dispatch t =
   match admission_order t with
@@ -1107,7 +1264,7 @@ let abandon t (c : completed) ~action ~reason ~cause ~count ~refire =
         (fun n -> settle t n (Settlement.Squashed dcause) ~seal:false)
         dependents;
       drop_speculative_state t dependents;
-      purge t dependents);
+      purge t dependents ~cause:dcause);
   if refire then begin
     let key = c.inst.fired_key in
     t.fired <- List.filter (fun k -> not (k = key)) t.fired;
@@ -1190,10 +1347,11 @@ let fan_invalidations t ~node =
    Runs at the producer's landing, over every pending hypothesis on an
    address the landing covers: identical content discharges silently —
    correct speculation costs zero (falsifier F7) — and a differing landing
-   parses into a drift class the policy table routes. Reconcile, in the
-   synchronous v0 engine, is reissue-with-the-diagnostics (a completed
-   attempt cannot patch mid-flight; the drift note carries what changed);
-   flush squashes the consumer's subtree
+   parses into a drift class the policy table routes. Reconcile, in v0,
+   is reissue-with-the-diagnostics (mid-flight patching is the recorded
+   convergence — a completed attempt cannot patch, and an in-flight one
+   receives the note at its next yield; the drift note carries what
+   changed); flush squashes the consumer's subtree
    (docs/architecture/40-scheduling.md § read-time binding, § drift
    routing). *)
 
@@ -1294,31 +1452,46 @@ let retire_success t (c : completed) =
   (* The refresher judges the landing against every hypothesis it
      covers. *)
   refresh_hypotheses t c;
-  (* The operand space changed: resume suspended reads. A resumed read
-     re-enters the port queue as witnessed work only when every operand
-     now reads committed state — anything still speculative must not ride
-     the class the token-ceiling gate always admits
-     (docs/architecture/40-scheduling.md § backstops). *)
+  (* The landing committed these addresses: wake exactly the fibers parked
+     on them — never the whole parked population — each resuming with the
+     witnessed operand at the next ready-queue turn. A woken fiber holds
+     its admitted slot (it is witnessed work by construction: the wake key
+     IS the committed address), so no re-queue and no re-admission exist
+     to gate (docs/architecture/40-scheduling.md § read-time binding;
+     fiber.mli [wake]). *)
   List.iter
-    (fun i ->
-      let witnessed =
-        List.for_all
-          (fun e ->
-            Option.is_some
-              (Retire.Committed.generation t.committed_state (addr_of e)))
-          i.consumed
-      in
-      i.cls <-
-        (if witnessed then Priority.Resumed_witnessed
-         else Priority.Eager_or_speculative);
-      decide t ~node:i.node Ledger.Decision.Resumed
-        ~reason:"operand space changed" ~counters:[];
-      decide t ~node:i.node
-        (Ledger.Decision.Queued { port = i.binding.port })
-        ~reason:"resumed read re-enters the port queue" ~counters:[])
-    t.parked;
-  t.queue <- t.queue @ t.parked;
-  t.parked <- []
+    (fun (h : Retire.head_tuple) ->
+      let address = Ledger.Address.Tuple { relation = h.relation; id = h.id } in
+      match Retire.Committed.generation t.committed_state address with
+      | None -> ()
+      | Some generation ->
+          let waiting =
+            List.filter
+              (fun (_, a) -> Ledger.Address.equal a address)
+              (Fiber.parked t.sched)
+          in
+          if not (List.is_empty waiting) then begin
+            List.iter
+              (fun (fid, _) ->
+                match
+                  List.find_opt
+                    (fun (f, _) -> Fiber.id_equal f fid)
+                    t.fiber_nodes
+                with
+                | Some (_, entry) ->
+                    decide t ~node:entry.f_inst.node Ledger.Decision.Resumed
+                      ~reason:"operand space changed" ~counters:[]
+                | None -> ())
+              waiting;
+            let content =
+              Ledger.Content_hash.of_string (Yojson.Safe.to_string h.payload)
+            in
+            ignore
+              (Fiber.wake t.sched ~key:address
+                 (Fiber.Operand.Witnessed { generation; content })
+                : int)
+          end)
+    c.heads
 
 let handle_rejection t (c : completed) (rejection : Retire.rejection) =
   match rejection with
@@ -1352,7 +1525,7 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
               (fun c' -> not (Id.equal c'.inst.node c.inst.node))
               t.retire_queue;
           drop_speculative_state t (c.inst.node :: set);
-          purge t set;
+          purge t set ~cause;
           true)
   | Retire.Witness_moved moves ->
       (* The drift-routing table's rejection-site consumer: parse each
@@ -1407,9 +1580,9 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
    and retire re-judges against final state — between the parse and this
    commit point a referent's producer can squash, dropping the provisional
    id the ref names, and a dangling ref must not enter committed state.
-   Unreachable in the synchronous v0 engine (a parsed ref's referent is
-   already committed by the time the parse runs); the recorded shape of
-   the mechanism for when dispatch overlaps producers. *)
+   Live now that dispatch overlaps producers on the fiber substrate: a
+   consumer can complete while the producer whose provisional ids its
+   heads reference is abandoned. *)
 let rec ref_strings path (json : Yojson.Safe.t) =
   match (path, json) with
   | [], `String s -> [ s ]
@@ -1505,19 +1678,28 @@ let try_retire t =
 
 (* A parked read with no remaining producer can never be served: settle it
    so the run quiesces instead of hanging. Reached only when nothing can
-   fire, dispatch, or retire. *)
+   fire, run, dispatch, retire, or complete — the fiber is discontinued
+   (its stack unwinds; Fun.protect finalizers run), never merely
+   forgotten. *)
 let resolve_parked t =
-  match t.parked with
+  match Fiber.parked t.sched with
   | [] -> false
-  | inst :: rest ->
-      decide t ~node:inst.node Ledger.Decision.Abort_suspended
-        ~reason:"suspended read has no remaining producer" ~counters:[];
-      Id.Registry.drop_provisional t.registry inst.minted_ids;
-      settle t inst.node
-        (Settlement.Squashed Ledger.Squash_cause.No_producer)
-        ~seal:true;
-      t.parked <- rest;
-      true
+  | (fid, _) :: _ -> (
+      match
+        List.find_opt (fun (f, _) -> Fiber.id_equal f fid) t.fiber_nodes
+      with
+      | None -> false (* unreachable: every parked fiber is a dispatched node *)
+      | Some (_, entry) ->
+          let inst = entry.f_inst in
+          decide t ~node:inst.node Ledger.Decision.Abort_suspended
+            ~reason:"suspended read has no remaining producer" ~counters:[];
+          Id.Registry.drop_provisional t.registry inst.minted_ids;
+          settle t inst.node
+            (Settlement.Squashed Ledger.Squash_cause.No_producer)
+            ~seal:true;
+          entry.reaped <- true;
+          Fiber.squash t.sched fid ~cause:Ledger.Squash_cause.No_producer;
+          true)
 
 (* {2 The public surface} *)
 
@@ -1555,9 +1737,23 @@ let seed_entry t (tu : Theory.Tuple.t) : tuple_entry =
         confidence = 1.0;
       }
 
-let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
-    ~executors ~backstops ~switches ~merges ~seed =
+(* The default transport, forced only at the first [Http_post] a fiber
+   performs: rigged runs never touch it, and no curl-multi stack exists
+   until a live provider call needs one. *)
+let lazy_live_transport () =
+  let live = lazy (Fiber.Transport.live ()) in
+  {
+    Fiber.Transport.submit =
+      (fun req -> (Lazy.force live).Fiber.Transport.submit req);
+    poll = (fun ~block -> (Lazy.force live).Fiber.Transport.poll ~block);
+  }
+
+let create ~theory ~ledger ~committed ~channels ?transport ~worktree_root
+    ~ports ~executors ~backstops ~switches ~merges ~seed () =
   let registry = Id.Registry.create () in
+  let transport =
+    match transport with Some tr -> tr | None -> lazy_live_transport ()
+  in
   (* The scheduler's channel ends, all opened before any node runs: the
      writer end per relation (retire publishes; invalidations fan out) and
      one reader end per consumer edge (drained at that consumer's yields)
@@ -1582,6 +1778,18 @@ let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
           (Theory.relations theory))
       (Theory.edges theory)
   in
+  (* The knot: the substrate's read policy consults the engine, and the
+     engine holds the substrate. The reference is written exactly once,
+     immediately below, before any fiber can exist. *)
+  let tref = ref None in
+  let sched =
+    Fiber.create
+      ~read:(fun fid address ->
+        match !tref with
+        | None -> None
+        | Some t -> policy_read t fid address)
+      ~transport ()
+  in
   let t =
     {
       theory;
@@ -1601,18 +1809,20 @@ let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
       predictor = Speculate.Predictor.of_ledger ledger;
       txs;
       rxs;
+      sched;
+      fiber_nodes = [];
       seq = 0;
       tuples = [];
       fired = [];
       reissues = [];
       queue = [];
-      parked = [];
       retire_queue = [];
       settled = [];
       undischarged = [];
       ceiling_announced = false;
     }
   in
+  tref := Some t;
   (* Each shape's initial pin, recorded at run open: predictor history is
      keyed by the typed (statement, executor, pin) identities the ledger
      carries — survival history is per pin
@@ -1632,10 +1842,34 @@ let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
   t.tuples <- List.map (seed_entry t) seed;
   t
 
+(* Woken fibers resume before anything new is admitted: resumed witnessed
+   work is never displaced by fresh eager work
+   (docs/architecture/40-scheduling.md § ports and priority). *)
+let run_ready t =
+  if Fiber.has_ready t.sched then begin
+    drain t;
+    true
+  end
+  else false
+
+(* Transfers are in flight and nothing else can progress: block on the
+   transport for completions (the substrate delivers them in the
+   transport's scripted/libcurl order — deterministic under a rigged
+   transport), then run the resumed fibers. *)
+let pump_transport t =
+  if Fiber.has_ready t.sched || Fiber.quiescent t.sched then false
+  else begin
+    ignore (Fiber.step t.sched : [ `Progressed | `Quiescent ]);
+    drain t;
+    true
+  end
+
 let step t =
   if try_fire t then `Progressed
+  else if run_ready t then `Progressed
   else if try_dispatch t then `Progressed
   else if try_retire t then `Progressed
+  else if pump_transport t then `Progressed
   else if resolve_parked t then `Progressed
   else `Quiescent
 
@@ -1644,8 +1878,10 @@ let rec run_to_quiescence t =
 
 let quiescent t =
   Option.is_none (find_fireable t)
-  && List.is_empty t.queue && List.is_empty t.parked
+  && List.is_empty t.queue
   && List.is_empty t.retire_queue
+  && Fiber.quiescent t.sched
+  && List.is_empty (Fiber.parked t.sched)
 
 let settlements t = List.rev t.settled
 let committed t = t.committed_state

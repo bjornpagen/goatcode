@@ -8,8 +8,10 @@
    exceptions and never [misuse] (docs/architecture/40-scheduling.md
    § settlement, § quiescence and completion).
 
-   Blocking in v0: the fiber substrate is an implementation fact of the
-   chase; [start]/[wait] expose the same run for pull-only observation
+   The chase runs on the cooperative fiber substrate ([Fiber]): reads park
+   mid-flight, provider calls overlap on one domain, squash discontinues;
+   [exec] drives the scheduler to quiescence — still one process, one
+   domain. [start]/[wait] expose the same run for pull-only observation
    ([Report.scoreboard] polls the ledger, never the dispatch path). *)
 
 type config = {
@@ -184,7 +186,7 @@ let start ~theory ~seed ~config =
     Chase.create ~theory ~ledger:run_ledger ~committed ~channels
       ~worktree_root:config.worktree_root ~ports:config.ports
       ~executors:config.executors ~backstops:config.backstops
-      ~switches:config.switches ~merges:config.merges ~seed
+      ~switches:config.switches ~merges:config.merges ~seed ()
   in
   Ok { chase; run_ledger; outcome = None }
 

@@ -200,15 +200,18 @@ decision: effects are a real, measurable OCaml advantage at exactly one
 seam — direct-style agent fibers — and a bounded loss everywhere the
 Rust port would pay it.
 
-## Recorded amendment owed (doc rule 4 handoff)
+## Recorded amendment owed (doc rule 4 handoff) — DISCHARGED
 
-`run.mli`'s `exec` comment reads "Blocking in v0; the fiber substrate is
-an implementation fact." When the integration agent mounts the chase on
-`Fiber` (the wave-2 tail in the campaign plan), that sentence must be
-amended in the same change — suggested wording: "Runs on the cooperative
-fiber substrate (`Fiber`): reads park mid-flight, provider calls overlap
-on one domain, squash discontinues. Still one process, one domain." The
-`40-scheduling.md` § read-time-binding language already describes the
-substrate's semantics and needs no change; `30-channels.md` § delivery
-likewise. This file records the obligation because run.mli is outside
-the substrate change's ownership.
+`run.mli`'s `exec` comment read "Blocking in v0; the fiber substrate is
+an implementation fact." The integration pass (the wave-2 tail) mounted
+the chase on `Fiber` and amended that sentence in the same change, with
+the wording recorded here: runs on the cooperative fiber substrate —
+reads park mid-flight, provider calls overlap on one domain, squash
+discontinues; still one process, one domain. What the mount confirmed
+beyond the substrate's own falsifiers: the synchronous engine's whole
+trace reproduced exactly under the fibers (zero expect diffs on the
+pre-existing suite — the blocking engine really was the defunctionalized
+version of this scheduler), and the three new engine-level falsifiers
+(FM1 overlap through the real Messages encoder, FM2 mid-flight squash
+with `Fun.protect` worktree cleanup, FM3 wake-exactly-the-address) hold.
+`40-scheduling.md` § read-time binding now names the mount normatively.

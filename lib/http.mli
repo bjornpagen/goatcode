@@ -24,9 +24,11 @@ val post_json :
 (** One blocking POST. [headers] are (name, value) pairs — the caller
     supplies [content-type: application/json] along with its auth headers.
     Returns (HTTP status, response body) whenever the exchange completed,
-    whatever the status. The blocking lane stands: non-fiber callers (the
-    provider lanes today) keep this entry; the multi lane below exists for
-    the fiber scheduler and changes nothing here. *)
+    whatever the status. The blocking lane stands for callers outside any
+    fiber scheduler ([Agent.Provider.blocking_post], the default provider
+    transport); inside the engine's fibers the provider lanes post through
+    [Fiber.http_post] instead, and the multi lane below carries the
+    transfers. Nothing here changes for either. *)
 
 (** One POST request as data — the argument list of {!post_json}, reified
     so a transfer can be carried, scripted, and started asynchronously. *)
