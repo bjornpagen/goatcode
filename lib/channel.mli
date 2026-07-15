@@ -107,3 +107,14 @@ val footprint : 'a rx -> Ledger.Footprint.t
 (** The edge's compiled delivery filter, for footprint-escape reporting:
     a load outside it is logged and surfaced at retire as a witness the
     declaration must grow to cover. *)
+
+val covers : footprint:Ledger.Footprint.t -> Ledger.Address.t -> bool
+(** The declared-pattern cover judgment: does any address in the (declared)
+    footprint cover the concrete address? File entries are globs; tuple
+    entries may carry the whole-relation id wildcard; concrete-vs-concrete
+    degenerates to equality. This is the same judgment
+    {!Invalidation.passes} applies to deliveries; its second caller is the
+    footprint-escape judge — a retiring node's observed loads outside its
+    edge's compiled footprint surface as [Ledger.Event.Footprint_escape]
+    events and a violated [footprint_cover] verdict on the settled map
+    (docs/architecture/30-channels.md § footprint filtering). *)

@@ -73,6 +73,13 @@ owning doc:
   asserted to fail with the expected error class. Doc rule 8's claims are checkable claims, and this is their
   checker: an "unrepresentable" that compiles is a doc bug or a type bug,
   and either way the suite goes red.
+- **F16 — footprint escapes.** An observed load outside a consumer edge's
+  compiled delivery filter surfaces at retire as the typed
+  `Footprint_escape` event, a violated `footprint_cover` verdict on the
+  settled map naming the node and address, and the escape list in
+  `Report.explain`'s story; a covered read surfaces nothing, and the
+  escapee still retires — the declaration is a filter, never a wall
+  (`30-channels.md` § footprint filtering).
 
 Rigged executors (deterministic fakes with scripted outputs, delays, faults,
 and invalid-output injections) make the whole roster runnable in CI without

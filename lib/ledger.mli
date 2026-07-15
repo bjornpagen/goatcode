@@ -296,6 +296,16 @@ module Event : sig
     | Drift_note of { address : Address.t; cls : Drift.cls; route : Drift.route }
         (** A drift note delivered at yield; the class's diff evidence
             stays with the note's out-of-line delta, never in the event. *)
+    | Footprint_escape of { tool : string; address : Address.t }
+        (** A load the retiring node's event stream proves, landing outside
+            its edge's compiled delivery footprint: the node consulted
+            state whose invalidations its subscription will never carry.
+            Appended at retire, once per escaped address. The declaration
+            is a filter, never a wall — correctness came from the observed
+            witness; the escape is the grow-the-declaration witness, never
+            a fault. Readers: the run-level [footprint_cover] verdict the
+            engine appends to the settled map's laws, and [Report.explain]
+            (docs/architecture/30-channels.md § footprint filtering). *)
     | Repair_attempt of { attempt : int; refusal : bool }
     | Settled of Settlement.t
     | Decision of {

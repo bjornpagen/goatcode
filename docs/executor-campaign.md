@@ -5,6 +5,84 @@ This is a resumption tracker, not an architecture doc. The architecture docs
 in-flight work and is deleted when the campaign lands. If this file and the
 architecture docs disagree, the architecture docs win.
 
+## WAVE 2 COMPLETE (2026-07-14)
+
+Every B-finding is closed; the engine runs on the fiber substrate; the
+CLI is terminal-ready up to live keys. A cold session resumes from this
+section alone. Landed, by commit (subjects, newest last):
+
+- `1530549` Commit layer: content-judged witnesses (B7), base-coordinate
+  disjoint law (B8), real net deltas (B2's `net_delta` half).
+- `a01bdd3` Event log: typed Decision/Drift vocabularies, typed
+  `Pin_bump`/`Switch_thrown` (B11 reader half).
+- `a1ff882` Admission: generation strata (B9), total slot sets (B10),
+  admission parse audit.
+- `3bc9791` Channels: `Type.Id` payload witnesses, `Obj` deleted (B12).
+- `d088d0c` `lib/fiber`: the OCaml 5 effects substrate (vocabulary,
+  Deep-handler scheduler, curl-multi lane, FB1–FB7),
+  plus `docs/effects-evaluation.md`.
+- `7702e26` Boundary rewiring: codec-judged heads (B1), committed seeds
+  with payloads (B4), shape-lowered windows (B13), total mint provenance
+  (B14).
+- `e1f4ff0` Delivery + speculation: publish-on-retire, store-buffer
+  hypotheses + refresher, drift table consumed at all three sites,
+  lifecycle emission, typed squash causes (B3/B5/B6/B11 emission half/
+  most of B15).
+- `24073ef`/`26b1277` Effects integration: the chase and both provider
+  lanes mounted on `Fiber` (FM1–FM4); zero expect diffs on the
+  pre-existing suite.
+- (this commit) The B15 remainder + CLI readiness: footprint escapes
+  surfaced (`Channel.covers`, `Ledger.Event.Footprint_escape` appended at
+  retire, the `footprint_cover` verdict on the settled map,
+  `Report.explain`'s escape list, falsifier F16 in `test_delivery.ml` —
+  loads only, per `30-channels.md` § footprint filtering: a store is the
+  node's own work product and write overlaps are the disjoint law's
+  domain); typed bind-time CLI errors (config file/line/key named,
+  unknown provider named, missing API-key variable named BEFORE any node
+  runs — the dry `goat plan` path verified); `examples/run.toml`
+  (documented keys, sane defaults, planner pin
+  `claude-fable-5`/anthropic); `goat plan` journals the planning turn at
+  `<ledger_path>.plan` and the emitted run at `<ledger_path>` (one run
+  per ledger — replay stays honest) and prints the emitted statement
+  roster + both ledger locations; README Quickstart + Status; the
+  effects-adoption Decision block in `40-scheduling.md`;
+  `00-product.md` § substrate decision names the evaluation file;
+  `70-api.md` § the CLI matches the implemented surface.
+
+OPEN after wave 2, with owners:
+
+- **Live smoke (Phase C) — operator + wave 3.** Needs real
+  `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`; the README Quickstart is the
+  script. First-ever live model contact: expect wire-shape surprises the
+  rigged lanes cannot show. Anthropic `output_config.format` together
+  with tool use is untested live; the `server-side-fallback` betas
+  opt-in is still an open decision (details in "Provider wire facts").
+- **`shell_gate` Effect eventing — wave 3.** `Agent.shell_gate` runs the
+  gate command without appending an `Effect` event or taking the machine
+  lock (`agent.ml`); the grant types already encode declared idempotence.
+  `pure_fn` needs nothing (pure over operands — no loads/stores exist).
+- **Tool-load generations — wave 3 (small).** Agent tool loads still
+  record `Generation.zero` in witness triples; harmless since `holds`
+  judges content (B7), but the committed-generation lookup threading
+  through the executor is still owed.
+- **Recorded-shape mechanisms, deliberately unexercised:** the
+  `Issued_contract` hypothesis arm and retire's dangling-ref
+  serialize-reissue lane are reachable only when dispatch overlaps
+  producers; `No_producer` is emitted at `resolve_parked` but not
+  constructible end-to-end in the current engine. Mid-flight patching
+  (reconcile without reissue) stays the recorded convergence in
+  `40-scheduling.md` § drift routing.
+- **The ppx wound.** Hand-written wire schemas remain the recorded
+  second supply (`ppx_deriving_jsonschema` does not build on `+ox`);
+  tolerated per the substrate ruling until a deriver port or the Rust
+  port.
+- **Benchmark corpus** for the ≥1.5× headline claim (`80-validation.md`
+  OPEN) — after live smoke.
+
+Build/test: `opam exec --switch=5.2.0+ox -- dune build` /
+`dune runtest --force`. Full suite green at wave-2 close (F1–F16,
+FB1–FB7, FM1–FM4; rigged executors only).
+
 ## Where we are
 
 **PHASE A LANDED** (commit "Executors: direct provider APIs +
@@ -605,15 +683,23 @@ B15. **Minor cleanups (do last, batch):** port admission runs the survival
      - Dead-hypothesis squash: the whole doomed subtree's worktrees drop
        (`queued_worktrees` at every squash path), not just the rejected
        node's. DONE.
-     - Footprint escapes (`Channel.footprint`'s runtime half): NOT DONE.
-       Surfacing an escape needs an event the taxonomy doesn't carry and
-       this pass was fenced to the Squash_cause extension in `Ledger`;
-       additionally the engine's own operand reads cannot escape (they
-       are the edge's relation by construction) and tool reads outside
-       the grant are refused in-band, so v0's only escape source is a
-       grant wider than the declared footprint. Owed: an event (or
-       retire-verdict surface) plus the cover judgment
-       (`Channel.covers`), with the falsifier.
+     - Footprint escapes (`Channel.footprint`'s runtime half): DONE
+       (wave-2 finisher pass, 2026-07-14). `Channel.covers` is the
+       exposed cover judgment (the same one delivery uses); the chase
+       judges every observed Load against the edge's compiled filter at
+       `retire_success` and appends `Ledger.Event.Footprint_escape`
+       (one per escaped address, tool named); `Chase.judge` folds the
+       events into a violated `footprint_cover` verdict on the settled
+       map (only a violation lands — no declared law exists to report
+       satisfied); `Report.explain`'s story carries the per-node escape
+       list. Loads only, per 30-channels.md § footprint filtering (a
+       store is the node's own work product; write overlaps are the
+       disjoint law's domain). Falsifier F16 in test_delivery.ml
+       ("footprint escape: an uncovered load surfaces at retire…" —
+       escapee retires, covered sibling surfaces nothing). The
+       constructible v0 escape is a worktree read outside `read_globs`
+       (the worktree is a committed-tree checkout, so any committed file
+       is readable through it regardless of the declaration).
 
 ### Phase C — tests + live smoke
 

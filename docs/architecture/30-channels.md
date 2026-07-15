@@ -156,11 +156,15 @@ consequences:
   contract says the consumer depends on.
 - A consumer touched by an address *outside* its declared footprint (its
   event stream shows a load the declaration didn't cover) is a **footprint
-  escape** — logged, surfaced at retire, and treated as a witness the
-  declaration must grow to cover. The declaration is a filter, never a wall:
-  correctness comes from the observed witness, the declaration only tunes
-  delivery. Reader: the retire conflict judge (which uses observed sets) and
-  the theory author (who reads escape reports to fix declarations).
+  escape** — surfaced at retire as a typed ledger event
+  (`Footprint_escape`, one per escaped address, the tool named) and, at
+  quiescence, a violated `footprint_cover` verdict on the settled map
+  whose offenders name the node and address; the escape never blocks the
+  retire. The declaration is a filter, never a wall: correctness comes
+  from the observed witness, the declaration only tunes delivery. Readers:
+  the `footprint_cover` verdict and `Report.explain`'s per-node escape
+  list — what the theory author reads to grow the declaration (falsifier
+  F16).
 
 ## Store-to-load forwarding
 

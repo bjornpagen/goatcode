@@ -221,6 +221,17 @@ let print_story (st : Report.story) =
             (Format.asprintf "%a" Ledger.Generation.pp t.generation)
             (Ledger.Content_hash.to_hex t.content))
         triples);
+  (match st.escapes with
+  | [] -> ()
+  | escapes ->
+      print_endline
+        "footprint escapes (grow the declaration to cover these reads):";
+      List.iter
+        (fun (tool, address) ->
+          Printf.printf "  %s via %s\n"
+            (Ledger.Address.to_string address)
+            tool)
+        escapes);
   Printf.printf "settlement: %s\n" (render_settlement st.settlement);
   let { Ledger.Telemetry.blocked_s; queued_s; run_s } = st.timing in
   Printf.printf "timing: blocked %.3fs, queued %.3fs, run %.3fs\n" blocked_s
@@ -458,20 +469,32 @@ let rec map_result f = function
       Ok (y :: ys)
 
 (* The runtime behind an agent template's pin: dispatched on the pin's
-   [provider] field at BIND time — an unknown provider is a config error
-   before any node runs, never a mid-run surprise. Both lanes are direct
-   API calls behind the harness-owned tool loop (agent.mli owns the
-   no-shell-out ruling), and both post through [Fiber.http_post]: the
-   engine runs every node as a fiber, so the POST is the [Http_post]
-   suspension the scheduler overlaps — N provider turns in flight on one
-   domain (chase.mli [create]). *)
+   [provider] field at BIND time — an unknown provider or a missing API
+   key is a config error before any node runs, never a mid-chase
+   surprise. Both lanes are direct API calls behind the harness-owned
+   tool loop (agent.mli owns the no-shell-out ruling), and both post
+   through [Fiber.http_post]: the engine runs every node as a fiber, so
+   the POST is the [Http_post] suspension the scheduler overlaps — N
+   provider turns in flight on one domain (chase.mli [create]). *)
+let require_key ~provider ~variable =
+  match Sys.getenv_opt variable with
+  | Some key when not (String.equal key "") -> Ok ()
+  | Some _ | None ->
+      Error
+        (Printf.sprintf
+           "a pin routes to provider %S but %s is not set in the \
+            environment (export %s=... and rerun)"
+           provider variable variable)
+
 let provider_runtime (pin : Theory.Pin.t) =
   match pin.provider with
   | "anthropic" ->
+      let* () = require_key ~provider:"anthropic" ~variable:"ANTHROPIC_API_KEY" in
       Ok
         (Agent.agent ~stop:[]
            ~provider:(Agent.Provider.anthropic ~post:Fiber.http_post ()))
   | "openai" ->
+      let* () = require_key ~provider:"openai" ~variable:"OPENAI_API_KEY" in
       Ok
         (Agent.agent ~stop:[]
            ~provider:(Agent.Provider.openai ~post:Fiber.http_post ()))
@@ -529,12 +552,14 @@ let bindings_of ~theory ~port ~repair_attempts =
        [] bindings
     |> List.rev)
 
-let run_config_of ~(file : Config_file.t) ~theory =
+let run_config_of ~path ~(file : Config_file.t) ~theory =
   let require key =
-    match Config_file.str file key with
-    | Some s -> Ok s
+    match List.assoc_opt key file.Config_file.scalars with
+    | Some (Config_file.Str s) -> Ok s
+    | Some _ ->
+        Error (Printf.sprintf "%s: key %S must be a string" path key)
     | None ->
-        Error (Printf.sprintf "run.toml: missing required string key %S" key)
+        Error (Printf.sprintf "%s: missing required string key %S" path key)
   in
   let* repo = require "repo" in
   let* committed_branch = require "committed_branch" in
@@ -753,7 +778,14 @@ let cmd_replay ~ledger_path =
 (* The full planner loop: bootstrap run, meta-catalog parse, the same
    admission judgment a hand-written theory faces, then the emitted
    theory — one command, the admission-repair cycle visible in the
-   ledger like any other repair (70-api § the CLI). *)
+   ledger like any other repair (70-api § the CLI).
+
+   Two runs, two ledgers: the bootstrap (planning) run journals at
+   [ledger_path ^ ".plan"], the emitted theory's run at [ledger_path]
+   itself — each ledger is one run's replayable journal (node identity is
+   per run; interleaving two runs in one file would make [goat replay]
+   report false divergences), and [goat report <ledger>] reads the run
+   the operator asked for. *)
 let cmd_plan ~spec ~config_path =
   if not (Sys.file_exists config_path) then begin
     Printf.eprintf "goat plan: config path does not exist: %s\n" config_path;
@@ -763,7 +795,7 @@ let cmd_plan ~spec ~config_path =
     let prepared =
       let* file = Config_file.load config_path in
       let* bootstrap, seed = plan_bootstrap ~spec ~pin:(planner_pin_of file) in
-      let* config = run_config_of ~file ~theory:bootstrap in
+      let* config = run_config_of ~path:config_path ~file ~theory:bootstrap in
       Ok (file, bootstrap, seed, config)
     in
     match prepared with
@@ -771,6 +803,8 @@ let cmd_plan ~spec ~config_path =
         Printf.eprintf "goat plan: %s\n" msg;
         1
     | Ok (file, bootstrap, seed, config) -> (
+        let plan_ledger = config.Run.ledger_path ^ ".plan" in
+        let config = { config with Run.ledger_path = plan_ledger } in
         match Run.exec ~theory:bootstrap ~seed ~config with
         | Error misuse ->
             Printf.eprintf "goat plan: %s\n" (render_misuse misuse);
@@ -807,11 +841,22 @@ let cmd_plan ~spec ~config_path =
                           (render_admission_errors errs);
                         1
                     | Ok emitted -> (
-                        match run_config_of ~file ~theory:emitted with
+                        match
+                          run_config_of ~path:config_path ~file ~theory:emitted
+                        with
                         | Error msg ->
                             Printf.eprintf "goat plan: %s\n" msg;
                             1
                         | Ok config' -> (
+                            Printf.printf
+                              "planner emitted an admitted theory: %d \
+                               relations, statements [%s]\n"
+                              (List.length (Theory.relations emitted))
+                              (String.concat ", "
+                                 (List.map
+                                    (fun (sid, _) ->
+                                      Theory.Statement.to_string sid)
+                                    (Theory.statements emitted)));
                             (* The emitted theory carries its own spawn
                                structure; its seed relations, if any, are
                                the operator's next move — the bootstrap
@@ -825,6 +870,9 @@ let cmd_plan ~spec ~config_path =
                                 1
                             | Ok settled' ->
                                 print_settled settled';
+                                Printf.printf
+                                  "plan ledger: %s\nrun ledger: %s\n"
+                                  plan_ledger config'.Run.ledger_path;
                                 0))))))
 
 (* ------------------------------------------------------------------ *)

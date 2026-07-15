@@ -37,6 +37,7 @@ type story = {
   decisions : (Ledger.Timestamp.t * string * string) list;
   drift_notes : (Ledger.Timestamp.t * string * string) list;
   witness : Witness.triple list;
+  escapes : (string * Ledger.Address.t) list;
   settlement : Ledger.Settlement.t;
   timing : Ledger.Telemetry.timing;
   usage : Ledger.Usage.t;
@@ -553,6 +554,17 @@ let explain (settled : Run.settled) ~(node : Ledger.node Id.t) : story option =
             else None)
           events
       in
+      let escapes =
+        List.filter_map
+          (fun (e : Ledger.Event.t) ->
+            if mine e then
+              match e.kind with
+              | Ledger.Event.Footprint_escape { tool; address } ->
+                  Some (tool, address)
+              | _ -> None
+            else None)
+          events
+      in
       let drift_notes =
         List.filter_map
           (fun (e : Ledger.Event.t) ->
@@ -613,6 +625,7 @@ let explain (settled : Run.settled) ~(node : Ledger.node Id.t) : story option =
               drift_notes;
               witness =
                 Witness.triples (Witness.observed settled.ledger ~node);
+              escapes;
               settlement;
               timing;
               usage;

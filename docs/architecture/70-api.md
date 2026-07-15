@@ -112,8 +112,10 @@ val Run.exec :
   config:Run.config ->            (* worktree root, ledger path, port table,
                                      backstops: token ceiling + confidence
                                      floor, per-shape speculation off switches *)
-  Run.settled Lwt.t               (* or effect-based equivalent; the fiber
-                                     substrate is an implementation fact *)
+  (Run.settled, Run.misuse) result
+  (* Direct style on the cooperative fiber substrate (40-scheduling.md
+     § read-time binding): exec drives the scheduler to quiescence in
+     this process, on one domain — no monadic wrapper on the surface. *)
 ```
 
 One entry point. Seed tuples are facts, not work product: each one enters
@@ -180,9 +182,11 @@ Pull surfaces, all ledger queries, none of them on any hot path:
 
 ```
 goat run <theory.exe> --seed seed.json --config run.toml
+goat plan "<spec>" --config run.toml
 goat report <ledger>            # summarize
 goat explain <ledger> <node>    # one node's story
 goat replay <ledger>            # replay-determinism check (80-validation.md)
+goat version
 ```
 
 Theories compile to executables that link the library and call `Run.exec` —
@@ -191,7 +195,34 @@ semantics of its own. The planner path (`goat plan "<spec>"`) seeds a
 one-statement bootstrap theory whose single node is the planner template
 emitting a theory through the meta-catalog, then runs admission and, on
 success, the emitted theory — the full loop in one command, with the
-admission-repair cycle visible in the ledger like any other repair.
+admission-repair cycle visible in the ledger like any other repair. The
+two runs journal separately (node identity is per run, so one file
+holding two runs would make `goat replay` report false divergences): the
+planning turn at `<ledger_path>.plan`, the emitted theory's run at
+`<ledger_path>`. On success `plan` prints the emitted theory's statement
+roster, the settled map, any law verdicts, and both ledger locations.
+
+**`run.toml` is the CLI's config subset**, parsed once and entirely at
+bind time — `examples/run.toml` documents every key. Top level:
+`repo`, `committed_branch`, `worktree_root`, `ledger_path` (required
+strings); `port` (default executor port, default `"agents"`);
+`token_ceiling`, `confidence_floor` (the backstops); `repair_attempts`
+(default 3); `planner_provider`/`planner_model` (the plan pin, default
+`anthropic`/`claude-fable-5`). `[[ports]]` tables declare bounded ports —
+`name` alone opens one; a `limit` parses only together with its
+documented `bottleneck` (`Chase.Port.bounded`). Deliberately absent:
+speculation off switches (unconstructible from config text — a throw
+requires ledger-derived churn evidence, § running above) and merge
+functions (v0 ships the registry empty, `50-commit.md`).
+
+**Every CLI failure on this surface is a typed, named complaint, never a
+stack trace**: a missing or malformed config names the file, line, and
+key; an unknown provider in a pin names the provider and the accepted
+set; a pin routing to a provider whose API key variable
+(`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`) is unset names the variable — all
+judged at bind time, before any node runs, so a dry `goat plan` with no
+key exits on the typed key error without a single model call or worktree
+touch.
 
 ## OPEN items
 

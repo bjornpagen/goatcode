@@ -46,9 +46,65 @@ the acceptance gate) and the reading order.
 
 ## Status
 
-Design phase. The architecture docs are complete and normative; the OxCaml
-implementation is scaffolding. Nothing here has run a pipeline yet; every
-measured claim in the docs is marked as unearned until the ledger earns it.
+The architecture docs are complete and normative, and the OxCaml
+implementation now runs them: the chase engine on the OCaml 5 effects
+fiber substrate, both direct provider lanes (Anthropic Messages, OpenAI
+Responses) behind the harness-owned tool loop, delivery, default-on
+speculation, and retire — all held by the falsifier suite (F1–F16,
+FB1–FB7, FM1–FM4) on rigged executors. No live model has run a pipeline
+yet; every measured claim in the docs stays marked unearned until the
+ledger earns it.
+
+## Quickstart
+
+Build (the switch is linked to this directory):
+
+```
+opam exec --switch=5.2.0+ox -- dune build
+opam exec --switch=5.2.0+ox -- dune runtest   # the falsifier suite, no model calls
+```
+
+The planner lane is a live Anthropic call, so export a key (the matching
+variable for every provider a pin routes to — `goat plan` refuses at bind
+time, before any node runs, if one is missing):
+
+```
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Copy the documented config and point its paths somewhere real
+([examples/run.toml](examples/run.toml) documents every key):
+
+```
+cp examples/run.toml run.toml
+mkdir -p /tmp/goat-worktrees
+```
+
+Plan and run a toy spec — one command runs the full loop (planner emits a
+theory through the meta-catalog, admission judges it, the emitted theory
+runs):
+
+```
+./_build/default/bin/main.exe plan \
+  "Write docs/haiku.md: one haiku about speculative execution. \
+   Then have a second agent review it and write docs/haiku-review.md." \
+  --config run.toml
+```
+
+Expect on stdout: a `planner emitted an admitted theory: …` line naming
+the emitted statements, then the settled map (one line per node —
+`retired`/`faulted`/`squashed`, with the blocked/queued/run decomposition
+and token bill), any law verdicts, and the two ledger locations (the
+planning turn journals at `<ledger_path>.plan`, the emitted theory's run
+at `<ledger_path>`). The committed work lands on the `committed_branch`
+of the config's repo. Then read the run back — these are offline ledger
+readers:
+
+```
+./_build/default/bin/main.exe report /tmp/goat-ledger.bin    # wall clock, parallelism, speculation account
+./_build/default/bin/main.exe explain /tmp/goat-ledger.bin node#0
+./_build/default/bin/main.exe replay /tmp/goat-ledger.bin    # replay-determinism audit
+```
 
 ## Toolchain
 

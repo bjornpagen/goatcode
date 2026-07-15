@@ -89,6 +89,36 @@ honors. Scheduling stays deterministic and replay-coherent: FIFO ready
 queue, spawn and wake order fixed by the trace, completion order owned by
 the transport (curl-multi live; scripted in falsifiers FM1–FM4).
 
+**Decision — the substrate is OCaml 5 effects, owned outright.** What is
+adopted: a single-domain Deep-handler scheduler (`Fiber`) over a
+three-instruction typed vocabulary (`Read`/`Yield`/`Http_post`), with
+park/wake keyed by address, squash as discontinue with `Fun.protect`
+finalizers, and curl-multi as the async HTTP lane — every dispatched node
+a direct-style fiber.
+**Alternative:** the blocking engine (whole-instance parking, re-read all
+operands per attempt, requeue the entire parked list on any retirement) —
+lost because it can hold N provider calls open only by burning N threads
+or serializing, and because it is provably the defunctionalized form of
+this scheduler (the mount reproduced the blocking trace with zero expect
+diffs), i.e. the same machine with the resume points hand-maintained.
+**Alternative:** Lwt or Eio — lost to monadic coloring (every function
+between the tool loop and a suspension point recolors) and to importing a
+general-purpose runtime where the deterministic, ledger-ordered scheduler
+*is* the product; stdlib `Effect` also kept the no-new-dependencies rule.
+The cost is recorded honestly: every effects guarantee here is dynamic
+(untyped performs, runtime `Unhandled`, runtime one-shot enforcement,
+escapable discontinue), so this one layer is held by falsifiers
+(FB1–FB7) where the rest of the codebase gets types — the full evidence
+file is `docs/effects-evaluation.md`.
+**Reverses if:** OxCaml's typed effects mature (the growth path: the
+vocabulary moves from discipline-as-documentation into signatures, and
+FB6's runtime containment becomes a compile error), or the recorded
+Rust-port trigger fires (`00-product.md` § substrate decision) — the
+evaluation file records what ports (the semantics: park/wake/squash/
+overlap all express in async Rust, `Drop` even improves squash) and what
+is lost (direct style; Rust buys back the coloring), bounding that cost
+to this layer plus the executor loop's signatures.
+
 **Read-time hypotheses dominate issue-time hypotheses, by construction.**
 The hypothesis is taken as late as the work allows — after the eager prefix,
 often minutes into the producer's own run — so it is taken against a richer

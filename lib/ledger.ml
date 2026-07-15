@@ -243,6 +243,7 @@ module Event = struct
         cls : Drift.cls;
         route : Drift.route;
       }
+    | Footprint_escape of { tool : string; address : Address.t }
     | Repair_attempt of { attempt : int; refusal : bool }
     | Settled of Settlement.t
     | Decision of {

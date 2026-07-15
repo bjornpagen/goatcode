@@ -606,6 +606,43 @@ let witnessed_files_of t node =
       match a with Ledger.Address.File p -> Some p | _ -> None)
     (Ledger.Witness_index.reads t.ledger node)
 
+(* The footprint-escape judge: every load the node's event stream proves,
+   judged against its edge's compiled delivery filter ([Channel.footprint],
+   the declared half; [Channel.covers], the cover judgment delivery already
+   uses). A load outside the filter means the node consulted state whose
+   invalidations its subscription will never carry — the declaration must
+   grow to cover it. Loads only: a store is the node's own work product,
+   and write overlaps are the disjoint law's domain
+   (docs/architecture/30-channels.md § footprint filtering). One escape
+   per address; the first tool that touched it is named. *)
+let footprint_escapes t (inst : instance) =
+  let key =
+    Theory.Statement.to_string inst.provenance.Ledger.Provenance.statement
+  in
+  match List.assoc_opt key t.rxs with
+  | None -> []
+  | Some (Any_rx (_, rx)) ->
+      let declared = Channel.footprint rx in
+      List.fold_left
+        (fun escapes (e : Ledger.Event.t) ->
+          match (e.Ledger.Event.node, e.Ledger.Event.kind) with
+          | Some n, Ledger.Event.Load { tool; observed }
+            when Id.equal n inst.node ->
+              List.fold_left
+                (fun escapes (address, _, _) ->
+                  if
+                    Channel.covers ~footprint:declared address
+                    || List.exists
+                         (fun (_, a) -> Ledger.Address.equal a address)
+                         escapes
+                  then escapes
+                  else (tool, address) :: escapes)
+                escapes observed
+          | _ -> escapes)
+        []
+        (Ledger.Replay.events t.ledger)
+      |> List.rev
+
 let note_drift t ~node ~address ~delta cls =
   let route = Speculate.Drift.route cls in
   ignore
@@ -1435,6 +1472,19 @@ let refresh_hypotheses t (c : completed) =
     t.undischarged
 
 let retire_success t (c : completed) =
+  (* Footprint escapes surface at retire, before anything downstream of
+     the landing runs: each observed load outside the edge's compiled
+     delivery filter is a typed event on the retiring node. Its readers
+     are the [footprint_cover] verdict ([judge], below) and
+     [Report.explain] (docs/architecture/30-channels.md § footprint
+     filtering). *)
+  List.iter
+    (fun (tool, address) ->
+      ignore
+        (Ledger.append t.ledger ~node:c.inst.node
+           (Ledger.Event.Footprint_escape { tool; address })
+          : Ledger.Event.t))
+    (footprint_escapes t c.inst);
   (* Retire.step sealed the ledger; the engine records the settlement.
      The heads entered the body-match feed at completion (store-buffer
      forwarding); the committed lookup now answers for them. *)
@@ -1886,7 +1936,34 @@ let quiescent t =
 let settlements t = List.rev t.settled
 let committed t = t.committed_state
 
+(* The retire-time half of footprint filtering, read at quiescence: the
+   escape events the retire path appended, folded into one run-level
+   verdict. Only a violation lands — an escape-free run has nothing to
+   surface, and this is not a declared law with a satisfied case to
+   report (no structure nothing consumes). The offender strings name the
+   node and the escaped address: what the theory author reads to grow the
+   declaration (docs/architecture/30-channels.md § footprint
+   filtering). *)
+let footprint_cover_verdict t =
+  let offenders =
+    List.filter_map
+      (fun (e : Ledger.Event.t) ->
+        match (e.Ledger.Event.node, e.Ledger.Event.kind) with
+        | Some n, Ledger.Event.Footprint_escape { address; _ } ->
+            Some
+              (Id.to_string n ^ " read " ^ Ledger.Address.to_string address)
+        | _ -> None)
+      (Ledger.Replay.events t.ledger)
+  in
+  match offenders with
+  | [] -> []
+  | offenders ->
+      [ { Theory.Law.law = "footprint_cover"; satisfied = false; offenders } ]
+
 let judge t =
   if quiescent t then
-    Ok (Retire.judge ~theory:t.theory ~committed:t.committed_state ~ledger:t.ledger)
+    Ok
+      (Retire.judge ~theory:t.theory ~committed:t.committed_state
+         ~ledger:t.ledger
+      @ footprint_cover_verdict t)
   else Error `Not_quiescent

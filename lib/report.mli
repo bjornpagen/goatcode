@@ -66,6 +66,11 @@ type story = {
   drift_notes : (Ledger.Timestamp.t * string * string) list;
       (** Each note received: (when, class, route taken). *)
   witness : Witness.triple list;  (** The witness at retire. *)
+  escapes : (string * Ledger.Address.t) list;
+      (** Footprint escapes surfaced at retire: (tool, address) for each
+          observed load outside the edge's compiled delivery filter — the
+          witnesses the declaration must grow to cover
+          (docs/architecture/30-channels.md § footprint filtering). *)
   settlement : Ledger.Settlement.t;
   timing : Ledger.Telemetry.timing;
   usage : Ledger.Usage.t;

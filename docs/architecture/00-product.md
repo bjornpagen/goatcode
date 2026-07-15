@@ -236,7 +236,15 @@ GOAT CODE to a foundation that is itself pre-stability, and because the
 right representation is only visible after the running version exposes the
 pattern (the Brooks limit, applied to ourselves).
 **Ruling: OxCaml is the experimental substrate; the port is planned, not
-hypothetical.** Interim disciplines that keep the port cheap: the ledger
+hypothetical.** The effects half of the bet has returned its evidence:
+the fiber substrate runs the engine, and `docs/effects-evaluation.md` is
+the language-test report the port decision consults — what effects
+measurably bought (overlap without threads, squash with real finalizers,
+no monadic coloring), the recorded price (every guarantee at that layer
+is dynamic, held by falsifiers where the rest of the codebase gets
+types), and the port shape (the semantics express in async Rust; the
+direct style is what a port loses). The adoption ruling itself lives at
+`40-scheduling.md` § read-time binding. Interim disciplines that keep the port cheap: the ledger
 format and wire schemas stay language-neutral (JSON on disk, never
 Marshal); investment goes to the layers that survive the port conceptually
 (theory grammar, scheduler policy, drift routing, prompt assembly), and the

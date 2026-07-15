@@ -52,7 +52,7 @@ let glob_match pattern path =
 let any_id = "*"
 
 (* Does one declared address cover one concrete address? *)
-let covers (declared : Ledger.Address.t) (concrete : Ledger.Address.t) =
+let covers_address (declared : Ledger.Address.t) (concrete : Ledger.Address.t) =
   match (declared, concrete) with
   | File pattern, File path -> glob_match pattern path
   | Tuple { relation = dr; id = di }, Tuple { relation = cr; id = ci } ->
@@ -60,6 +60,13 @@ let covers (declared : Ledger.Address.t) (concrete : Ledger.Address.t) =
   | Contract a, Contract b -> String.equal a b
   | Resource a, Resource b -> String.equal a b
   | (File _ | Tuple _ | Contract _ | Resource _), _ -> false
+
+(* The one cover judgment, two callers: delivery ([Invalidation.passes])
+   and the footprint-escape judge at retire (channel.mli [covers]). *)
+let covers ~footprint concrete =
+  List.exists
+    (fun declared -> covers_address declared concrete)
+    (Ledger.Footprint.to_list footprint)
 
 module Invalidation = struct
   type t = {
@@ -69,10 +76,7 @@ module Invalidation = struct
     delta_ref : Ledger.Delta_ref.t;
   }
 
-  let passes ~footprint t =
-    List.exists
-      (fun declared -> covers declared t.address)
-      (Ledger.Footprint.to_list footprint)
+  let passes ~footprint t = covers ~footprint t.address
 end
 
 (* ------------------------------------------------------------------ *)

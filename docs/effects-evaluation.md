@@ -5,8 +5,13 @@ the operator effects ruling, `executor-campaign.md`). This is an evidence
 file, not an architecture doc: it records what the effects port of the
 fiber substrate (`lib/fiber.mli`/`fiber.ml`, `Http.Multi`,
 `test/test_fiber.ml`) actually bought, every sharp edge the code hit, and
-what that implies for the recorded Rust-port trigger. Honest verdict at
-the end; delete or fold into `00-product.md` when the ruling lands.
+what that implies for the recorded Rust-port trigger. The ruling has
+landed: the adoption is a Decision block in `40-scheduling.md`
+§ read-time binding, and `00-product.md` § substrate decision names this
+file as the evidence the port decision consults — this file stays as
+that linked evidence record (folding it inline would bloat a normative
+doc with narrative history, which doc rule 5 bans). Honest verdict at
+the end.
 
 ## What was built
 

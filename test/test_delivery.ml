@@ -798,3 +798,132 @@ let%expect_test "squash causes: a conflict loser is a reissue-loser, and \
     reissued attempt settled: retired
     replay: coherent
     |}]
+
+(* ------------------------------------------------------------------ *)
+(* Footprint escapes (the B15 remainder): a load the node's event stream
+   proves, landing outside its edge's compiled delivery filter, surfaces
+   at retire as the typed [Footprint_escape] event, a violated
+   [footprint_cover] verdict on the settled map, and the escape list in
+   [Report.explain]'s story — the witness the declaration must grow to
+   cover (the node consulted state whose invalidations its subscription
+   will never carry). The declaration is a filter, never a wall: the
+   escapee still retires. A sibling whose read_globs cover its read is
+   the control — no event, no offender
+   (docs/architecture/30-channels.md § footprint filtering). *)
+
+let%expect_test "footprint escape: an uncovered load surfaces at retire as \
+                 the typed event and the footprint_cover verdict" =
+  let task = json_relation "task" in
+  let eout = json_relation "eout" in
+  let cout = json_relation "cout" in
+  let escapee = template "escapee" in
+  let covered = template ~read_globs:[ "covered.txt" ] "covered" in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed eout;
+          Theory.Relation.Packed cout;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"escape" ~for_:"task"
+            ~exists:("eout", Theory.Window.nodes 1)
+            ~by:escapee ();
+          Theory.Spawn.v ~name:"cover" ~for_:"task"
+            ~exists:("cout", Theory.Window.nodes 1)
+            ~by:covered ();
+        ]
+  in
+  let repo, worktrees, ledger_path = sandbox "goat_escape_" in
+  let executors =
+    [
+      (* The escapee drafts and re-reads notes.txt — twice, so the
+         one-event-per-address dedup is exercised — with an empty
+         read_globs declaration: the load lands outside the compiled
+         footprint. *)
+      binding ~by:escapee
+        ~script:
+          [
+            write_tool "notes.txt" "scratch";
+            read_tool "notes.txt";
+            read_tool "notes.txt";
+            R.Reply {|{"msg":"escaped"}|};
+          ];
+      (* The control performs the same shape with the read declared. *)
+      binding ~by:covered
+        ~script:
+          [
+            write_tool "covered.txt" "scratch";
+            read_tool "covered.txt";
+            R.Reply {|{"msg":"covered"}|};
+          ];
+    ]
+  in
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      let escaper =
+        match node_of_stmt events "escape" with
+        | Some n -> n
+        | None -> failwith "escape never fired"
+      in
+      let coverer =
+        match node_of_stmt events "cover" with
+        | Some n -> n
+        | None -> failwith "cover never fired"
+      in
+      let escapes_of node =
+        List.filter_map
+          (fun (e : Ledger.Event.t) ->
+            match e.kind with
+            | Ledger.Event.Footprint_escape { tool; address }
+              when of_node node e ->
+                Some
+                  (Printf.sprintf "%s via %s"
+                     (Ledger.Address.to_string address)
+                     tool)
+            | _ -> None)
+          events
+      in
+      List.iter print_endline (escapes_of escaper);
+      check "one escape event per address, tool named"
+        (match escapes_of escaper with
+        | [ "file:notes.txt via read_file" ] -> true
+        | _ -> false);
+      check "the covered sibling surfaced nothing"
+        (List.is_empty (escapes_of coverer));
+      check "the escapee still retired (the declaration is a filter, never \
+             a wall)"
+        (match settlement_of settled escaper with
+        | Some Ledger.Settlement.Retired -> true
+        | _ -> false);
+      List.iter
+        (fun (v : Theory.Law.verdict) ->
+          Printf.printf "law %s: %s (offenders: %s)\n" v.law
+            (if v.satisfied then "satisfied" else "violated")
+            (String.concat ", " v.offenders))
+        settled.Run.laws;
+      (match Report.explain settled ~node:escaper with
+      | None -> print_endline "!! no story for the escapee"
+      | Some story ->
+          check "the story reader carries the escape"
+            (match story.Report.escapes with
+            | [ ("read_file", Ledger.Address.File "notes.txt") ] -> true
+            | _ -> false));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    file:notes.txt via read_file
+    one escape event per address, tool named: true
+    the covered sibling surfaced nothing: true
+    the escapee still retired (the declaration is a filter, never a wall): true
+    law footprint_cover: violated (offenders: node#0 read file:notes.txt)
+    the story reader carries the escape: true
+    replay: coherent
+    |}]
