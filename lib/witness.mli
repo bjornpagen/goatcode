@@ -43,24 +43,54 @@ val consumed_paths :
     field the consumer never read is additive from that consumer's
     perspective (docs/architecture/40-scheduling.md § drift routing). *)
 
+val observed_content :
+  t -> Ledger.Address.t -> Ledger.Content_hash.t option
+(** The content the node's latest observed read of [address] proves it
+    derived from — the base coordinate of its committed writes, from which
+    the disjoint law detects clobbers by construction
+    (docs/architecture/50-commit.md § retirement order and the merge).
+    [None]: the node never read the address (a blind write's base). *)
+
 (** {2 The commit-point check} *)
+
+(** The committed side of the check: what the committed store knows about
+    one address. Absence is a real case, never a sentinel generation — a
+    fresh address's first landing ([Landed] at the first generation) is a
+    different state from [Absent], which is what closes the hole where a
+    consumer that witnessed a pre-commit draft could retire over a
+    producer's differing first landing. *)
+module Committed_state : sig
+  type t =
+    | Absent  (** Nothing has ever landed at the address. *)
+    | Landed of {
+        generation : Ledger.Generation.t;
+        content : Ledger.Content_hash.t;
+      }
+    | Deleted of { generation : Ledger.Generation.t }
+        (** A committed deletion: the address has a generation but no
+            content — every triple witnessed against it is stale. *)
+end
 
 type stale = {
   address : Ledger.Address.t;
   witnessed : Ledger.Generation.t;
-  current : Ledger.Generation.t;
+  current : Committed_state.t;
 }
-(** One witnessed address whose committed generation has moved. *)
+(** One witnessed triple the committed state no longer supports. *)
 
 val holds :
   t ->
-  committed:(Ledger.Address.t -> Ledger.Generation.t option) ->
+  committed:(Ledger.Address.t -> Committed_state.t) ->
   (unit, stale list) result
-(** Commit iff the witness holds: every witnessed (address, generation) is
-    still the committed generation. [Error stales] is the raw material of
-    [Retire.Generation_moved] — the engine performs no retry, no merge
-    heroics, no silent re-read; routing is the scheduler's
-    (docs/architecture/50-commit.md § law 3).
+(** Commit iff the witness holds: every witnessed triple still describes
+    the committed state. The judged thing is the artifact (law 1) — the
+    committed content is the content the triple carries; generation
+    equality is that comparison's shadow under law 2, never the check
+    itself. A triple witnessed at the primordial generation holds against
+    [Absent] (a pre-commit read of state nothing has landed over). [Error
+    stales] is the raw material of [Retire.Generation_moved] — the engine
+    performs no retry, no merge heroics, no silent re-read; routing is the
+    scheduler's (docs/architecture/50-commit.md § law 3).
 
     Soundness, never freshness: a held witness proves the node's outputs
     were derived from the state they claim — it does not prove no better

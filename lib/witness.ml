@@ -56,32 +56,57 @@ let consumed_paths t ~contract_of =
     t []
   |> List.sort_uniq String.compare
 
+(* The latest observed read wins: a node that legitimately read an address
+   twice across a producer's store advance derived its output from the
+   fresher content, and that is the base its own write of the address
+   advanced from. *)
+let observed_content t address =
+  Triple_set.fold
+    (fun tr acc ->
+      if Ledger.Address.equal tr.address address then Some tr.content else acc)
+    t None
+
+module Committed_state = struct
+  type t =
+    | Absent
+    | Landed of {
+        generation : Ledger.Generation.t;
+        content : Ledger.Content_hash.t;
+      }
+    | Deleted of { generation : Ledger.Generation.t }
+end
+
 type stale = {
   address : Ledger.Address.t;
   witnessed : Ledger.Generation.t;
-  current : Ledger.Generation.t;
+  current : Committed_state.t;
 }
 
-(* Law 3: commit iff EVERY witnessed (address, generation) is still the
-   committed generation — a generation check only; law 2 (only semantic
-   change advances a generation) is what makes generation equality mean
-   content identity. An address with no committed generation is judged at
-   [Generation.zero], the primordial (never-written) state: a triple
-   witnessed at zero against absent committed state holds; anything else
-   witnessed there is stale. Soundness, never freshness: nothing here asks
-   whether a better input existed (law 4). Nothing routes here — the stale
-   list is raw material for [Retire.Witness_moved]; the scheduler owns what
-   happens next. *)
+(* Law 3: commit iff EVERY witnessed triple still describes the committed
+   state — and the judged thing is the artifact (law 1), the content hash,
+   never the generation number: law 2 makes generation equality a shadow of
+   content identity, but a fresh landing and a pre-commit read share the
+   first generation and only their content tells them apart. Absence is a
+   real case: a triple witnessed at [Generation.zero] against [Absent]
+   holds (a pre-commit read nothing has landed over); a committed-
+   generation triple against [Absent] is inconsistent and stale. Soundness,
+   never freshness: nothing here asks whether a better input existed
+   (law 4). Nothing routes here — the stale list is raw material for
+   [Retire.Witness_moved]; the scheduler owns what happens next. *)
 let holds t ~committed =
   let stales =
     Triple_set.fold
       (fun tr acc ->
-        let current =
-          match committed tr.address with
-          | Some g -> g
-          | None -> Ledger.Generation.zero
+        let current = committed tr.address in
+        let held =
+          match current with
+          | Committed_state.Absent ->
+              Ledger.Generation.equal tr.generation Ledger.Generation.zero
+          | Committed_state.Landed { content; _ } ->
+              Ledger.Content_hash.equal tr.content content
+          | Committed_state.Deleted _ -> false
         in
-        if Ledger.Generation.equal tr.generation current then acc
+        if held then acc
         else
           { address = tr.address; witnessed = tr.generation; current } :: acc)
       t []

@@ -11,6 +11,11 @@
    speculators retire with zero reconcile events
    (docs/architecture/50-commit.md § law 2 — the economic keystone).
 
+   Law 3, fresh addresses — the commit-point check judges the artifact:
+   a consumer that witnessed a pre-commit draft a producer's first landing
+   replaced is rejected even though both states share the first generation
+   (docs/architecture/50-commit.md § law 3 — absence is a real case).
+
    Every executor here is [Agent.Rigged]; no test constructs
    [Agent.claude_cli]; nothing sleeps; nothing touches the network. *)
 
@@ -101,6 +106,13 @@ let settlement_name = function
 let gen_str = function
   | None -> "none"
   | Some g -> Format.asprintf "%a" Ledger.Generation.pp g
+
+let state_str = function
+  | Witness.Committed_state.Absent -> "absent"
+  | Witness.Committed_state.Landed { generation; _ } ->
+      Format.asprintf "landed@%a" Ledger.Generation.pp generation
+  | Witness.Committed_state.Deleted { generation } ->
+      Format.asprintf "deleted@%a" Ledger.Generation.pp generation
 
 let route_name = function
   | Speculate.Drift.Route.Discharge_silently -> "discharge_silently"
@@ -227,9 +239,15 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
      the witness, this commit-point check would go stale; it must hold. *)
   let committed a =
     if Ledger.Address.equal a claimed then
-      Some (Ledger.Generation.next Ledger.Generation.zero)
-    else if Ledger.Address.equal a real then Some g0
-    else None
+      Witness.Committed_state.Landed
+        {
+          generation = Ledger.Generation.next Ledger.Generation.zero;
+          content = Ledger.Content_hash.of_string "moved bytes";
+        }
+    else if Ledger.Address.equal a real then
+      Witness.Committed_state.Landed
+        { generation = g0; content = Ledger.Content_hash.of_string "real bytes" }
+    else Witness.Committed_state.Absent
   in
   (match Witness.holds w ~committed with
   | Ok () -> print_endline "claimed address moved: witness holds (claim bought nothing)"
@@ -238,8 +256,12 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
      read moves, the same witness must fail. *)
   let committed_real_moved a =
     if Ledger.Address.equal a real then
-      Some (Ledger.Generation.next Ledger.Generation.zero)
-    else None
+      Witness.Committed_state.Landed
+        {
+          generation = Ledger.Generation.next Ledger.Generation.zero;
+          content = Ledger.Content_hash.of_string "moved bytes";
+        }
+    else Witness.Committed_state.Absent
   in
   (match Witness.holds w ~committed:committed_real_moved with
   | Ok () -> print_endline "real address moved: witness holds (INSTRUMENT BLIND)"
@@ -247,7 +269,7 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
       Printf.printf "real address moved: stale %s witnessed %s current %s\n"
         (Ledger.Address.to_string stale.address)
         (Format.asprintf "%a" Ledger.Generation.pp stale.witnessed)
-        (Format.asprintf "%a" Ledger.Generation.pp stale.current)
+        (state_str stale.current)
   | Error _ -> print_endline "real address moved: multiple stales");
   sh (Printf.sprintf "rm -rf %s" (Filename.quote dir));
   [%expect
@@ -257,7 +279,7 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
     claimed address in witness: false
     real address in witness: true
     claimed address moved: witness holds (claim bought nothing)
-    real address moved: stale file:src/real_input.txt witnessed g0 current g1
+    real address moved: stale file:src/real_input.txt witnessed g0 current landed@g1
     |}]
 
 (* ================================================================== *)
@@ -324,13 +346,13 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
   let w = Witness.observed ledger ~node:hider in
   Printf.printf "hidden read in witness: %b\n"
     (Ledger.Footprint.mem (Witness.addresses w) (Ledger.Address.File "f.txt"));
-  (match Witness.holds w ~committed:(Retire.Committed.generation committed) with
+  (match Witness.holds w ~committed:(Retire.Committed.state committed) with
   | Ok () -> print_endline "holds: ok (DENIAL ERASED THE READ)"
   | Error [ stale ] ->
       Printf.printf "holds: stale %s witnessed %s current %s\n"
         (Ledger.Address.to_string stale.address)
         (Format.asprintf "%a" Ledger.Generation.pp stale.witnessed)
-        (Format.asprintf "%a" Ledger.Generation.pp stale.current)
+        (state_str stale.current)
   | Error _ -> print_endline "holds: multiple stales");
   (* The retire step routes it as the typed Witness_moved signal — no
      retry, no merge heroics, no silent re-read. *)
@@ -353,7 +375,7 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
     upstream retire: ok
     f.txt committed generation: g1
     hidden read in witness: true
-    holds: stale file:f.txt witnessed g0 current g1
+    holds: stale file:f.txt witnessed g0 current landed@g1
     hider retire: rejected (Witness_moved)
     upstream settlement: retired
     hider settlement: unsettled
@@ -644,14 +666,184 @@ let%expect_test "F7: an identical head-tuple payload is a free commit" =
     |}]
 
 (* ================================================================== *)
+(* Law 3 — the fresh-address hole.  Fresh commits land at the address's  *)
+(* first generation, which is also the generation a pre-commit read is   *)
+(* witnessed at — so a generation-only check would let a consumer that    *)
+(* snooped a DIFFERENT draft retire over the producer's landing.  The     *)
+(* commit-point check judges the artifact (the content hash the triple    *)
+(* already carries; 50-commit.md § law 1/law 3): the drifted snooper is   *)
+(* rejected, the exact-prediction snooper still retires free, and the     *)
+(* rejection carries the store's delta ref (the net-delta flow).          *)
+(* ================================================================== *)
+
+let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
+                 content, never by the primordial generation" =
+  let repo = temp_dir "goat_b7_repo" in
+  let scratch = temp_dir "goat_b7_scratch" in
+  seed_repo repo ~file:"seed.txt" ~contents:"seed\n";
+  let ledger = Ledger.create ~path:(scratch // "ledger") in
+  let registry = Id.Registry.create () in
+  let node_minter : Ledger.node Id.Minter.t =
+    Id.Minter.create ~registry ~realm:"node"
+  in
+  let producer = Id.mint node_minter in
+  let drifted = Id.mint node_minter in
+  let exact = Id.mint node_minter in
+  let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+  let merges = Retire.Merge_registry.empty in
+  let wt_p = Retire.Worktree.create ~root:(repo // "buffers") ~node:producer in
+  let wt_d = Retire.Worktree.create ~root:(scratch // "bare") ~node:drifted in
+  let wt_e = Retire.Worktree.create ~root:(scratch // "bare") ~node:exact in
+  let addr = Ledger.Address.File "gen.ml" in
+  let g0 = Ledger.Generation.zero in
+  (* Both consumers snooped the producer's store buffer BEFORE it settled:
+     one read a draft the producer later rewrote, one read the exact bytes
+     that land.  Both witness the fresh address at g0 — only the content
+     hash distinguishes them. *)
+  ignore
+    (Ledger.append ledger ~node:drifted
+       (Ledger.Event.Load
+          {
+            tool = "snoop";
+            observed = [ (addr, g0, Ledger.Content_hash.of_string "draft\n") ];
+          }));
+  ignore
+    (Ledger.append ledger ~node:exact
+       (Ledger.Event.Load
+          {
+            tool = "snoop";
+            observed = [ (addr, g0, Ledger.Content_hash.of_string "final\n") ];
+          }));
+  write_file (Retire.Worktree.path wt_p // "gen.ml") "final\n";
+  (* The store buffer's net delta is real data: address paired with the
+     locator consumers pull through (30-channels.md § invalidate, don't
+     update). *)
+  List.iter
+    (fun (a, d) ->
+      Printf.printf "net delta: %s -> %s\n"
+        (Ledger.Address.to_string a)
+        (Ledger.Delta_ref.to_string d))
+    (Retire.Worktree.net_delta wt_p);
+  (match
+     Retire.step ~committed ~ledger ~registry ~merges ~node:producer
+       ~worktree:wt_p
+       ~witness:(Witness.observed ledger ~node:producer)
+       ~heads:[]
+   with
+  | Ok () -> print_endline "producer retire: ok"
+  | Error _ -> print_endline "producer retire: rejected");
+  Printf.printf "gen.ml committed generation: %s\n"
+    (gen_str (Retire.Committed.generation committed addr));
+  (* The drifted snooper witnessed pre-commit state the landing replaced:
+     its retire is the typed Witness_moved rejection, delta ref attached. *)
+  (match
+     Retire.step ~committed ~ledger ~registry ~merges ~node:drifted
+       ~worktree:wt_d
+       ~witness:(Witness.observed ledger ~node:drifted)
+       ~heads:[]
+   with
+  | Error (Retire.Witness_moved moves) ->
+      List.iter
+        (fun (m : Retire.generation_moved) ->
+          Printf.printf
+            "drifted retire: rejected (Witness_moved %s witnessed %s current \
+             %s delta %s)\n"
+            (Ledger.Address.to_string m.address)
+            (Format.asprintf "%a" Ledger.Generation.pp m.witnessed)
+            (Format.asprintf "%a" Ledger.Generation.pp m.current)
+            (Ledger.Delta_ref.to_string m.delta_ref))
+        moves
+  | Error _ -> print_endline "drifted retire: rejected (other)"
+  | Ok () -> print_endline "drifted retire: ok (STALE WITNESS COMMITTED)");
+  (* The exact-prediction snooper is the free commit law 2 promises. *)
+  (match
+     Retire.step ~committed ~ledger ~registry ~merges ~node:exact ~worktree:wt_e
+       ~witness:(Witness.observed ledger ~node:exact)
+       ~heads:[]
+   with
+  | Ok () -> print_endline "exact retire: ok (free commit)"
+  | Error _ -> print_endline "exact retire: rejected (PREDICTION TAXED)");
+  sh (Printf.sprintf "rm -rf %s %s" (Filename.quote repo) (Filename.quote scratch));
+  [%expect
+    {|
+    net delta: file:gen.ml -> gen.ml
+    producer retire: ok
+    gen.ml committed generation: g0
+    drifted retire: rejected (Witness_moved file:gen.ml witnessed g0 current g0 delta gen.ml)
+    exact retire: ok (free commit)
+    |}]
+
+let%expect_test "law 3, tuple-shaped: a predicted payload is judged by \
+                 content at the tuple's first generation" =
+  let scratch = temp_dir "goat_b7_tuple" in
+  let ledger = Ledger.create ~path:(scratch // "ledger") in
+  let registry = Id.Registry.create () in
+  let node_minter : Ledger.node Id.Minter.t =
+    Id.Minter.create ~registry ~realm:"node"
+  in
+  let producer = Id.mint node_minter in
+  let drifted = Id.mint node_minter in
+  let exact = Id.mint node_minter in
+  let committed =
+    Retire.Committed.open_ ~repo:(scratch // "repo") ~branch:"goat"
+  in
+  let merges = Retire.Merge_registry.empty in
+  let wt n = Retire.Worktree.create ~root:(scratch // "bare") ~node:n in
+  let addr = Ledger.Address.Tuple { relation = "report"; id = "r-9" } in
+  let payload_hash p = Ledger.Content_hash.of_string (Yojson.Safe.to_string p) in
+  let pass : Yojson.Safe.t = `Assoc [ ("verdict", `String "pass") ] in
+  let fail_ : Yojson.Safe.t = `Assoc [ ("verdict", `String "fail") ] in
+  (* One consumer hypothesized the wrong verdict, one the landed verdict;
+     both witnessed the uncommitted tuple at g0. *)
+  ignore
+    (Ledger.append ledger ~node:drifted
+       (Ledger.Event.Load
+          {
+            tool = "chase.operand";
+            observed = [ (addr, Ledger.Generation.zero, payload_hash pass) ];
+          }));
+  ignore
+    (Ledger.append ledger ~node:exact
+       (Ledger.Event.Load
+          {
+            tool = "chase.operand";
+            observed = [ (addr, Ledger.Generation.zero, payload_hash fail_) ];
+          }));
+  let retire node ~heads =
+    match
+      Retire.step ~committed ~ledger ~registry ~merges ~node ~worktree:(wt node)
+        ~witness:(Witness.observed ledger ~node)
+        ~heads
+    with
+    | Ok () -> "ok"
+    | Error (Retire.Witness_moved _) -> "rejected (Witness_moved)"
+    | Error _ -> "rejected (other)"
+  in
+  Printf.printf "producer inserts report/r-9 verdict=fail: %s\n"
+    (retire producer
+       ~heads:[ { Retire.relation = "report"; id = "r-9"; payload = fail_ } ]);
+  Printf.printf "report/r-9 committed generation: %s\n"
+    (gen_str (Retire.Committed.generation committed addr));
+  Printf.printf "drifted consumer: %s\n" (retire drifted ~heads:[]);
+  Printf.printf "exact consumer: %s\n" (retire exact ~heads:[]);
+  sh (Printf.sprintf "rm -rf %s" (Filename.quote scratch));
+  [%expect
+    {|
+    producer inserts report/r-9 verdict=fail: ok
+    report/r-9 committed generation: g0
+    drifted consumer: rejected (Witness_moved)
+    exact consumer: ok
+    |}]
+
+(* ================================================================== *)
 (* F7 — channel edge: [Channel.invalidate] is fired only on a moved      *)
 (* generation, and the durable fact it fans out from is the ledger's     *)
 (* [Invalidation_sent] event.  A byte-identical landing appends none,    *)
 (* so a consumer edge's pending queue stays empty across it: nothing to  *)
 (* deliver at the next yield, no drift note to render, no reconcile.     *)
 (* Asserted above via ledger event counts; this comment records why no   *)
-(* separate channel-level test exists: [Channel.Invalidation.t] carries  *)
-(* a [Ledger.Delta_ref.t], which has no public constructor, so a         *)
-(* test-built invalidation is unconstructible by design — the ledger     *)
-(* event count IS the observable surface (30-channels.md § the ledger).  *)
+(* separate channel-level test exists: the engine constructs no rx and   *)
+(* never calls [Channel.invalidate] yet (delivery is unwired), so the    *)
+(* ledger's [Invalidation_sent] count IS the observable surface           *)
+(* (30-channels.md § the ledger).                                         *)
 (* ================================================================== *)

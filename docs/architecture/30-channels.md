@@ -101,9 +101,10 @@ Every tool call classifies as exactly one of:
 **Mechanized witnesses.** Because every load is an event with a footprint,
 **a node's read-set is captured by observation, not by self-report**. The
 node's generation witness (`50-commit.md`) is assembled by the harness from
-its own event stream: the set of (address, generation) pairs it actually
-read. An agent cannot fabricate a witness, cannot forget a dependency it
-consulted, and cannot claim staleness-immunity it doesn't have. Conflict
+its own event stream: the set of (address, generation, content-hash)
+triples it actually read. An agent cannot fabricate a witness, cannot
+forget a dependency it consulted, and cannot claim staleness-immunity it
+doesn't have. Conflict
 detection at retire is then a set intersection over logged footprints —
 my read-set × your write-set at a newer generation — memory disambiguation,
 mechanized. Reader: `50-commit.md`'s conflict judge; this is also why the
