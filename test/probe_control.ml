@@ -65,3 +65,10 @@ let drain (r : finding Channel.rx) = Channel.pull_tuples r
 
 let publish_on_tx (t : finding Channel.tx) ~(id : finding Id.t) (v : finding) =
   Channel.publish t ~id v
+
+(* Legal twin of probe_f15_wrong_payload_publish.ml: a tx obtained by
+   presenting the relation's own declaration carries that relation's
+   payload type, and its own payload publishes through it. *)
+let publish_via_registry (registry : Channel.registry)
+    (r : finding Theory.Relation.t) ~(id : finding Id.t) (v : finding) =
+  Channel.publish (Channel.tx registry r) ~id v

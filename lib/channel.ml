@@ -76,34 +76,18 @@ module Invalidation = struct
 end
 
 (* ------------------------------------------------------------------ *)
-(* Type-erased tuple storage.
+(* Channel state.
 
    One channel's committed-tuple log is shared by its unique writer end and
    every reader end, all obtained by independent registry lookups keyed by
-   relation name. OCaml offers no way to carry the payload type through
-   that name-keyed table (the [Theory.Relation.t] the caller holds is
-   abstract and exposes no type witness), so the log erases its elements
-   and this module is the single, contained recovery point.
-
-   Soundness invariant: admission rejects [Duplicate_relation], so within
-   one admitted theory a relation name determines its payload type; every
-   [tx]/[rx] instantiation against one channel therefore names the same
-   ['a] the channel was opened for, and [unpack] re-reads a cell at exactly
-   the type [pack] stored it at. *)
-module Tuple_cell : sig
-  type t
-
-  val pack : 'a Id.t -> 'a -> t
-  val unpack : t -> 'a Id.t * 'a
-end = struct
-  type t = Obj.t
-
-  let pack id payload = Obj.repr (id, payload)
-  let unpack = Obj.obj
-end
-
-(* ------------------------------------------------------------------ *)
-(* Channel state. *)
+   relation name. The name-keyed table cannot carry the payload type, so
+   each log is packed with the payload witness of the admitted relation it
+   was opened for ([Theory.Relation.witness], minted once per declaration),
+   and [tx]/[rx] recover the type by [Type.Id.provably_equal] against the
+   presented relation's own witness. A relation value that merely shares
+   the name — a re-declaration at any payload type — refutes the equality
+   and is refused at the lookup; the wrongly-typed channel end is
+   unconstructible, and no cast exists anywhere in this file. *)
 
 (* One consumer edge's subscription: allocated at [open_all] — before any
    node runs — so deliveries buffer for a consumer that has not started
@@ -114,17 +98,20 @@ type sub = {
   mutable cursor : int; (* committed tuples already drained *)
 }
 
+(* One relation's committed-tuple log, witness-packed: the witness is the
+   only key that unpacks it back to a typed log. *)
+type log = Log : 'a Type.Id.t * ('a Id.t * 'a) Dynarray.t -> log
+
 (* One relation in motion: the committed-tuple log plus every subscribed
    edge, keyed by consuming statement (one edge per statement per relation
    in v0's single-relation bodies). *)
-type chan = {
-  log : Tuple_cell.t Dynarray.t;
-  subs : (string, sub) Hashtbl.t;
-}
-
+type chan = { log : log; subs : (string, sub) Hashtbl.t }
 type registry = { chans : (string, chan) Hashtbl.t }
-type 'a tx = Tx of chan
-type 'a rx = Rx of { chan : chan; sub : sub }
+
+type 'a tx =
+  | Tx of { log : ('a Id.t * 'a) Dynarray.t; subs : (string, sub) Hashtbl.t }
+
+type 'a rx = Rx of { log : ('a Id.t * 'a) Dynarray.t; sub : sub }
 
 (* ------------------------------------------------------------------ *)
 (* Footprint compilation.
@@ -173,7 +160,10 @@ let open_all theory =
   List.iter
     (fun (Theory.Relation.Packed r) ->
       Hashtbl.replace chans (Theory.Relation.name r)
-        { log = Dynarray.create (); subs = Hashtbl.create 4 })
+        {
+          log = Log (Theory.Relation.witness r, Dynarray.create ());
+          subs = Hashtbl.create 4;
+        })
     (Theory.relations theory);
   (* Subscribe every consumer edge now, before any node runs: an
      invalidation fanned out before the consumer's first read must be
@@ -210,7 +200,26 @@ let find_chan registry relation ~caller =
            "Channel.%s: relation %S was not opened at admission" caller
            relation)
 
-let tx registry relation = Tx (find_chan registry (Theory.Relation.name relation) ~caller:"tx")
+(* The witness judgment: the presented relation's own witness against the
+   witness the log was opened with. [provably_equal] refines only for the
+   very declaration admission saw — a same-named re-declaration, whatever
+   its payload type, lands in [None]. *)
+let typed_log (type a) (relation : a Theory.Relation.t) chan ~caller :
+    (a Id.t * a) Dynarray.t =
+  let (Log (witness, log)) = chan.log in
+  match Type.Id.provably_equal witness (Theory.Relation.witness relation) with
+  | Some Type.Equal -> log
+  | None ->
+      invalid_arg
+        (Printf.sprintf
+           "Channel.%s: relation %S is not the declaration this registry was \
+            opened for"
+           caller
+           (Theory.Relation.name relation))
+
+let tx registry relation =
+  let chan = find_chan registry (Theory.Relation.name relation) ~caller:"tx" in
+  Tx { log = typed_log relation chan ~caller:"tx"; subs = chan.subs }
 
 let rx registry relation ~(edge : Theory.Edge.t) =
   let name = Theory.Relation.name relation in
@@ -220,8 +229,9 @@ let rx registry relation ~(edge : Theory.Edge.t) =
          (Theory.Statement.to_string edge.statement)
          edge.reads name);
   let chan = find_chan registry name ~caller:"rx" in
+  let log = typed_log relation chan ~caller:"rx" in
   match Hashtbl.find_opt chan.subs (Theory.Statement.to_string edge.statement) with
-  | Some sub -> Rx { chan; sub }
+  | Some sub -> Rx { log; sub }
   | None ->
       invalid_arg
         (Printf.sprintf
@@ -232,10 +242,9 @@ let rx registry relation ~(edge : Theory.Edge.t) =
 (* ------------------------------------------------------------------ *)
 (* Producer side (engine-only by possession of [_ tx]). *)
 
-let publish (Tx chan) ~id payload =
-  Dynarray.add_last chan.log (Tuple_cell.pack id payload)
+let publish (Tx t) ~id payload = Dynarray.add_last t.log (id, payload)
 
-let invalidate (Tx chan) (inv : Invalidation.t) =
+let invalidate (Tx t) (inv : Invalidation.t) =
   (* Fan out to every subscribed edge whose declared footprint the address
      intersects. Each edge owns its queue, so table order is irrelevant;
      within one edge, delivery order is send order. *)
@@ -243,16 +252,16 @@ let invalidate (Tx chan) (inv : Invalidation.t) =
     (fun _ sub ->
       if Invalidation.passes ~footprint:sub.fp inv then
         Queue.push inv sub.pending)
-    chan.subs
+    t.subs
 
 (* ------------------------------------------------------------------ *)
 (* Consumer side: check-on-yield drains. *)
 
 let pull_tuples (Rx r) =
-  let len = Dynarray.length r.chan.log in
+  let len = Dynarray.length r.log in
   let drained =
     List.init (len - r.sub.cursor) (fun k ->
-        Tuple_cell.unpack (Dynarray.get r.chan.log (r.sub.cursor + k)))
+        Dynarray.get r.log (r.sub.cursor + k))
   in
   r.sub.cursor <- len;
   drained

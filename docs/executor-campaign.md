@@ -364,6 +364,16 @@ B12. **`Tuple_cell` Obj.t erasure is unsound through the public API
      witness on `Relation.t` makes the wrong-type read unconstructible per
      doc rule 8. Fix with a type witness, don't ship the Obj cast.
      (channel.ml:99/101.)
+     LANDED (channel agent, 2026-07-14): `Theory.Relation.t` carries a
+     `Type.Id` payload witness minted at declaration
+     (`Theory.Relation.witness`); each channel's log is packed with the
+     admitted relation's witness at `open_all`, and `Channel.tx`/`rx`
+     recover the payload type via `Type.Id.provably_equal` against the
+     presented relation — `Tuple_cell`/`Obj` deleted, no cast remains in
+     lib/. A same-named re-declaration is refused at the lookup
+     (runtime falsifier in test_boundary.ml); the cross-type publish is a
+     negative compile (probe_f15_wrong_payload_publish.ml). Docs:
+     30-channels.md § pre-opened channels, 80-validation.md F15 roster.
 
 B13. **Cardinality windows enforced as count, not shape.** `invoke_lane`
      hands the agent the bare single-tuple schema for Tuples windows, then

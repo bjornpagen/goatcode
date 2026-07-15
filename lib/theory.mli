@@ -52,6 +52,15 @@ module Relation : sig
 
   val name : 'a t -> string
 
+  val witness : 'a t -> 'a Type.Id.t
+  (** The relation's payload witness, minted once at declaration. The
+      channel registry stores it alongside the log it opens for this
+      relation, and {!Channel.tx}/{!Channel.rx} recover the payload type by
+      [Type.Id.provably_equal] against the presented relation — so a
+      channel end at the wrong payload type is unconstructible even through
+      the name-keyed table: only this declaration's own value refines
+      (docs/architecture/30-channels.md § pre-opened channels). *)
+
   type packed = Packed : 'a t -> packed
   (** Existential wrapper for heterogeneous relation lists. *)
 end

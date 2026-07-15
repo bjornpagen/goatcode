@@ -8,13 +8,20 @@ module Relation = struct
   type 'a t = {
     name : string;
     contract : 'a Contract.t;
+    witness : 'a Type.Id.t;
+        (* The payload witness, minted once per declaration: the channel
+           registry's name-keyed table recovers the payload type by
+           [Type.Id.provably_equal] against this, so a channel end at the
+           wrong payload type is unconstructible
+           (docs/architecture/30-channels.md § pre-opened channels). *)
     generations : int option;
         (* The feedback stratum bound: at most this many engine-minted
            generations along one derivation chain
            (docs/architecture/10-theory.md § feedback is forward). *)
   }
 
-  let v ~name contract = { name; contract; generations = None }
+  let v ~name contract =
+    { name; contract; witness = Type.Id.make (); generations = None }
 
   let dynamic ~name ~schema =
     (* The planner lane: the payload is schema-checked JSON, so the codec is
@@ -22,11 +29,17 @@ module Relation = struct
        resolution, exactly as for typed payloads
        (docs/architecture/60-agents.md § the planner). *)
     let codec = Contract.Codec.v ~of_json:(fun j -> j) ~to_json:(fun j -> j) in
-    { name; contract = Contract.v ~name ~schema ~codec; generations = None }
+    {
+      name;
+      contract = Contract.v ~name ~schema ~codec;
+      witness = Type.Id.make ();
+      generations = None;
+    }
 
   let stratified ~generations t = { t with generations = Some generations }
 
   let name t = t.name
+  let witness t = t.witness
 
   type packed = Packed : 'a t -> packed
 end

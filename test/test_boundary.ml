@@ -441,6 +441,38 @@ let%expect_test "F11: tuples flow forward only; a reader end cannot disturb \
     footprint: contract:finding
     |}]
 
+(* B12: the registry is name-keyed, but a channel end is granted only
+   against the admitted relation's own payload witness. A re-declaration
+   that collides on the NAME — here even at the same OCaml payload type,
+   the strongest case — is refused at the lookup; before the witness this
+   was the unchecked-cast path (heap corruption from safe code). The
+   cross-TYPE half of the same law is the F15 negative compile
+   (probe_f15_wrong_payload_publish.ml). *)
+let%expect_test "F15 runtime edge: a same-named re-declaration obtains no \
+                 channel end" =
+  let chans = Channel.open_all boundary_theory in
+  let forged =
+    Theory.Relation.dynamic ~name:"finding"
+      ~schema:
+        (obj_schema ~doc:"An impostor with the admitted relation's name."
+           [ ("claim", str_prop "The claim text.") ]
+           [ "claim" ])
+  in
+  (match Channel.tx chans forged with
+  | (_ : Yojson.Safe.t Channel.tx) -> print_endline "forged tx GRANTED (violation)"
+  | exception Invalid_argument msg -> Printf.printf "tx refused: %s\n" msg);
+  (match Channel.rx chans forged ~edge:(edge_named "judge") with
+  | (_ : Yojson.Safe.t Channel.rx) -> print_endline "forged rx GRANTED (violation)"
+  | exception Invalid_argument msg -> Printf.printf "rx refused: %s\n" msg);
+  (* Control: the admitted declaration itself still refines. *)
+  let (_ : Yojson.Safe.t Channel.tx) = Channel.tx chans finding_rel in
+  print_endline "admitted declaration: tx granted";
+  [%expect {|
+    tx refused: Channel.tx: relation "finding" is not the declaration this registry was opened for
+    rx refused: Channel.rx: relation "finding" is not the declaration this registry was opened for
+    admitted declaration: tx granted
+    |}]
+
 (* The codec used for the wire-garbage sweep resolves the [finding] ref
    slot against mint provenance, per 20-contracts.md § failure surface: an
    agent-invented id must die at the boundary with a diagnostic, never

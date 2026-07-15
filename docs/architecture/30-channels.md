@@ -39,6 +39,20 @@ consumer node can begin before its producers have produced — before they
 have even *started* — because the channel it will eventually read is already
 a real object it can hold, subscribe to, and suspend on.
 
+**"Typed" is by witness, not by cast.** The channel table is keyed by
+relation name, but each channel's tuple log is packed with the payload
+witness its relation minted at declaration (`Theory.Relation.witness`, a
+`Type.Id`), and a channel end is granted only by presenting that very
+declaration — the lookup recovers the payload type through
+`Type.Id.provably_equal`, so a writer or reader end at the wrong payload
+type is unconstructible and no cast exists in the channel layer. A
+re-declaration that collides on the name refutes the judgment and is
+refused at the lookup; the negative compile is falsifier F15
+(`80-validation.md`), the value-level refusal a runtime falsifier beside
+it. Possession of the registry is possession of the proof it matches the
+admitted theory: `Channel.open_all` takes `Theory.admitted` and nothing
+else constructs one.
+
 **Readiness is a property of a read, never of a node.** A node holds its
 channels from birth; each individual read either proceeds (witnessed),
 returns a hypothesis (speculation, decided at the read —

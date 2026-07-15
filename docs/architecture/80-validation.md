@@ -68,8 +68,9 @@ owning doc:
   into committed structures (`50-commit.md`), a non-idempotent effect tool
   in a speculative grant (`60-agents.md`), a wrong-relation phantom ref
   (`20-contracts.md`), `Run.exec` on an unadmitted theory, a bare
-  `Switch.throw` (`70-api.md`) — each asserted to fail with the expected
-  error class. Doc rule 8's claims are checkable claims, and this is their
+  `Switch.throw` (`70-api.md`), a wrongly-typed payload published through a
+  correctly-named relation (`30-channels.md` § pre-opened channels) — each
+  asserted to fail with the expected error class. Doc rule 8's claims are checkable claims, and this is their
   checker: an "unrepresentable" that compiles is a doc bug or a type bug,
   and either way the suite goes red.
 

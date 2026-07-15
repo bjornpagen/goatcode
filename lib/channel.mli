@@ -62,13 +62,22 @@ val open_all : Theory.admitted -> registry
 val tx : registry -> 'a Theory.Relation.t -> 'a tx
 (** The unique writer end for a relation. The engine is the only caller;
     executors never hold channel ends (their reads and writes are tool
-    calls against worktrees, observed by the ledger). *)
+    calls against worktrees, observed by the ledger).
+
+    The presented relation must be the very declaration the registry was
+    opened for: the lookup judges the relation's payload witness
+    ({!Theory.Relation.witness}) against the one packed with the channel's
+    log at {!open_all}, which is the only way a name-keyed table yields a
+    typed end without a cast. A same-named re-declaration — at any payload
+    type — refutes the judgment and raises [Invalid_argument]; the
+    wrongly-typed end is unconstructible (falsifier F15). *)
 
 val rx : registry -> 'a Theory.Relation.t -> edge:Theory.Edge.t -> 'a rx
 (** A reader end scoped to one consumer edge; deliveries are filtered by
     the footprint compiled from the edge's contract-derived ref slots and
     file-glob grant. The theory author never writes routing
-    (docs/architecture/30-channels.md § footprint filtering). *)
+    (docs/architecture/30-channels.md § footprint filtering). The relation
+    is witness-judged exactly as in {!tx}. *)
 
 (** {2 Producer side (engine-only by possession of ['a tx])} *)
 

@@ -237,3 +237,27 @@
  (alias runtest)
  (deps probe_f15_rx_publish.err)
  (action (run grep -q "Channel.tx" probe_f15_rx_publish.err)))
+
+; F15 probe: wrongly-typed payload through a correctly-named relation
+; (30-channels.md § pre-opened channels — the B12 witness law).
+
+(rule
+ (targets probe_f15_wrong_payload_publish.err)
+ (deps
+  (sandbox none)
+  probe_f15_wrong_payload_publish.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_f15_wrong_payload_publish.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_f15_wrong_payload_publish.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_f15_wrong_payload_publish.err)
+ (action
+  (run grep -q "not_finding Goatcode.Id.t"
+    probe_f15_wrong_payload_publish.err)))
