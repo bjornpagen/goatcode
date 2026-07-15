@@ -155,6 +155,8 @@ module Squash_cause = struct
     | Dead_hypothesis of hypothesis Id.t
     | Upstream_fault of node Id.t
     | Upstream_squash of node Id.t
+    | Reissue_loser
+    | No_producer
     | Operator_abort
 end
 

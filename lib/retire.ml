@@ -778,6 +778,11 @@ let squash_set ledger ~cause =
         (* the upstream node settles as its own fault/squash; its
            derivation subtree is what squashes here *)
         List.filter (fun n -> depends_on ~producer:upstream n) nodes_in_order
+    | Ledger.Squash_cause.Reissue_loser | Ledger.Squash_cause.No_producer ->
+        (* single-node settlements: the loser (or starved read) settles
+           with this cause and its dependents walk under [Upstream_squash]
+           of that node — these causes seed no subtree of their own *)
+        []
     | Ledger.Squash_cause.Operator_abort -> nodes_in_order
   in
   let rec close set =

@@ -107,6 +107,14 @@ step for one node:
    generations advance per law 2; head tuples insert; provisional ids bind.
 4. **Ledger seal**: the settlement event, with timings, closes the node.
 
+Retirement is also the channel layer's one publisher: the committed head
+tuples publish on their relations' typed logs, and every generation the
+merge moved fans out as a payload-free invalidation, filtered by each
+subscribed edge's declared footprint (`30-channels.md` § invalidate,
+don't update). A landing that matched every speculator's snapshot moved
+no generation and fans nothing — the free commit is silent by
+construction.
+
 Squash is the dual, and **squash precision is absolute**: exactly the
 provenance-closed subtree of the dead hypothesis or faulted node squashes —
 computed from tuple provenance (`10-theory.md` § provenance is total),

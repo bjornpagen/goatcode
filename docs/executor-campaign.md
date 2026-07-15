@@ -264,6 +264,23 @@ B3. **Channel delivery unwired (BLOCKING).** Engine never constructs an rx,
     chase.ml:931-932); every executor gets `~on_yield:(fun () -> [])`. Wire
     the delivery half: retire publishes, consumers pull, drift notes reach
     yields. (chase.ml:390.)
+    STATUS: DONE (delivery/speculation pass, 2026-07-14). The chase opens
+    the scheduler's channel ends at `create` (one packed tx per relation,
+    one packed rx per consumer edge). `retire_success` publishes committed
+    heads on the typed logs (new `Theory.Relation.payload_of_json` — the
+    codec-proven payload re-enters through the relation's own codec, ids
+    resolved against mint provenance) and fans each `Invalidation_sent` as
+    a `Channel.invalidate` over every channel (edge footprints filter;
+    subs on other relations legitimately subscribe to file globs and
+    ref-target relations). Every dispatch gets a REAL `on_yield`
+    (`on_yield_of`) closed over the instance's edge rx: it drains
+    `pull_invalidations` at the fiber's suspension points, pulls landed
+    tuples (`pull_tuples`) for the classification, appends the typed
+    `Drift_note`, and returns notes whose dispositions derive from the
+    route (`Speculate.Drift.disposition_of`). Falsifier: test_delivery.ml
+    "delivery: the invalidation and the typed drift note reach the
+    consumer's yield" (parked chain; buffered-socket delivery before the
+    consumer ran). 50-commit.md § retirement order amended.
 
 B4. **Seed payloads dropped (BLOCKING).** `seed_entry` sets `payload = None`,
     so agents never see seed data, `where` filters can't match seed fields,
@@ -296,12 +313,57 @@ B5. **Speculation is dead code.** Hypothesis arm of `read_operand`
     records `hypotheses = []`. Build the refresher: on producer landing,
     compare against hypothesis (identical → discharge silently; drift →
     Drift_note; squash → subtree squash). (chase.ml:243/518/800.)
+    STATUS: DONE (delivery/speculation pass, 2026-07-14). Heads enter the
+    body-match feed at their producer's COMPLETION as snoopable
+    store-buffer entries (materialization — data-generated instances now
+    start before the producer retires, per 40-scheduling § eager start),
+    carrying producer, inherited hypotheses, chain confidence, and strata.
+    `read_operand` takes a `Store_buffer` hypothesis on every uncommitted
+    operand (default-on; the off switch and the confidence floor route to
+    suspension instead), and the snooped read ALSO enters the observed
+    witness ("chase.snoop" Load at the uncommitted generation — the
+    content-judged triple is what makes F7 free). Chain confidence is the
+    entry's chain product times `Speculate.Backstops.link_confidence`
+    (0.93, the declared constant the floor's calibration assumes;
+    per-shape measured links are the recorded upgrade — the predictor's
+    raw survival is contaminated by in-flight lifecycles and must not be
+    the link factor). The lifecycle is the sum-typed machine
+    `Speculate.Lifecycle` (Taken → Discharged | Drifted{cls} | Squashed)
+    with ONE landing judgment; the chase's refresher runs it at
+    `retire_success`: identical landings discharge silently
+    (`Hypothesis_discharged`, per consumer node); drifted landings note
+    and route by the table; producer squash flows through the existing
+    provenance walk (store-buffer sources are squash edges). `fire()` now
+    records inherited hypotheses in provenance. Falsifiers:
+    test_delivery.ml F7 (end-to-end free commit: no invalidation, no
+    note, no reissue) and the landing-judgment unit block; F9's on/off
+    equivalence now runs with 2 real hypotheses on the on side.
+    40-scheduling § read-time binding amended (snoop = hypothesis +
+    witness triple). The `Issued_contract` arm remains recorded-shape
+    (reachable only when dispatch overlaps firing).
 
 B6. **Drift routing table has no consumer.** Every `Witness_moved` rejection
     is routed serialize-reissue (full flush) without classifying the drift;
     the policy table exists as data but nothing reads it. Wire the
     classifier → route (schema-identical/additive/breaking-narrow/
     breaking-broad/squashed). (chase.ml:843.)
+    STATUS: DONE (delivery/speculation pass, 2026-07-14). One classifier
+    (`classify_move` in chase.ml) parses a moved address into the table's
+    domain per consumer: a moved tuple operand diffs snooped-vs-landed
+    payloads (`Speculate.Drift.payload_diff` — content drift in the same
+    Diff vocabulary as schema drift, so `classify` judges both); a moved
+    file is judged against everything the consumer's witness proves it
+    read (majority → broad → flush; minority → narrow → reconcile); an
+    address outside its reads is additive. Three consumption sites, one
+    table: the refresher (landing), the yield delivery (invalidation →
+    note), and the `Witness_moved` rejection at retire — each appends the
+    typed `Drift_note` whose route replay re-judges against the table.
+    v0 reconcile = reissue-with-diagnostics (no mid-flight patching yet);
+    flush rows flush the subtree before the bounded refire.
+    40-scheduling § drift routing amended (the three consumers named).
+    Falsifiers: test_delivery.ml "drift table at the rejection site"
+    (breaking-broad flush and breaking-narrow reissue, end to end,
+    replay-coherent) plus the existing F8 unit roster.
 
 B7. **Generation-zero / content-hash witness hole.** Fresh-address commits
     land at `Generation.zero` — the same generation `Witness.holds` assigns
@@ -384,6 +446,20 @@ B11. **Telemetry/predictor event starvation.** No code appends the lifecycle
      lifecycle constructors (Queued/Admitted/Dispatched/Suspended/Resumed),
      Ceiling_bound at the binding admission, and each shape's initial
      `Pin_bump` at run open.
+     EMISSION HALF DONE (delivery/speculation pass, 2026-07-14): the chase
+     appends `Queued{port}` at fire, `Admitted{port}` at port admission,
+     `Dispatched` when operands bind, `Suspended` at the park,
+     `Resumed` + `Queued` at the resume (a resumed instance re-enters as
+     `Resumed_witnessed` ONLY when every operand now reads committed —
+     the B15 ceiling-gate fix); `Ceiling_bound` is announced once per
+     binding episode, run-level, with token_ceiling/run_tokens/
+     undischarged counters; `create` appends each shape's initial
+     `Pin_bump`. Telemetry's phase machine, port queues, and the
+     predictor history now measure real spans (F9's churn evidence and
+     the delivery falsifier's suspended→resumed walk exercise them).
+     Falsifier: test_delivery.ml "the token ceiling binds" (deflection,
+     announcement with numbers, admission after discharge).
+     test_report.ml's reader pins unchanged and green.
 
 B12. **`Tuple_cell` Obj.t erasure is unsound through the public API
      (MAJOR).** Channel lookup is keyed by relation NAME only; `Relation.v`
@@ -461,6 +537,41 @@ B15. **Minor cleanups (do last, batch):** port admission runs the survival
      `Contract.v`, `Spawn.v … ()`, `Law.Count`); effect-grant lane unreachable /
      declared-idempotence why never evented (agent.mli:41 — should mostly
      resolve via Phase A).
+     STATUS (delivery/speculation pass, 2026-07-14): mostly done.
+     - FIFO-within-class: the survival comparator now runs only when BOTH
+       candidates are hypothesis-carrying (an uncommitted operand at
+       queue time); witnessed eager starts keep FIFO. DONE.
+     - F6 gap: uncommitted operand reads are hypotheses AND logged as
+       "chase.snoop" Loads at the uncommitted generation (see B5). DONE.
+     - `retire_success` promotion: resumed instances re-enter as
+       `Resumed_witnessed` only with fully-committed operands; anything
+       still speculative rides `Eager_or_speculative` and the ceiling
+       gate holds. DONE (exercised by the ceiling falsifier).
+     - Squash causes: `Ledger.Squash_cause` gained `Reissue_loser` and
+       `No_producer`; `abandon` takes an explicit cause (conflict losers
+       and moved-witness reconciles are reissue-losers; the refresher's
+       flush uses `Dead_hypothesis`; `resolve_parked` uses
+       `No_producer`); dependents of an abandoned attempt squash as
+       `Upstream_squash` with their worktrees dropped and their pending
+       hypotheses/feed entries cleaned (`drop_speculative_state`).
+       40-scheduling § settlement amended. Falsifier: test_delivery.ml
+       "squash causes: a conflict loser is a reissue-loser". NOTE:
+       `No_producer` is emitted at `resolve_parked` but is not
+       constructible end-to-end in the synchronous engine (every parked
+       read's producer either lands or squashes it first) — the stall
+       resolver is the recorded backstop.
+     - Dead-hypothesis squash: the whole doomed subtree's worktrees drop
+       (`queued_worktrees` at every squash path), not just the rejected
+       node's. DONE.
+     - Footprint escapes (`Channel.footprint`'s runtime half): NOT DONE.
+       Surfacing an escape needs an event the taxonomy doesn't carry and
+       this pass was fenced to the Squash_cause extension in `Ledger`;
+       additionally the engine's own operand reads cannot escape (they
+       are the edge's relation by construction) and tool reads outside
+       the grant are refused in-band, so v0's only escape source is a
+       grant wider than the declared footprint. Owed: an event (or
+       retire-verdict surface) plus the cover judgment
+       (`Channel.covers`), with the falsifier.
 
 ### Phase C — tests + live smoke
 

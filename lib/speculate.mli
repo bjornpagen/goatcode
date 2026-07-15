@@ -58,11 +58,6 @@ module Hypothesis : sig
             floor, reads suspend instead of hypothesizing
             (docs/architecture/40-scheduling.md § backstops). *)
   }
-
-  type status =
-    | Pending  (** Undischarged: blocks the consumer's retirement. *)
-    | Discharged  (** Landing reality matched; silent narrowing done. *)
-    | Dead  (** Producer squashed or breaking-broad drift: subtree dies. *)
 end
 
 (** Drift, parsed once into a sum type and routed by a policy table — never
@@ -116,6 +111,13 @@ module Drift : sig
   (** The hypothesis refresher's parse of a landing against one consumer's
       observed reads. Performed once; the class carries its evidence. *)
 
+  val payload_diff : was:Yojson.Safe.t -> landed:Yojson.Safe.t -> Contract.Diff.t
+  (** Tuple-content drift as diff evidence: the landed payload against the
+      snooped one, rendered in the same {!Contract.Diff} vocabulary schema
+      drift uses (added / removed / changed payload paths), so {!classify}
+      judges both drifts through one parse. Empty iff the payloads are
+      structurally equal. *)
+
   (** A drift note: the compact rendering delivered to an agent at a yield
       point. It ends with the routing the scheduler already decided, so the
       agent never guesses its own fate
@@ -128,6 +130,40 @@ module Drift : sig
         (** [`Stop_cleanly] is the humane form of squash for an agent
             mid-turn: finish no further work, emit nothing. *)
   }
+
+  val disposition_of :
+    Ledger.Drift.route -> [ `Continue | `Patch_then_continue | `Stop_cleanly ]
+  (** The note's disposition, derived from the route the table already
+      decided — one supply, so a note can never contradict its routing. *)
+end
+
+(** The hypothesis lifecycle, a sum-typed state machine:
+    taken -> discharged | drifted{cls} | squashed. A [Taken] hypothesis
+    blocks its consumer's retirement; the refresher settles it when the
+    producer lands ({!landing}) or dies (the caller settles [Squashed]
+    directly — a squash needs no content judgment)
+    (docs/architecture/40-scheduling.md § read-time binding, § drift
+    routing). *)
+module Lifecycle : sig
+  type t =
+    | Taken  (** Pending: blocks the consumer's retirement. *)
+    | Discharged  (** Landing reality matched; retirement unblocked. *)
+    | Drifted of { cls : Drift.cls }
+        (** Landing reality differed; the class carries the evidence and
+            the scheduler routes it by the policy table. *)
+    | Squashed  (** The producer died; the subtree dies with it. *)
+
+  val landing :
+    snooped:Yojson.Safe.t ->
+    consumed:Contract.Path.t list ->
+    landed:Yojson.Safe.t ->
+    t
+  (** The refresher's one judgment of a landing against one hypothesis:
+      an identical landing is {!Discharged} silently (the free commit,
+      falsifier F7); anything else parses into {!Drifted} with the
+      payload-diff evidence, judged per consumer. Never returns [Taken]
+      (a landing settles the state) and never [Squashed] (no landing
+      exists to judge when the producer squashed). *)
 end
 
 (** Per-shape counters, all ledger-derived, each with its named reader
@@ -238,4 +274,13 @@ module Backstops : sig
 
   val default : t
   (** Generous by default; per-run configurable. *)
+
+  val link_confidence : float
+  (** One link's contribution to chain confidence: each hypothesis's
+      confidence is its operand chain's product times this. A declared
+      v0 constant (the floor's own documentation is calibrated to it:
+      0.05 admits chains ~40 deep at 0.93 per link) — measurement-owned;
+      a per-shape measured link factor is the recorded upgrade, in the
+      predictor's slot (docs/architecture/40-scheduling.md
+      § backstops). *)
 end

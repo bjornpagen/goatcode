@@ -56,16 +56,22 @@ moment it exists — never the moment its operands are ready:**
 
 **The unit of waiting is the read.** When a node's fiber reads an operand:
 
-- **Witnessed** — the tuple is committed, or snoopable in a producer's store
-  buffer: the read proceeds; the (address, generation) enters the observed
-  witness (`30-channels.md` § mechanized witnesses).
-- **Missing, hypothesizable** — a contract is issued for it, or a partial
-  artifact is forming in a store buffer: the read returns a **hypothesis
-  tuple**, recorded in provenance with its source and content hash. This is
-  speculation proper, and it begins *here*, not at issue.
-- **Missing, no source** — nothing to hypothesize from: the fiber suspends.
-  A suspended fiber costs nothing (no tokens flow; the agent turn is
-  parked at a yield) and resumes on the operand's first invalidation.
+- **Witnessed** — the tuple is committed: the read proceeds; the (address,
+  generation) enters the observed witness (`30-channels.md` § mechanized
+  witnesses).
+- **Uncommitted, hypothesizable** — the tuple sits in a producer's store
+  buffer (parsed but unretired), or a contract is issued for it: the read
+  returns a **hypothesis tuple**, recorded in provenance with its source
+  and content hash, and the snooped content *also* enters the observed
+  witness at the producer's uncommitted generation — the hypothesis is the
+  lifecycle the refresher settles; the witness triple is the proof the
+  commit point judges. This is speculation proper, and it begins *here*,
+  not at issue.
+- **Missing, no source** — nothing to hypothesize from (or the shape's off
+  switch is thrown, or chain confidence is below the floor): the fiber
+  suspends. A suspended fiber costs nothing (no tokens flow; the agent
+  turn is parked at a yield) and resumes on the operand's first
+  invalidation.
 
 **Read-time hypotheses dominate issue-time hypotheses, by construction.**
 The hypothesis is taken as late as the work allows — after the eager prefix,
@@ -200,6 +206,18 @@ scheduler decision appended to the ledger with its reason (the diff class,
 the counters consulted). A node is never surprised by its own re-execution;
 a reader of the ledger can always answer "why did this run twice."
 
+The table has three consumers, one per place drift can surface: the
+**refresher** at a producer's landing (each pending hypothesis judged
+against what landed), the **yield delivery** (an invalidation drained at a
+consumer's suspension point becomes a typed note carrying the class and
+the table's route), and the **rejection site** at retire (a moved witness
+is classified per consumer before anything reissues). Every surfacing
+appends the typed drift note; replay re-judges each recorded route against
+the table. In the v0 synchronous engine a completed attempt cannot patch
+mid-flight, so both reconcile rows route as reissue-with-the-diagnostics —
+the note records the narrower intent; the mechanism converges when the
+fiber substrate makes mid-flight patching real.
+
 ## Settlement
 
 Every node settles exactly once, as one of:
@@ -208,8 +226,15 @@ Every node settles exactly once, as one of:
   commit (`50-commit.md`).
 - **`faulted`** — the node's own failure (executor error, repair lane
   exhausted). The fault is the node's own throw, raw, never wrapped.
-- **`squashed`** — killed from outside: a dead hypothesis, an upstream
-  fault, or abort. Carries the cause chain (which hypothesis, whose fault).
+- **`squashed`** — killed from outside. Carries the cause chain, a sum
+  naming exactly what killed it: a dead hypothesis; an upstream fault or
+  upstream squash (whose); **reissue-loser** (a completed attempt
+  abandoned so its body match can reissue against the state that beat it —
+  conflict losers and moved-witness reconciles); **no-producer** (a
+  suspended read whose operand can never be served, settled so the run
+  quiesces); or operator abort. Reissue-losers and starved reads are never
+  spelled as operator aborts — a reader of the settled map sees the real
+  cause.
 
 A fault squashes exactly the transitive dependents — provenance-walk
 precision, falsifier-enforced (`80-validation.md`) — and siblings retire

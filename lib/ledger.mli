@@ -164,6 +164,16 @@ module Squash_cause : sig
     | Dead_hypothesis of hypothesis Id.t
     | Upstream_fault of node Id.t
     | Upstream_squash of node Id.t
+    | Reissue_loser
+        (** A completed attempt abandoned so its body match can reissue
+            against the state that beat it: conflict losers and
+            moved-witness reconciles. The reissue is the scheduler's next
+            act, recorded beside this settlement
+            (docs/architecture/40-scheduling.md § settlement). *)
+    | No_producer
+        (** A suspended read with no remaining producer: the operand can
+            never be served, so the node settles and the run quiesces
+            instead of hanging. *)
     | Operator_abort
 end
 

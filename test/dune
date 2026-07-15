@@ -6,6 +6,7 @@
  (modules
   test_goatcode
   test_engine
+  test_delivery
   test_squash
   test_witness
   test_disjoint

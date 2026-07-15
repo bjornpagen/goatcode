@@ -61,6 +61,19 @@ module Relation : sig
       the name-keyed table: only this declaration's own value refines
       (docs/architecture/30-channels.md § pre-opened channels). *)
 
+  val payload_of_json :
+    'a t ->
+    registry:Id.Registry.t ->
+    Yojson.Safe.t ->
+    ('a, Contract.Repair.diagnostics) result
+  (** Re-enter a wire payload through the relation's own codec — the typed
+      decode the engine's retire path uses to publish a committed head
+      tuple on the relation's channel: the payload was codec-proven at the
+      boundary parse against this relation's admitted schema, so the typed
+      log receives a value of the very type the channel was opened for
+      (docs/architecture/50-commit.md § retirement order;
+      docs/architecture/30-channels.md § pre-opened channels). *)
+
   type packed = Packed : 'a t -> packed
   (** Existential wrapper for heterogeneous relation lists. *)
 end

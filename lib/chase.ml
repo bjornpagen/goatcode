@@ -64,8 +64,14 @@ type executor_binding = {
 type tuple_realm
 
 (* One entry in the engine's body-match feed: seeds (payload rendered
-   through the relation's own codec at [create]) and codec-proven committed
-   heads alike. *)
+   through the relation's own codec at [create]) and codec-proven heads
+   alike. Heads enter at their producer's COMPLETION — parsed, uncommitted
+   store-buffer state — so data-generated instances start at
+   materialization, before the producer retires
+   (docs/architecture/40-scheduling.md § eager start;
+   docs/architecture/30-channels.md § store-to-load forwarding). Whether
+   the entry is committed is never cached here: the committed lookup is
+   the one source of that truth. *)
 type tuple_entry = {
   relation : string;
   id : string;
@@ -75,6 +81,20 @@ type tuple_entry = {
          along this tuple's derivation chain — the runtime half of the
          stratified-admission exemption (docs/architecture/10-theory.md
          § feedback is forward). Seeds are generation zero. *)
+  producer : Ledger.node Id.t option;
+      (* [Some n]: entered the feed from node [n]'s parsed, uncommitted
+         heads — the store buffer a pre-commit read snoops. [None]: a
+         seed, committed at run open. *)
+  carried : Ledger.hypothesis Id.t list;
+      (* Hypotheses along this tuple's derivation chain, inherited into
+         every firing that consumes it. Discharge events, not this list,
+         decide retirement blocking — a discharged inheritance is inert
+         (docs/architecture/40-scheduling.md § read-time binding). *)
+  confidence : float;
+      (* Chain confidence at this tuple: the product of the producing
+         chain's hypothesis confidences. Seeds and committed state are
+         1.0; each snooped read multiplies its own link onto this
+         (docs/architecture/40-scheduling.md § backstops). *)
 }
 
 (* One firing of a dependency statement: a node, pre-settlement. *)
@@ -106,6 +126,15 @@ type completed = {
       (* Existentials minted at parse time for tuple-window heads. *)
 }
 
+(* Channel ends the scheduler holds, packed with their declarations so the
+   typed operations recover the payload type: one writer end per relation
+   (retire publishes; invalidations fan out over every channel, each
+   edge's footprint filtering), one reader end per consumer edge (drained
+   at the consumer's yields) (docs/architecture/30-channels.md
+   § delivery). *)
+type any_tx = Any_tx : 'a Theory.Relation.t * 'a Channel.tx -> any_tx
+type any_rx = Any_rx : 'a Theory.Relation.t * 'a Channel.rx -> any_rx
+
 type t = {
   theory : Theory.admitted;
   ledger : Ledger.t;
@@ -122,6 +151,8 @@ type t = {
   hyp_minter : Ledger.hypothesis Id.Minter.t;
   tuple_minters : (string, tuple_realm Id.Minter.t) Hashtbl.t;
   predictor : Speculate.Predictor.t;
+  txs : (string * any_tx) list; (* relation name -> writer end *)
+  rxs : (string * any_rx) list; (* statement -> its consumer edge's end *)
   mutable seq : int;
   mutable tuples : tuple_entry list; (* the body-match feed *)
   mutable fired : (string * string) list; (* consumed (statement, tuple) *)
@@ -130,7 +161,12 @@ type t = {
   mutable parked : instance list; (* suspended reads: cost nothing *)
   mutable retire_queue : completed list;
   mutable settled : (Ledger.node Id.t * Settlement.t) list;
-  mutable undischarged : Ledger.hypothesis Id.t list;
+  mutable undischarged : (Speculate.Hypothesis.t * Yojson.Safe.t) list;
+      (* Taken, not yet settled, each with the snooped payload the
+         refresher diffs against the landing. *)
+  mutable ceiling_announced : bool;
+      (* The token ceiling's binding is announced once per episode: an
+         anomaly with a named cause, never a per-step drumbeat. *)
 }
 
 (* {2 Small helpers} *)
@@ -192,6 +228,47 @@ let speculation_off t shape =
     (fun sw -> Speculate.Shape.equal (Speculate.Switch.shape sw) shape)
     t.switches
 
+(* The engine hands a consumer the whole operand tuple, so its consumed
+   paths are the payload's top-level fields — the per-consumer refinement's
+   input for engine reads (field-level read tracking is the executor tool
+   loop's affair) (docs/architecture/40-scheduling.md § drift routing). *)
+let top_paths (payload : Yojson.Safe.t) : Contract.Path.t list =
+  match payload with
+  | `Assoc fields -> List.map (fun (f, _) -> [ f ]) fields
+  | _ -> [ [] ]
+
+let decide t ~node action ~reason ~counters =
+  ignore
+    (Ledger.append t.ledger ~node (Ledger.Event.Decision { action; reason; counters })
+      : Ledger.Event.t)
+
+(* Squashed nodes take their pending hypotheses and their uncommitted
+   store-buffer feed entries with them: nothing downstream may fire from,
+   or wait on, state whose owner died. *)
+let drop_speculative_state t nodes =
+  t.undischarged <-
+    List.filter
+      (fun ((h : Speculate.Hypothesis.t), _) ->
+        not (List.exists (Id.equal h.Speculate.Hypothesis.consumer) nodes))
+      t.undischarged;
+  t.tuples <-
+    List.filter
+      (fun e ->
+        match e.producer with
+        | Some p -> not (List.exists (Id.equal p) nodes)
+        | None -> true)
+      t.tuples
+
+(* Worktrees of retire-queued nodes in [nodes]: the squash paths drop the
+   whole doomed subtree's on-disk state, never just the rejected node's. *)
+let queued_worktrees t nodes =
+  List.filter_map
+    (fun c ->
+      if List.exists (Id.equal c.inst.node) nodes then
+        Some (c.inst.node, c.worktree)
+      else None)
+    t.retire_queue
+
 let tuple_minter t relation =
   match Hashtbl.find_opt t.tuple_minters relation with
   | Some m -> m
@@ -244,6 +321,7 @@ let settle_fault t (inst : instance) worktree fault =
   settle t inst.node (Settlement.Faulted fault) ~seal:true;
   (match worktree with Some w -> Retire.Worktree.drop w | None -> ());
   Id.Registry.drop_provisional t.registry inst.minted_ids;
+  drop_speculative_state t [ inst.node ];
   let cause = Ledger.Squash_cause.Upstream_fault inst.node in
   let dependents =
     List.filter
@@ -253,68 +331,208 @@ let settle_fault t (inst : instance) worktree fault =
   match dependents with
   | [] -> ()
   | _ :: _ ->
-      let worktrees =
-        List.filter_map
-          (fun c ->
-            if List.exists (Id.equal c.inst.node) dependents then
-              Some (c.inst.node, c.worktree)
-            else None)
-          t.retire_queue
-      in
-      Retire.squash ~ledger:t.ledger ~registry:t.registry ~worktrees ~cause;
+      Retire.squash ~ledger:t.ledger ~registry:t.registry
+        ~worktrees:(queued_worktrees t dependents) ~cause;
       List.iter
         (fun n -> settle t n (Settlement.Squashed cause) ~seal:false)
         dependents;
+      drop_speculative_state t dependents;
       purge t dependents
 
 (* {2 Read-time operand binding}
    The unit of waiting is the read (docs/architecture/40-scheduling.md
-   § read-time binding). In the synchronous v0 engine a fired instance's
-   body tuple is always present in the feed, so reads witness; the
-   hypothesis and suspension arms are the recorded shape of the mechanism
-   (consulting the per-shape switch and the confidence floor) and become
-   reachable when dispatch overlaps producers. *)
+   § read-time binding). Committed operands witness. An uncommitted
+   operand is a producer's parsed, unretired store buffer: the read takes
+   a store-buffer hypothesis — speculation proper, default-on — unless the
+   shape's off switch is thrown or chain confidence falls below the floor,
+   in which cases the fiber parks until the landing. The issued-contract
+   arm (an operand missing from every buffer, guessed from its contract)
+   is the recorded shape for when dispatch overlaps firing. *)
 
 let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
   let address = addr_of entry in
   match Retire.Committed.generation t.committed_state address with
   | Some generation ->
       Read.Witnessed { generation; content = content_of entry }
-  | None ->
+  | None -> (
+      let confidence =
+        entry.confidence *. Speculate.Backstops.link_confidence
+      in
+      let hypothesizable =
+        (not (speculation_off t shape))
+        && confidence >= t.backstops.confidence_floor
+      in
+      match entry.producer with
+      | Some producer when hypothesizable ->
+          Read.Hypothesis
+            {
+              Speculate.Hypothesis.id = Id.mint t.hyp_minter;
+              consumer;
+              address;
+              source =
+                Speculate.Hypothesis.Store_buffer
+                  { producer; snapshot = content_of entry };
+              content = content_of entry;
+              confidence;
+            }
+      | Some _ ->
+          (* Speculation off for this read: wait for the landing. *)
+          Read.Suspended
+      | None -> (
+          match Theory.schema_hash t.theory ~relation:entry.relation with
+          | Some schema when hypothesizable ->
+              Read.Hypothesis
+                {
+                  Speculate.Hypothesis.id = Id.mint t.hyp_minter;
+                  consumer;
+                  address;
+                  source =
+                    Speculate.Hypothesis.Issued_contract
+                      { relation = entry.relation; schema };
+                  content = content_of entry;
+                  confidence;
+                }
+          | Some _ | None -> Read.Suspended))
+
+(* {2 Drift classification and check-on-yield delivery}
+   Drift class is judged per consumer, against what this consumer
+   provably read; the routing itself is the policy table
+   ([Speculate.Drift.table]) — classification here only PARSES the move
+   into the table's domain (docs/architecture/40-scheduling.md § drift
+   routing). *)
+
+let committed_payload t ~relation ~id =
+  List.find_map
+    (fun (tu : Retire.Committed.tuple) ->
       if
-        List.exists
-          (fun e ->
-            String.equal e.relation entry.relation
-            && String.equal e.id entry.id)
-          t.tuples
-      then
-        (* An uncommitted producer tuple in the feed (seeds commit at run
-           open, so they take the branch above): readable now, at its
-           pre-commit generation. *)
-        Read.Witnessed
-          { generation = Ledger.Generation.zero; content = content_of entry }
-      else begin
-        (* Missing. Hypothesizable iff a contract is issued for the
-           relation, the shape's off switch is not thrown, and chain
-           confidence clears the floor; otherwise the fiber parks. *)
-        let confidence = 1.0 in
-        match Theory.schema_hash t.theory ~relation:entry.relation with
-        | Some schema
-          when (not (speculation_off t shape))
-               && confidence >= t.backstops.confidence_floor ->
-            Read.Hypothesis
-              {
-                Speculate.Hypothesis.id = Id.mint t.hyp_minter;
-                consumer;
-                address;
-                source =
-                  Speculate.Hypothesis.Issued_contract
-                    { relation = entry.relation; schema };
-                content = content_of entry;
-                confidence;
-              }
-        | Some _ | None -> Read.Suspended
-      end
+        String.equal tu.Retire.Committed.relation relation
+        && String.equal tu.Retire.Committed.id id
+      then Some tu.Retire.Committed.payload
+      else None)
+    (Retire.Committed.tuples t.committed_state)
+
+(* Parse one moved address into a drift class, for the consumer that read
+   [consumed_entries] as operands and [witnessed_files] through its tools:
+   a moved tuple operand diffs snooped-against-landed payloads ([pulled]
+   carries landings the consumer's own channel pull just delivered; the
+   committed set answers for the rest); a moved file the consumer read is
+   judged against everything it read; an address outside its reads is
+   additive from this consumer's perspective. *)
+let classify_move t ~(consumed_entries : tuple_entry list) ~witnessed_files
+    ~(pulled : (string * string * Yojson.Safe.t) list)
+    (address : Ledger.Address.t) : Speculate.Drift.cls =
+  match address with
+  | Ledger.Address.Tuple { relation; id } -> (
+      let operand =
+        List.find_opt
+          (fun e -> String.equal e.relation relation && String.equal e.id id)
+          consumed_entries
+      in
+      match operand with
+      | Some entry ->
+          let landed =
+            match
+              List.find_map
+                (fun (rel, tid, payload) ->
+                  if String.equal rel relation && String.equal tid id then
+                    Some payload
+                  else None)
+                pulled
+            with
+            | Some payload -> payload
+            | None -> (
+                match committed_payload t ~relation ~id with
+                | Some payload -> payload
+                | None -> entry.payload)
+          in
+          Speculate.Drift.classify
+            ~landing:
+              (`Landed
+                 (Speculate.Drift.payload_diff ~was:entry.payload ~landed))
+            ~consumed:(top_paths entry.payload)
+      | None ->
+          (* Moved state this consumer never read: additive from its
+             perspective, whatever moved. *)
+          Speculate.Drift.classify
+            ~landing:
+              (`Landed
+                 [ Contract.Diff.Added [ Ledger.Address.to_string address ] ])
+            ~consumed:[])
+  | Ledger.Address.File path ->
+      if List.exists (String.equal path) witnessed_files then
+        Speculate.Drift.classify
+          ~landing:
+            (`Landed
+               [
+                 Contract.Diff.Retyped
+                   { path = [ path ]; was = "witnessed"; now = "landed" };
+               ])
+          ~consumed:(List.map (fun p -> [ p ]) witnessed_files)
+      else
+        Speculate.Drift.classify
+          ~landing:(`Landed [ Contract.Diff.Added [ path ] ])
+          ~consumed:[]
+  | Ledger.Address.Contract _ | Ledger.Address.Resource _ ->
+      Speculate.Drift.classify
+        ~landing:
+          (`Landed [ Contract.Diff.Added [ Ledger.Address.to_string address ] ])
+        ~consumed:[]
+
+let witnessed_files_of t node =
+  List.filter_map
+    (fun ((a : Ledger.Address.t), _, _) ->
+      match a with Ledger.Address.File p -> Some p | _ -> None)
+    (Ledger.Witness_index.reads t.ledger node)
+
+let note_drift t ~node ~address ~delta cls =
+  let route = Speculate.Drift.route cls in
+  ignore
+    (Ledger.append t.ledger ~node
+       (Ledger.Event.Drift_note
+          { address; cls = Speculate.Drift.tag cls; route })
+      : Ledger.Event.t);
+  {
+    Speculate.Drift.address;
+    cls;
+    delta;
+    disposition = Speculate.Drift.disposition_of route;
+  }
+
+(* The consumer's REAL [on_yield]: drain the edge's footprint-filtered
+   invalidation queue at the fiber's suspension points, pull what landed,
+   and hand back typed drift notes carrying the routing the table already
+   decided — check-on-yield, never a mid-flight interrupt
+   (docs/architecture/30-channels.md § delivery, § invalidate, don't
+   update). *)
+let on_yield_of t (inst : instance) : unit -> Speculate.Drift.note list =
+  let key = Theory.Statement.to_string inst.provenance.Ledger.Provenance.statement in
+  match List.assoc_opt key t.rxs with
+  | None -> fun () -> []
+  | Some (Any_rx (r, rx)) ->
+      let relation = Theory.Relation.name r in
+      fun () ->
+        (* The pull half: drain the committed tuples the channel delivered
+           since this edge's cursor — the notes below are judged against
+           pulled landings, not stale snapshots. *)
+        let pulled =
+          List.map
+            (fun (id, payload) ->
+              ( relation,
+                Id.to_string id,
+                Theory.Tuple.payload_json (Theory.Tuple.v r payload) ))
+            (Channel.pull_tuples rx)
+        in
+        List.map
+          (fun (inv : Channel.Invalidation.t) ->
+            let cls =
+              classify_move t ~consumed_entries:inst.consumed
+                ~witnessed_files:(witnessed_files_of t inst.node) ~pulled
+                inv.Channel.Invalidation.address
+            in
+            note_drift t ~node:inst.node
+              ~address:inv.Channel.Invalidation.address
+              ~delta:(Some inv.Channel.Invalidation.delta_ref) cls)
+          (Channel.pull_invalidations rx)
 
 (* {2 The boundary parse}
    One boundary, one supply: the head contract lowers its cardinality
@@ -381,9 +599,10 @@ let invoke_lane :
     t ->
     instance ->
     hyps:(Speculate.Hypothesis.t * string) list ->
+    on_yield:(unit -> Speculate.Drift.note list) ->
     grant:s Agent.Grant.t ->
     (Retire.head_tuple list * tuple_realm Id.t list, Ledger.Fault.t) result =
- fun t inst ~hyps ~grant ->
+ fun t inst ~hyps ~on_yield ~grant ->
   let head_rel, window = inst.spawn.Theory.Spawn.exists in
   match Theory.wire_schema t.theory ~relation:head_rel with
   | None ->
@@ -409,7 +628,7 @@ let invoke_lane :
       Agent.invoke_parsed ~executor:inst.binding.runtime
         ?fallback:inst.binding.fallback ~parse ~invocation
         ~budget:inst.binding.repair_budget ~ledger:t.ledger ~node:inst.node
-        ~on_yield:(fun () -> [])
+        ~on_yield
 
 (* The footprint grant, from the template's declarations. The status
    phantom is chosen at the call site: hypothesis-free dispatches carry the
@@ -445,9 +664,21 @@ let port_capacity t (inst : instance) =
               (Printf.sprintf "port %s has no capacity (limit %d; bottleneck: %s)"
                  (Port.name p) limit bottleneck))
 
+(* A queued instance is hypothesis-carrying when one of its operands would
+   bind speculatively at the read: fired against a producer's uncommitted
+   store buffer. *)
+let hypothesis_carrying t (inst : instance) =
+  List.exists
+    (fun e ->
+      Option.is_some e.producer
+      && Option.is_none (Retire.Committed.generation t.committed_state (addr_of e)))
+    inst.consumed
+
 (* Port-admission order: resumed-witnessed before eager-or-speculative;
    among hypothesis-carrying candidates the predictor orders higher
-   survival first; FIFO within remaining ties. *)
+   survival first; FIFO everywhere else — an eager start with witnessed
+   operands is never re-ranked by a survival counter
+   (docs/architecture/40-scheduling.md § ports and priority). *)
 let admission_order t =
   List.stable_sort
     (fun a b ->
@@ -455,13 +686,68 @@ let admission_order t =
       if c <> 0 then c
       else
         let c =
-          match (a.cls, b.cls) with
-          | Priority.Eager_or_speculative, Priority.Eager_or_speculative ->
-              Speculate.Predictor.compare_for_port t.predictor a.shape b.shape
-          | _ -> 0
+          if hypothesis_carrying t a && hypothesis_carrying t b then
+            Speculate.Predictor.compare_for_port t.predictor a.shape b.shape
+          else 0
         in
         if c <> 0 then c else Int.compare a.seq b.seq)
     t.queue
+
+(* Head tuples enter the body-match feed at their producer's COMPLETION,
+   as snoopable store-buffer state: data-generated instances start at
+   materialization, before the producer retires
+   (docs/architecture/40-scheduling.md § eager start). The entry carries
+   the derivation's strata (pointwise max over the consumed operands, one
+   deeper where the head relation is generation-bounded), the hypotheses
+   the chain now rides on, and the chain confidence. *)
+let feed_heads t (inst : instance)
+    ~(own_hyps : (Speculate.Hypothesis.t * Yojson.Safe.t) list)
+    (heads : Retire.head_tuple list) =
+  let stratum_max acc (rel, n) =
+    match List.assoc_opt rel acc with
+    | Some m when m >= n -> acc
+    | Some _ | None -> (rel, n) :: List.remove_assoc rel acc
+  in
+  let inherited =
+    List.fold_left
+      (fun acc (e : tuple_entry) -> List.fold_left stratum_max acc e.strata)
+      [] inst.consumed
+  in
+  let head_strata relation =
+    match Theory.generations t.theory ~relation with
+    | None -> inherited
+    | Some _ ->
+        let n =
+          match List.assoc_opt relation inherited with Some n -> n | None -> 0
+        in
+        (relation, n + 1) :: List.remove_assoc relation inherited
+  in
+  let carried =
+    let own = List.map (fun ((h : Speculate.Hypothesis.t), _) -> h.id) own_hyps in
+    List.fold_left
+      (fun acc h -> if List.exists (Id.equal h) acc then acc else h :: acc)
+      inst.provenance.Ledger.Provenance.hypotheses own
+  in
+  let confidence =
+    List.fold_left
+      (fun acc ((h : Speculate.Hypothesis.t), _) ->
+        acc *. h.Speculate.Hypothesis.confidence)
+      1.0 own_hyps
+  in
+  t.tuples <-
+    t.tuples
+    @ List.map
+        (fun (h : Retire.head_tuple) ->
+          {
+            relation = h.relation;
+            id = h.id;
+            payload = h.payload;
+            strata = head_strata h.relation;
+            producer = Some inst.node;
+            carried;
+            confidence;
+          })
+        heads
 
 let dispatch_node t (inst : instance) =
   match port_capacity t inst with
@@ -481,12 +767,17 @@ let dispatch_node t (inst : instance) =
           (fun (_, o) -> match o with Read.Suspended -> true | _ -> false)
           outcomes
       in
-      if suspended then
+      if suspended then begin
         (* The fiber parks, costing nothing; it resumes when the operand
            space next changes (a retirement). *)
+        decide t ~node:inst.node Ledger.Decision.Suspended
+          ~reason:"read blocked with no hypothesis source" ~counters:[];
         t.parked <- t.parked @ [ inst ]
+      end
       else begin
-        let hyps =
+        decide t ~node:inst.node Ledger.Decision.Dispatched
+          ~reason:"operands bound" ~counters:[];
+        let hyp_pairs =
           List.filter_map
             (fun (entry, o) ->
               match o with
@@ -502,21 +793,41 @@ let dispatch_node t (inst : instance) =
                             confidence = h.confidence;
                           })
                       : Ledger.Event.t);
-                  t.undischarged <-
-                    h.Speculate.Hypothesis.id :: t.undischarged;
-                  Some (h, Yojson.Safe.to_string (operand_json entry))
+                  (* The snooped read enters the observed witness at the
+                     producer's uncommitted generation — what makes the
+                     speculation honest, and what retires it for free when
+                     the landing is exactly the snapshot (falsifier F7)
+                     (docs/architecture/30-channels.md § store-to-load
+                     forwarding). *)
+                  ignore
+                    (Ledger.append t.ledger ~node:inst.node
+                       (Ledger.Event.Load
+                          {
+                            tool = "chase.snoop";
+                            observed =
+                              [
+                                ( h.Speculate.Hypothesis.address,
+                                  Ledger.Generation.zero,
+                                  h.Speculate.Hypothesis.content );
+                              ];
+                          })
+                      : Ledger.Event.t);
+                  t.undischarged <- (h, entry.payload) :: t.undischarged;
+                  Some (h, entry)
               | _ -> None)
             outcomes
+        in
+        let hyps =
+          List.map
+            (fun (h, entry) -> (h, Yojson.Safe.to_string (operand_json entry)))
+            hyp_pairs
         in
         (* Witnessed committed reads enter the observed witness — captured
            by observation at the engine's own read, never self-report. *)
         List.iter
           (fun (entry, o) ->
             match o with
-            | Read.Witnessed { generation; content }
-              when Option.is_some
-                     (Retire.Committed.generation t.committed_state
-                        (addr_of entry)) ->
+            | Read.Witnessed { generation; content } ->
                 ignore
                   (Ledger.append t.ledger ~node:inst.node
                      (Ledger.Event.Load
@@ -530,21 +841,26 @@ let dispatch_node t (inst : instance) =
         let worktree =
           Retire.Worktree.create ~root:t.worktree_root ~node:inst.node
         in
+        let on_yield = on_yield_of t inst in
         let result =
           match hyps with
           | [] ->
-              invoke_lane t inst ~hyps
+              invoke_lane t inst ~hyps ~on_yield
                 ~grant:
                   (grant_of inst worktree
                     : Agent.Grant.committed Agent.Grant.t)
           | _ :: _ ->
-              invoke_lane t inst ~hyps
+              invoke_lane t inst ~hyps ~on_yield
                 ~grant:
                   (grant_of inst worktree
                     : Agent.Grant.speculative Agent.Grant.t)
         in
         match result with
         | Ok (heads, late_minted) ->
+            feed_heads t inst
+              ~own_hyps:
+                (List.map (fun (h, (e : tuple_entry)) -> (h, e.payload)) hyp_pairs)
+              heads;
             t.retire_queue <-
               t.retire_queue @ [ { inst; heads; worktree; late_minted } ]
         | Error fault -> settle_fault t inst (Some worktree) fault
@@ -557,11 +873,34 @@ let try_dispatch t =
       (* The token-ceiling backstop: at the ceiling, admit only witnessed
          work until discharges catch up
          (docs/architecture/40-scheduling.md § backstops). *)
+      let run_tokens = Ledger.Usage.total (Ledger.Telemetry.run_usage t.ledger) in
       let ceiling_hit =
         (not (List.is_empty t.undischarged))
-        && Ledger.Usage.total (Ledger.Telemetry.run_usage t.ledger)
-           >= t.backstops.token_ceiling
+        && run_tokens >= t.backstops.token_ceiling
       in
+      (* Announced once per binding episode: an anomaly with its numbers
+         attached, never a per-step drumbeat. *)
+      if ceiling_hit && not t.ceiling_announced then begin
+        t.ceiling_announced <- true;
+        ignore
+          (Ledger.append t.ledger
+             (Ledger.Event.Decision
+                {
+                  action = Ledger.Decision.Ceiling_bound;
+                  reason =
+                    "token ceiling bound under undischarged hypotheses: \
+                     admitting witnessed work only";
+                  counters =
+                    [
+                      ("token_ceiling", float_of_int t.backstops.token_ceiling);
+                      ("run_tokens", float_of_int run_tokens);
+                      ( "undischarged",
+                        float_of_int (List.length t.undischarged) );
+                    ];
+                })
+            : Ledger.Event.t)
+      end;
+      if not ceiling_hit then t.ceiling_announced <- false;
       let admissible inst =
         (not ceiling_hit)
         ||
@@ -573,6 +912,9 @@ let try_dispatch t =
       | None -> false
       | Some inst ->
           t.queue <- List.filter (fun i -> not (Id.equal i.node inst.node)) t.queue;
+          decide t ~node:inst.node
+            (Ledger.Decision.Admitted { port = inst.binding.port })
+            ~reason:"port slot won" ~counters:[];
           dispatch_node t inst;
           true)
 
@@ -658,7 +1000,11 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
     {
       Ledger.Provenance.statement = sid;
       consumed = [ (entry.relation, entry.id) ];
-      hypotheses = [];
+      (* Downstream firings inherit the consumed chain's hypotheses: the
+         squash walk and the retirement discharge check both read them
+         from here (docs/architecture/40-scheduling.md § read-time
+         binding). *)
+      hypotheses = entry.carried;
     }
   in
   match executor_binding_for t spawn with
@@ -723,6 +1069,8 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
             seq = t.seq;
           }
         in
+        decide t ~node (Ledger.Decision.Queued { port = binding.port })
+          ~reason:"instance fired" ~counters:[];
         t.queue <- t.queue @ [ inst ]
       done
 
@@ -735,74 +1083,38 @@ let try_fire t =
 
 (* {2 Retirement and its rejections} *)
 
-let retire_success t (c : completed) =
-  (* Retire.step sealed the ledger; the engine records the settlement and
-     feeds the committed heads back into the body-match feed. *)
-  settle t c.inst.node Settlement.Retired ~seal:false;
-  t.retire_queue <-
-    List.filter (fun c' -> not (Id.equal c'.inst.node c.inst.node)) t.retire_queue;
-  (* Head tuples inherit the derivation's strata (pointwise max over the
-     consumed operands) and, when the head relation is generation-bounded,
-     count one generation deeper. *)
-  let stratum_max acc (rel, n) =
-    match List.assoc_opt rel acc with
-    | Some m when m >= n -> acc
-    | Some _ | None -> (rel, n) :: List.remove_assoc rel acc
-  in
-  let inherited =
-    List.fold_left
-      (fun acc (e : tuple_entry) -> List.fold_left stratum_max acc e.strata)
-      [] c.inst.consumed
-  in
-  let head_strata relation =
-    match Theory.generations t.theory ~relation with
-    | None -> inherited
-    | Some _ ->
-        let n =
-          match List.assoc_opt relation inherited with Some n -> n | None -> 0
-        in
-        (relation, n + 1) :: List.remove_assoc relation inherited
-  in
-  t.tuples <-
-    t.tuples
-    @ List.map
-        (fun (h : Retire.head_tuple) ->
-          {
-            relation = h.relation;
-            id = h.id;
-            payload = h.payload;
-            strata = head_strata h.relation;
-          })
-        c.heads;
-  (* The operand space changed: resume suspended reads. *)
-  List.iter (fun i -> i.cls <- Priority.Resumed_witnessed) t.parked;
-  t.queue <- t.queue @ t.parked;
-  t.parked <- []
-
-(* Abandon one completed attempt: drop the worktree and the provisional
-   ids, seal the squash, optionally un-consume the body match so the
-   instance re-fires (serialize: reissue the loser against the winner's
-   state — the v0 route for every conflict). *)
-let abandon t (c : completed) ~action ~reason ~count ~refire =
-  ignore
-    (Ledger.append t.ledger ~node:c.inst.node
-       (Ledger.Event.Decision
-          { action; reason; counters = [ ("reissues", float_of_int count) ] })
-      : Ledger.Event.t);
+(* Abandon one completed attempt: drop the worktree, the provisional ids,
+   and the uncommitted store-buffer heads; seal the squash with its cause;
+   squash whatever snooped or consumed the dropped buffer (the buffer is
+   gone — nothing derived from it may retire); optionally un-consume the
+   body match so the instance re-fires against the state that remains. *)
+let abandon t (c : completed) ~action ~reason ~cause ~count ~refire =
+  decide t ~node:c.inst.node action ~reason
+    ~counters:[ ("reissues", float_of_int count) ];
   Retire.Worktree.drop c.worktree;
   Id.Registry.drop_provisional t.registry (c.inst.minted_ids @ c.late_minted);
-  settle t c.inst.node
-    (Settlement.Squashed Ledger.Squash_cause.Operator_abort)
-    ~seal:true;
+  settle t c.inst.node (Settlement.Squashed cause) ~seal:true;
   t.retire_queue <-
     List.filter (fun c' -> not (Id.equal c'.inst.node c.inst.node)) t.retire_queue;
+  drop_speculative_state t [ c.inst.node ];
+  let dcause = Ledger.Squash_cause.Upstream_squash c.inst.node in
+  (match Retire.squash_set t.ledger ~cause:dcause with
+  | [] -> ()
+  | dependents ->
+      Retire.squash ~ledger:t.ledger ~registry:t.registry
+        ~worktrees:(queued_worktrees t dependents) ~cause:dcause;
+      List.iter
+        (fun n -> settle t n (Settlement.Squashed dcause) ~seal:false)
+        dependents;
+      drop_speculative_state t dependents;
+      purge t dependents);
   if refire then begin
     let key = c.inst.fired_key in
     t.fired <- List.filter (fun k -> not (k = key)) t.fired;
     t.reissues <- (key, count + 1) :: List.remove_assoc key t.reissues
   end
 
-let reissue_or_stop t (c : completed) ~action ~reason =
+let reissue_or_stop t (c : completed) ~action ~cause ~reason =
   let count =
     match List.assoc_opt c.inst.fired_key t.reissues with
     | Some n -> n
@@ -810,8 +1122,203 @@ let reissue_or_stop t (c : completed) ~action ~reason =
   in
   (* Bounded serialization: a body match reissues at most three times, so a
      livelocked witness cannot spin the scheduler forever. *)
-  abandon t c ~action ~reason ~count ~refire:(count < 3);
+  abandon t c ~action ~reason ~cause ~count ~refire:(count < 3);
   true
+
+(* {2 Publish on retire}
+   Retirement is the only writer of committed state, and the channel layer
+   is its delivery surface. Head tuples re-enter through the relation's
+   own codec — the typed log receives a value of the very type the channel
+   was opened for, ids resolved against mint provenance — and moved
+   generations fan out as payload-free invalidations over every channel,
+   each subscribed edge's declared footprint filtering
+   (docs/architecture/30-channels.md § invalidate, don't update,
+   § footprint filtering). *)
+
+let publish_heads t (c : completed) =
+  List.iter
+    (fun (h : Retire.head_tuple) ->
+      match List.assoc_opt h.relation t.txs with
+      | None -> () (* unreachable: heads parse against admitted relations *)
+      | Some (Any_tx (r, tx)) -> (
+          match
+            ( Id.Registry.resolve t.registry ~realm:h.relation h.id,
+              Theory.Relation.payload_of_json r ~registry:t.registry h.payload
+            )
+          with
+          | Ok id, Ok payload -> Channel.publish tx ~id payload
+          | Error (`Unknown_id _), _ | _, Error _ ->
+              (* heads are codec-proven against this very relation, so
+                 both parses held once already; a foreign realm's echo has
+                 nothing to publish *)
+              ()))
+    c.heads
+
+(* v0 delta locators mirror the store tools' scheme: the address's own
+   worktree-relative locator (docs/architecture/30-channels.md § OPEN
+   items — the blob ref scheme). *)
+let delta_locator (address : Ledger.Address.t) =
+  match address with
+  | Ledger.Address.File path -> Ledger.Delta_ref.v path
+  | Ledger.Address.Tuple { relation; id } ->
+      Ledger.Delta_ref.v (relation ^ "/" ^ id)
+  | Ledger.Address.Contract name | Ledger.Address.Resource name ->
+      Ledger.Delta_ref.v name
+
+let fan_invalidations t ~node =
+  List.iter
+    (fun (e : Ledger.Event.t) ->
+      match (e.Ledger.Event.kind, e.Ledger.Event.node) with
+      | Ledger.Event.Invalidation_sent { address; new_generation }, Some n
+        when Id.equal n node ->
+          let inv =
+            {
+              Channel.Invalidation.address;
+              new_generation;
+              producer = node;
+              delta_ref = delta_locator address;
+            }
+          in
+          (* Every channel fans; the edge footprints decide delivery — a
+             sub on one relation's channel legitimately subscribes to file
+             globs and ref-target relations beyond it. *)
+          List.iter (fun (_, Any_tx (_, tx)) -> Channel.invalidate tx inv) t.txs
+      | _ -> ())
+    (Ledger.Replay.events t.ledger)
+
+(* {2 The hypothesis refresher}
+   Runs at the producer's landing, over every pending hypothesis on an
+   address the landing covers: identical content discharges silently —
+   correct speculation costs zero (falsifier F7) — and a differing landing
+   parses into a drift class the policy table routes. Reconcile, in the
+   synchronous v0 engine, is reissue-with-the-diagnostics (a completed
+   attempt cannot patch mid-flight; the drift note carries what changed);
+   flush squashes the consumer's subtree
+   (docs/architecture/40-scheduling.md § read-time binding, § drift
+   routing). *)
+
+let discharge_hypothesis t (h : Speculate.Hypothesis.t) =
+  ignore
+    (Ledger.append t.ledger ~node:h.Speculate.Hypothesis.consumer
+       (Ledger.Event.Hypothesis_discharged
+          { hypothesis = h.Speculate.Hypothesis.id })
+      : Ledger.Event.t);
+  t.undischarged <-
+    List.filter
+      (fun ((h' : Speculate.Hypothesis.t), _) ->
+        not (Id.equal h'.Speculate.Hypothesis.id h.Speculate.Hypothesis.id))
+      t.undischarged
+
+let refresh_hypotheses t (c : completed) =
+  let landed_of (address : Ledger.Address.t) =
+    List.find_map
+      (fun (h : Retire.head_tuple) ->
+        if
+          Ledger.Address.equal address
+            (Ledger.Address.Tuple { relation = h.relation; id = h.id })
+        then Some h.payload
+        else None)
+      c.heads
+  in
+  List.iter
+    (fun ((h : Speculate.Hypothesis.t), snooped) ->
+      match landed_of h.Speculate.Hypothesis.address with
+      | None -> ()
+      | Some landed -> (
+          match
+            Speculate.Lifecycle.landing ~snooped
+              ~consumed:(top_paths snooped) ~landed
+          with
+          | Speculate.Lifecycle.Discharged -> discharge_hypothesis t h
+          | Speculate.Lifecycle.Drifted { cls } -> (
+              let (_ : Speculate.Drift.note) =
+                note_drift t ~node:h.Speculate.Hypothesis.consumer
+                  ~address:h.Speculate.Hypothesis.address ~delta:None cls
+              in
+              let consumer_attempt =
+                List.find_opt
+                  (fun c' ->
+                    Id.equal c'.inst.node h.Speculate.Hypothesis.consumer)
+                  t.retire_queue
+              in
+              match consumer_attempt with
+              | None ->
+                  (* The consumer is not a completed attempt (parked or
+                     still queued): the pending hypothesis keeps blocking
+                     its retirement; the stall backstop owns the rest. *)
+                  ()
+              | Some c' -> (
+                  let reason =
+                    "hypothesis drifted at "
+                    ^ Ledger.Address.to_string h.Speculate.Hypothesis.address
+                  in
+                  match Speculate.Drift.route cls with
+                  | Ledger.Drift.Discharge_silently ->
+                      discharge_hypothesis t h
+                  | Ledger.Drift.Reconcile_note | Ledger.Drift.Reconcile_delta
+                    ->
+                      ignore
+                        (reissue_or_stop t c'
+                           ~action:Ledger.Decision.Serialize_reissue
+                           ~cause:Ledger.Squash_cause.Reissue_loser ~reason
+                          : bool)
+                  | Ledger.Drift.Flush_subtree ->
+                      ignore
+                        (reissue_or_stop t c'
+                           ~action:Ledger.Decision.Flush_subtree
+                           ~cause:
+                             (Ledger.Squash_cause.Dead_hypothesis
+                                h.Speculate.Hypothesis.id)
+                           ~reason
+                          : bool)))
+          | Speculate.Lifecycle.Taken | Speculate.Lifecycle.Squashed ->
+              (* not in [Lifecycle.landing]'s image *)
+              ()))
+    t.undischarged
+
+let retire_success t (c : completed) =
+  (* Retire.step sealed the ledger; the engine records the settlement.
+     The heads entered the body-match feed at completion (store-buffer
+     forwarding); the committed lookup now answers for them. *)
+  settle t c.inst.node Settlement.Retired ~seal:false;
+  t.retire_queue <-
+    List.filter (fun c' -> not (Id.equal c'.inst.node c.inst.node)) t.retire_queue;
+  (* Retirement is the only writer of committed state, and the channel
+     layer is its delivery surface: committed heads publish on their
+     relations' typed logs; the landing's moved generations fan out as
+     invalidations, each edge's declared footprint filtering
+     (docs/architecture/30-channels.md § pre-opened channels,
+     § invalidate, don't update). *)
+  publish_heads t c;
+  fan_invalidations t ~node:c.inst.node;
+  (* The refresher judges the landing against every hypothesis it
+     covers. *)
+  refresh_hypotheses t c;
+  (* The operand space changed: resume suspended reads. A resumed read
+     re-enters the port queue as witnessed work only when every operand
+     now reads committed state — anything still speculative must not ride
+     the class the token-ceiling gate always admits
+     (docs/architecture/40-scheduling.md § backstops). *)
+  List.iter
+    (fun i ->
+      let witnessed =
+        List.for_all
+          (fun e ->
+            Option.is_some
+              (Retire.Committed.generation t.committed_state (addr_of e)))
+          i.consumed
+      in
+      i.cls <-
+        (if witnessed then Priority.Resumed_witnessed
+         else Priority.Eager_or_speculative);
+      decide t ~node:i.node Ledger.Decision.Resumed
+        ~reason:"operand space changed" ~counters:[];
+      decide t ~node:i.node
+        (Ledger.Decision.Queued { port = i.binding.port })
+        ~reason:"resumed read re-enters the port queue" ~counters:[])
+    t.parked;
+  t.queue <- t.queue @ t.parked;
+  t.parked <- []
 
 let handle_rejection t (c : completed) (rejection : Retire.rejection) =
   match rejection with
@@ -820,46 +1327,59 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
       | [] ->
           abandon t c ~action:Ledger.Decision.Flush_subtree
             ~reason:"undischarged-hypotheses signal carried no hypotheses"
-            ~count:0 ~refire:false;
+            ~cause:Ledger.Squash_cause.Operator_abort ~count:0 ~refire:false;
           true
       | h :: _ ->
           (* Reached only at stall: nothing can fire or dispatch, so the
              hypothesis's producer can never land — the hypothesis is dead
-             and exactly its derivation subtree squashes. *)
+             and exactly its derivation subtree squashes, on-disk state
+             included. *)
           let cause = Ledger.Squash_cause.Dead_hypothesis h in
-          ignore
-            (Ledger.append t.ledger ~node:c.inst.node
-               (Ledger.Event.Decision
-                  {
-                    action = Ledger.Decision.Flush_subtree;
-                    reason =
-                      "undischarged hypothesis has no remaining producer";
-                    counters =
-                      [
-                        ( "undischarged",
-                          float_of_int (List.length t.undischarged) );
-                      ];
-                  })
-              : Ledger.Event.t);
+          decide t ~node:c.inst.node Ledger.Decision.Flush_subtree
+            ~reason:"undischarged hypothesis has no remaining producer"
+            ~counters:
+              [ ("undischarged", float_of_int (List.length t.undischarged)) ];
           let set = Retire.squash_set t.ledger ~cause in
           Retire.squash ~ledger:t.ledger ~registry:t.registry
-            ~worktrees:[ (c.inst.node, c.worktree) ]
+            ~worktrees:(queued_worktrees t (c.inst.node :: set))
             ~cause;
           settle t c.inst.node (Settlement.Squashed cause) ~seal:false;
           List.iter
             (fun n -> settle t n (Settlement.Squashed cause) ~seal:false)
             set;
-          t.undischarged <-
-            List.filter
-              (fun h' -> not (List.exists (Id.equal h') hyps))
-              t.undischarged;
           t.retire_queue <-
             List.filter
               (fun c' -> not (Id.equal c'.inst.node c.inst.node))
               t.retire_queue;
+          drop_speculative_state t (c.inst.node :: set);
           purge t set;
           true)
   | Retire.Witness_moved moves ->
+      (* The drift-routing table's rejection-site consumer: parse each
+         moved address into its class per THIS consumer, record the typed
+         note, and route by the table — reconcile routes reissue the
+         attempt against the moved state; any flush row flushes the
+         subtree (docs/architecture/40-scheduling.md § drift routing). *)
+      let witnessed_files = witnessed_files_of t c.inst.node in
+      let classified =
+        List.map
+          (fun (m : Retire.generation_moved) ->
+            let cls =
+              classify_move t ~consumed_entries:c.inst.consumed
+                ~witnessed_files ~pulled:[] m.address
+            in
+            let (_ : Speculate.Drift.note) =
+              note_drift t ~node:c.inst.node ~address:m.address
+                ~delta:(Some m.delta_ref) cls
+            in
+            cls)
+          moves
+      in
+      let flush =
+        List.exists
+          (fun cls -> Speculate.Drift.route cls = Ledger.Drift.Flush_subtree)
+          classified
+      in
       let reason =
         "witness moved: "
         ^ String.concat ", "
@@ -868,13 +1388,19 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
                  Ledger.Address.to_string m.address)
                moves)
       in
-      reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue ~reason
+      if flush then
+        reissue_or_stop t c ~action:Ledger.Decision.Flush_subtree
+          ~cause:Ledger.Squash_cause.Reissue_loser ~reason
+      else
+        reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue
+          ~cause:Ledger.Squash_cause.Reissue_loser ~reason
   | Retire.Conflict conflict ->
       let reason =
         "write-set conflict with sibling "
         ^ Id.to_string conflict.Retire.Conflict.sibling
       in
-      reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue ~reason
+      reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue
+        ~cause:Ledger.Squash_cause.Reissue_loser ~reason
 
 (* Inclusion re-judgment at retire (docs/architecture/10-theory.md
    § inclusions): the boundary proved every ref against mint provenance,
@@ -959,6 +1485,7 @@ let try_retire t =
                    commit — reissue against the state that remains. *)
                 reissue_or_stop t c
                   ~action:Ledger.Decision.Serialize_reissue
+                  ~cause:Ledger.Squash_cause.Reissue_loser
                   ~reason:
                     ("dangling ref after producer squash: "
                     ^ String.concat ", " dangling)
@@ -983,18 +1510,11 @@ let resolve_parked t =
   match t.parked with
   | [] -> false
   | inst :: rest ->
-      ignore
-        (Ledger.append t.ledger ~node:inst.node
-           (Ledger.Event.Decision
-              {
-                action = Ledger.Decision.Abort_suspended;
-                reason = "suspended read has no remaining producer";
-                counters = [];
-              })
-          : Ledger.Event.t);
+      decide t ~node:inst.node Ledger.Decision.Abort_suspended
+        ~reason:"suspended read has no remaining producer" ~counters:[];
       Id.Registry.drop_provisional t.registry inst.minted_ids;
       settle t inst.node
-        (Settlement.Squashed Ledger.Squash_cause.Operator_abort)
+        (Settlement.Squashed Ledger.Squash_cause.No_producer)
         ~seal:true;
       t.parked <- rest;
       true
@@ -1025,11 +1545,43 @@ let seed_entry t (tu : Theory.Tuple.t) : tuple_entry =
       let json = Theory.Tuple.payload_json packed in
       Retire.Committed.seed t.committed_state ~relation ~id:(Id.to_string id)
         ~payload:json;
-      { relation; id = Id.to_string id; payload = json; strata = [] }
+      {
+        relation;
+        id = Id.to_string id;
+        payload = json;
+        strata = [];
+        producer = None;
+        carried = [];
+        confidence = 1.0;
+      }
 
 let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
     ~executors ~backstops ~switches ~merges ~seed =
   let registry = Id.Registry.create () in
+  (* The scheduler's channel ends, all opened before any node runs: the
+     writer end per relation (retire publishes; invalidations fan out) and
+     one reader end per consumer edge (drained at that consumer's yields)
+     (docs/architecture/30-channels.md § pre-opened channels). *)
+  let txs =
+    List.map
+      (fun (Theory.Relation.Packed r) ->
+        (Theory.Relation.name r, Any_tx (r, Channel.tx channels r)))
+      (Theory.relations theory)
+  in
+  let rxs =
+    List.filter_map
+      (fun (edge : Theory.Edge.t) ->
+        List.find_map
+          (fun (Theory.Relation.Packed r) ->
+            if String.equal (Theory.Relation.name r) edge.Theory.Edge.reads
+            then
+              Some
+                ( Theory.Statement.to_string edge.Theory.Edge.statement,
+                  Any_rx (r, Channel.rx channels r ~edge) )
+            else None)
+          (Theory.relations theory))
+      (Theory.edges theory)
+  in
   let t =
     {
       theory;
@@ -1047,6 +1599,8 @@ let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
       hyp_minter = Id.Minter.create ~registry ~realm:"hypothesis";
       tuple_minters = Hashtbl.create 16;
       predictor = Speculate.Predictor.of_ledger ledger;
+      txs;
+      rxs;
       seq = 0;
       tuples = [];
       fired = [];
@@ -1056,8 +1610,25 @@ let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
       retire_queue = [];
       settled = [];
       undischarged = [];
+      ceiling_announced = false;
     }
   in
+  (* Each shape's initial pin, recorded at run open: predictor history is
+     keyed by the typed (statement, executor, pin) identities the ledger
+     carries — survival history is per pin
+     (docs/architecture/60-agents.md § model pins). *)
+  List.iter
+    (fun ((sid : Theory.Statement.id), (spawn : Theory.Spawn.t)) ->
+      ignore
+        (Ledger.append ledger
+           (Ledger.Event.Pin_bump
+              {
+                statement = sid;
+                executor = Theory.Executor.id spawn.Theory.Spawn.by;
+                pin = pin_key_of spawn.Theory.Spawn.by;
+              })
+          : Ledger.Event.t))
+    (Theory.statements theory);
   t.tuples <- List.map (seed_entry t) seed;
   t
 

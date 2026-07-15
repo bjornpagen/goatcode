@@ -733,7 +733,7 @@ let%expect_test "F9: speculation on/off commits identical tuples and law \
     verdict verdict@1 {"finding":"finding@1","refuted":"no"} g0
     law quorum satisfied=true offenders=[]
     settlements: retired=3 faulted=0 squashed=0
-    hypotheses taken (on): 0
+    hypotheses taken (on): 2
     hypotheses taken (floor off): 0
     floor-off: identical committed tuples (mod fresh-id renaming)
     floor-off: identical law verdicts

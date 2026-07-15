@@ -215,9 +215,12 @@ let committed_relations (settled : Run.settled) =
    settlement before issuing its sibling — puts make_right's firing after
    make_left's settlement in the trace; a schedule that is the dependency
    structure issues both legs before either runs a single turn, and delays
-   only wrap_left, whose operand genuinely does not exist yet. The wall
-   clock of the whole run is then bounded by the slowest leg's own span,
-   never the legs' sum — asserted here at trace level (issue order) and at
+   wrap_left only until its operand materializes in the producer's store
+   buffer — data-generated instances start at materialization or
+   hypothesis, whichever is earlier, BEFORE the producer settles
+   (docs/architecture/40-scheduling.md § eager start). The wall clock of
+   the whole run is then bounded by the slowest leg's own span, never the
+   legs' sum — asserted here at trace level (issue order) and at
    real-clock level (7200 scripted seconds must not appear in the test's
    wall clock). *)
 
@@ -284,6 +287,9 @@ let%expect_test "F1 max-of-legs: the dependency structure is the schedule" =
       let fired_wrap, _ = req "wrap_left fired" (fired events "wrap_left") in
       let first_turn = req "an agent turn" (first_index events is_agent_turn) in
       let first_settle = req "a settlement" (first_index events is_settled) in
+      let left_turn =
+        req "make_left ran" (turn_index events left_node)
+      in
       let left_settled =
         req "make_left settled" (settled_index events left_node)
       in
@@ -291,8 +297,10 @@ let%expect_test "F1 max-of-legs: the dependency structure is the schedule" =
         (fired_left < first_turn && fired_right < first_turn);
       check "both legs issued before any settlement"
         (fired_left < first_settle && fired_right < first_settle);
-      check "the joining statement issued only after its producer settled"
-        (fired_wrap > left_settled);
+      check "the joining statement issued at its operand's materialization"
+        (fired_wrap > left_turn);
+      check "and before its producer settled (eager start)"
+        (fired_wrap < left_settled);
       check "every node retired" (all_retired settled);
       Printf.printf "committed relations: %s\n" (committed_relations settled);
       check "wall clock bounded by the legs, never their 7200s sum"
@@ -301,7 +309,8 @@ let%expect_test "F1 max-of-legs: the dependency structure is the schedule" =
     {|
     both legs issued before any leg ran a turn: true
     both legs issued before any settlement: true
-    the joining statement issued only after its producer settled: true
+    the joining statement issued at its operand's materialization: true
+    and before its producer settled (eager start): true
     every node retired: true
     committed relations: left right task wrap
     wall clock bounded by the legs, never their 7200s sum: true
@@ -410,19 +419,23 @@ let%expect_test "F2 no head-of-line blocking on an open port" =
 (* ------------------------------------------------------------------ *)
 (* F4 — dispatch purity, instrumented.
 
-   The law: between a settlement and the dispatch of its dependents the
-   engine performs no I/O, no logging, no awaits beyond the ledger append
-   (the one store the path owes). The test build instruments the path
-   directly by driving [Chase.step] one scheduling action at a time:
+   The law: between a settlement (or a producer's completion — under
+   eager start the dependent issues at materialization, before the
+   producer settles) and the dispatch of its dependents the engine
+   performs no I/O, no logging, no awaits beyond the ledger append (the
+   one store the path owes). The test build instruments the path directly
+   by driving [Chase.step] one scheduling action at a time:
 
    - drive a two-stage theory (task -> produce -> mid -> consume -> out)
-     until the producer's settlement lands;
-   - the next scheduling action IS the settlement-to-issue path: it must
-     issue the dependent (fire [consume]);
+     until the producer completes (its heads materialize in its store
+     buffer);
+   - the next scheduling action IS the issue path: it must issue the
+     dependent (fire [consume]);
    - around exactly that action, capture stderr (logging), snapshot every
      file under the sandbox (I/O), and diff the ledger (the permitted
-     append). stdout is implicitly instrumented: this is an expect test,
-     so any engine print would corrupt the expectation below.
+     append: the firing record and the lifecycle decision markers, both
+     ledger events). stdout is implicitly instrumented: this is an expect
+     test, so any engine print would corrupt the expectation below.
 
    The whole-trace check then re-reads the finished ledger: between every
    settlement event and the next firing event there is no load, store,
@@ -517,20 +530,23 @@ let%expect_test "F4 dispatch purity: settlement-to-issue is the ledger append an
            match s with Ledger.Settlement.Retired -> true | _ -> false)
          (Chase.settlements chase))
   in
-  (* Drive to the producer's settlement, one scheduling action at a time. *)
-  let rec until_first_settlement fuel =
-    if fuel = 0 then failwith "no settlement within fuel"
-    else if retired_count () >= 1 then ()
+  (* Drive to the producer's completion (its store buffer materializes),
+     one scheduling action at a time. *)
+  let rec until_producer_completed fuel =
+    if fuel = 0 then failwith "producer did not complete within fuel"
+    else if
+      Option.is_some (first_index (Ledger.Replay.events ledger) is_agent_turn)
+    then ()
     else
       match Chase.step chase with
-      | `Progressed -> until_first_settlement (fuel - 1)
-      | `Quiescent -> failwith "quiescent before any settlement"
+      | `Progressed -> until_producer_completed (fuel - 1)
+      | `Quiescent -> failwith "quiescent before the producer completed"
   in
-  until_first_settlement 100;
-  check "the producer settled; its dependent is not yet issued"
-    (retired_count () = 1
+  until_producer_completed 100;
+  check "the producer completed; its dependent is not yet issued"
+    (retired_count () = 0
     && Option.is_none (fired (Ledger.Replay.events ledger) "consume"));
-  (* Instrument exactly the settlement-to-issue action. *)
+  (* Instrument exactly the completion-to-issue action. *)
   let world_before = world sb in
   let ledger_before = ledger_size sb in
   let events_before = List.length (Ledger.Replay.events ledger) in
@@ -541,15 +557,17 @@ let%expect_test "F4 dispatch purity: settlement-to-issue is the ledger append an
       (fun i _ -> i >= events_before)
       (Ledger.Replay.events ledger)
   in
-  check "the settlement-to-issue action progressed"
+  check "the completion-to-issue action progressed"
     (match step_result with `Progressed -> true | `Quiescent -> false);
   check "it issued the dependent statement"
     (Option.is_some (fired (Ledger.Replay.events ledger) "consume"));
-  check "every event it appended is a firing record"
+  check "every event it appended is a firing record or lifecycle decision"
     (appended <> []
     && List.for_all
          (fun (e : Ledger.Event.t) ->
-           match e.kind with Ledger.Event.Fired _ -> true | _ -> false)
+           match e.kind with
+           | Ledger.Event.Fired _ | Ledger.Event.Decision _ -> true
+           | _ -> false)
          appended);
   check "the ledger grew (the one store the path owes)"
     (ledger_size sb > ledger_before);
@@ -589,10 +607,10 @@ let%expect_test "F4 dispatch purity: settlement-to-issue is the ledger append an
     (pure_between_settle_and_fire (Ledger.Replay.events ledger));
   [%expect
     {|
-    the producer settled; its dependent is not yet issued: true
-    the settlement-to-issue action progressed: true
+    the producer completed; its dependent is not yet issued: true
+    the completion-to-issue action progressed: true
     it issued the dependent statement: true
-    every event it appended is a firing record: true
+    every event it appended is a firing record or lifecycle decision: true
     the ledger grew (the one store the path owes): true
     no other filesystem effect anywhere in the sandbox: true
     nothing logged to stderr: true

@@ -41,6 +41,13 @@ module Relation = struct
   let name t = t.name
   let witness t = t.witness
 
+  (* The typed decode retire's channel publish uses: the payload already
+     passed the boundary parse against this relation's admitted schema, so
+     this re-entry through the relation's own codec is the type conversion,
+     not a second validation. *)
+  let payload_of_json t ~registry json =
+    Contract.Codec.parse_json (Contract.codec t.contract) ~registry json
+
   type packed = Packed : 'a t -> packed
 end
 

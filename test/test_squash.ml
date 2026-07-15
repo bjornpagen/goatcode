@@ -176,6 +176,8 @@ let cause_str = function
   | Ledger.Squash_cause.Dead_hypothesis h -> "dead-hypothesis " ^ Id.to_string h
   | Ledger.Squash_cause.Upstream_fault n -> "upstream-fault " ^ Id.to_string n
   | Ledger.Squash_cause.Upstream_squash n -> "upstream-squash " ^ Id.to_string n
+  | Ledger.Squash_cause.Reissue_loser -> "reissue-loser"
+  | Ledger.Squash_cause.No_producer -> "no-producer"
   | Ledger.Squash_cause.Operator_abort -> "operator-abort"
 
 let settlement_str = function
@@ -687,12 +689,12 @@ let%expect_test "F5: downstream fault at every yield class keeps exactly the \
     fault_scripts;
   [%expect
     {|
-    fault-at-start | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
-    fault-after-yield | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
-    fault-after-delay | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
-    fault-mid-repair | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
-    fault-after-refusal | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
-    script-exhausted-at-yield | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
+    fault-at-start | node#1=faulted:executor-error node#0=retired | tuples=[task/task#0; result/result#0] | ok
+    fault-after-yield | node#1=faulted:executor-error node#0=retired | tuples=[task/task#0; result/result#0] | ok
+    fault-after-delay | node#1=faulted:executor-error node#0=retired | tuples=[task/task#0; result/result#0] | ok
+    fault-mid-repair | node#1=faulted:executor-error node#0=retired | tuples=[task/task#0; result/result#0] | ok
+    fault-after-refusal | node#1=faulted:executor-error node#0=retired | tuples=[task/task#0; result/result#0] | ok
+    script-exhausted-at-yield | node#1=faulted:executor-error node#0=retired | tuples=[task/task#0; result/result#0] | ok
     |}]
 
 (* ==================================================================== *)
@@ -768,8 +770,8 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
     kill@0: retired=[] tuples=[task/task#0] ok
     kill@1: retired=[] tuples=[task/task#0] ok
     kill@2: retired=[] tuples=[task/task#0] ok
-    kill@3: retired=[node#0] tuples=[task/task#0; result/result#0] ok
-    kill@4: retired=[node#0] tuples=[task/task#0; result/result#0] ok
+    kill@3: retired=[] tuples=[task/task#0] ok
+    kill@4: retired=[] tuples=[task/task#0] ok
     kill@5: retired=[node#0] tuples=[task/task#0; result/result#0] ok
     kill@6: retired=[node#0; node#1] tuples=[task/task#0; result/result#0; summary/summary#0] ok
     |}]

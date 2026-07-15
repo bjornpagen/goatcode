@@ -49,8 +49,6 @@ module Hypothesis = struct
     content : Ledger.Content_hash.t;
     confidence : float;
   }
-
-  type status = Pending | Discharged | Dead
 end
 
 module Drift = struct
@@ -135,12 +133,84 @@ module Drift = struct
                 Breaking_broad { diff; refired = false }
               else Breaking_narrow { diff; touched })
 
+  (* Tuple-content drift in the schema-diff vocabulary, so one classifier
+     parses both: a field the landing gained is [Added], one it lost is
+     [Removed], one whose value changed is [Retyped] carrying both
+     renderings as evidence. Records recurse (dotted paths); any other
+     shape mismatch is a change at that path. *)
+  let payload_diff ~was ~landed =
+    let render j =
+      let s = Yojson.Safe.to_string j in
+      if String.length s <= 40 then s else String.sub s 0 37 ^ "..."
+    in
+    let rec walk path (was : Yojson.Safe.t) (landed : Yojson.Safe.t) =
+      match (was, landed) with
+      | `Assoc a, `Assoc b ->
+          let removed =
+            List.filter_map
+              (fun (f, _) ->
+                if List.mem_assoc f b then None
+                else Some (Contract.Diff.Removed (path @ [ f ])))
+              a
+          in
+          let added =
+            List.filter_map
+              (fun (f, _) ->
+                if List.mem_assoc f a then None
+                else Some (Contract.Diff.Added (path @ [ f ])))
+              b
+          in
+          let changed =
+            List.concat_map
+              (fun (f, v) ->
+                match List.assoc_opt f b with
+                | Some v' -> walk (path @ [ f ]) v v'
+                | None -> [])
+              a
+          in
+          removed @ added @ changed
+      | v, v' when Yojson.Safe.equal v v' -> []
+      | v, v' ->
+          [ Contract.Diff.Retyped { path; was = render v; now = render v' } ]
+    in
+    walk [] was landed
+
+  let disposition_of = function
+    | Ledger.Drift.Discharge_silently | Ledger.Drift.Reconcile_note ->
+        `Continue
+    | Ledger.Drift.Reconcile_delta -> `Patch_then_continue
+    | Ledger.Drift.Flush_subtree -> `Stop_cleanly
+
   type note = {
     address : Ledger.Address.t;
     cls : cls;
     delta : Ledger.Delta_ref.t option;
     disposition : [ `Continue | `Patch_then_continue | `Stop_cleanly ];
   }
+end
+
+module Lifecycle = struct
+  (* taken -> discharged | drifted{cls} | squashed: the sum is the state
+     machine; [landing] is the refresher's one judgment and the only
+     transition that needs content (a squash settles without judging). *)
+  type t =
+    | Taken
+    | Discharged
+    | Drifted of { cls : Drift.cls }
+    | Squashed
+
+  let landing ~snooped ~consumed ~landed =
+    if Yojson.Safe.equal snooped landed then Discharged
+    else
+      match
+        Drift.classify
+          ~landing:(`Landed (Drift.payload_diff ~was:snooped ~landed))
+          ~consumed
+      with
+      (* A rendering-only difference (key order) parses as an empty diff:
+         the landing IS the hypothesis, semantically — discharge. *)
+      | Drift.Schema_identical -> Discharged
+      | cls -> Drifted { cls }
 end
 
 (* The nodes a shape fired, from the ledger's firing events. Firing
@@ -355,4 +425,9 @@ module Backstops = struct
      suppressing ordinary chains (0.05 admits chains ~40 deep at 0.93
      per-link confidence). Per-run configurable. *)
   let default = { token_ceiling = 10_000_000; confidence_floor = 0.05 }
+
+  (* The declared per-link confidence the floor's calibration assumes.
+     Measurement-owned: a per-shape measured factor is the recorded
+     upgrade, in the predictor's slot. *)
+  let link_confidence = 0.93
 end
