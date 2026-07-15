@@ -91,7 +91,7 @@ step):
    pathspec-limited commit from store-event oids; net-delta consumers move
    to the event stream. — LANDED (this commit)
 3. **The frontier** — `Retire.Frontier` over ledger + committed state;
-   `materialize` as boot/hygiene. Lands FL3, FL4.
+   `materialize` as boot/hygiene. Lands FL3, FL4. — LANDED (this commit)
 4. **Collapse the tree** — `Agent.Grant.t` loses `worktree_root`/
    `snoop_mounts`, gains `write_globs`; the read resolver consults the
    frontier; nodes dispatch with no worktree. Lands FL2, FL5.

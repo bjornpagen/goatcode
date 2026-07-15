@@ -85,6 +85,55 @@ module Committed : sig
       (docs/architecture/70-api.md § running). *)
 end
 
+(** The live frontier: validity is a ledger coordinate, never a filesystem
+    fact — the working tree is a materialization, a cache, of this derived
+    view over ledger + committed state. Liveness is a derived judgment,
+    not a second supply: a store event is live iff its node is unsettled
+    or retired, so the squash settlement is the one appended fact and
+    every coordinate under a squashed or faulted node is provenance-dead
+    by derivation — no per-event kill marks, no tombstones. Readers: the
+    read resolver (hypothesis sourcing), the retire step (commit
+    construction), boot and crash recovery ({!Frontier.materialize}), and
+    the hygiene sweep (garbage identification)
+    (docs/architecture/20-medium.md § validity is a ledger coordinate). *)
+module Frontier : sig
+  type t
+
+  (** The live top of one address. [In_flight] tops carry the writer —
+      the read resolver turns a read of one into a [Store_buffer]
+      hypothesis on exactly that node. *)
+  type top =
+    | Committed of Witness.Committed_state.t
+    | In_flight of {
+        writer : Ledger.node Id.t;
+        content : Ledger.Content_hash.t;
+        base : Ledger.Content_hash.t option;
+            (** The writer's read point — the same base coordinate the
+                disjoint law judges (docs/architecture/30-scheduling.md
+                § retirement order and the landing). *)
+      }
+
+  val of_ledger : Ledger.t -> committed:Committed.t -> t
+  (** Derive the frontier. The in-flight half is a snapshot of the
+      ledger's live store tops at derivation (re-derive after settlements
+      move); the committed half reads through {!Committed.state}, falling
+      back to the one ref's tip plus the ledger's invalidation trail when
+      the in-memory map is amnesiac — boot after a crash opens an empty
+      map, and the committed coordinate survives as ledger state
+      (docs/architecture/30-scheduling.md § one ref). *)
+
+  val top : t -> Ledger.Address.t -> top
+
+  val materialize : t -> repo:string -> unit
+  (** Converge the tree to the frontier: write each address's live top,
+      delete files whose top is [Absent] or [Deleted]. Idempotent;
+      appends nothing; moves no coordinate. This is checkout, not
+      restore — it runs at boot, after a crash, and as the hygiene sweep,
+      never on any per-node path (docs/architecture/20-medium.md § squash
+      without isolation: overwrite-on-reissue primary, lazy convergence
+      backstop). *)
+end
+
 type generation_moved = {
   address : Ledger.Address.t;
   witnessed : Ledger.Generation.t;

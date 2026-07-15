@@ -224,14 +224,21 @@ module Committed = struct
      that witness holding (falsifier F7); [content] is what makes the
      landing distinguishable from the pre-commit state a snooper of a
      DIFFERENT draft witnessed there. [base] is the writer's read point —
-     the disjoint law's coordinate. *)
-  let advance t ~node ~address ~fresh ~content ~base ~delta =
+     the disjoint law's coordinate. [floor] is the ledger-recovered
+     coordinate ([recovered_floor]): when the map is amnesiac about the
+     address — boot after a crash opens it empty — the landing advances
+     from the floor, never from zero, so no coordinate the ledger already
+     published can be retreated below (falsifier FL4). *)
+  let advance t ~node ~address ~fresh ~floor ~content ~base ~delta =
     let gen =
       match Address_map.find_opt address t.entries with
       | Some e -> Ledger.Generation.next e.gen
-      | None ->
-          if fresh then Ledger.Generation.zero
-          else Ledger.Generation.next Ledger.Generation.zero
+      | None -> (
+          match floor with
+          | Some g -> Ledger.Generation.next g
+          | None ->
+              if fresh then Ledger.Generation.zero
+              else Ledger.Generation.next Ledger.Generation.zero)
     in
     t.entries <-
       Address_map.add address { gen; content; last_delta = delta } t.entries;
@@ -304,6 +311,237 @@ module Committed = struct
          "git -C %s -c user.name=goatcode -c user.email=goatcode@localhost \
           commit -q --allow-empty -m %s"
          (Filename.quote t.repo) (Filename.quote message))
+end
+
+(* The committed coordinate survives as ledger state (30-scheduling.md
+   § one ref): every non-fresh landing published its new generation as an
+   Invalidation_sent event, so the highest one recorded for an address is
+   a floor no later landing may retreat below. In-run the committed map
+   carries the exact coordinate and this floor is redundant; at boot after
+   a crash the map opens empty, and the floor is what keeps the reissued
+   producer's landing strictly above everything the ledger already
+   published (falsifier FL4 — monotonicity is judged over the ledger
+   because the tree carries no authority to retreat). *)
+let recovered_floor ledger address =
+  List.fold_left
+    (fun acc (e : E.t) ->
+      match e.kind with
+      | E.Invalidation_sent { address = a; new_generation }
+        when Ledger.Address.equal a address -> (
+          match acc with
+          | Some g when Ledger.Generation.compare g new_generation >= 0 -> acc
+          | Some _ | None -> Some new_generation)
+      | _ -> acc)
+    None (events ledger)
+
+module Frontier = struct
+  (* The ledger's derived view of every address's live top, composed over
+     committed state (20-medium.md § validity is a ledger coordinate).
+     The working tree is a cache of this view; bytes whose producing
+     store event is dead have no live coordinate and are garbage nothing
+     can witness into committed state. *)
+
+  type top =
+    | Committed of Witness.Committed_state.t
+    | In_flight of {
+        writer : Ledger.node Id.t;
+        content : Ledger.Content_hash.t;
+        base : Ledger.Content_hash.t option;
+      }
+
+  (* An in-flight top keeps its blob oid so [materialize] can pull the
+     draft's bytes from the object database without re-scanning events. *)
+  type draft = {
+    writer : Ledger.node Id.t;
+    content : Ledger.Content_hash.t;
+    base : Ledger.Content_hash.t option;
+    oid : string;
+  }
+
+  type t = {
+    ledger : Ledger.t;
+    committed : Committed.t;
+    drafts : (Ledger.Address.t * draft) list;
+        (* the live in-flight top per address, snapshot at derivation *)
+    swept : string list;
+        (* every file path any store event ever named — dead or live —
+           the address universe [materialize] converges *)
+  }
+
+  let of_ledger ledger ~committed =
+    let evs = events ledger in
+    let settled =
+      List.filter_map
+        (fun (e : E.t) ->
+          match e.kind with
+          | E.Settled s -> Option.map (fun n -> (n, s)) e.node
+          | _ -> None)
+        evs
+    in
+    (* Liveness is a derived judgment, not a second supply: a store event
+       is live iff its node is unsettled or retired. The squash settlement
+       is the one appended fact; every coordinate under a squashed or
+       faulted node is provenance-dead by derivation — no per-event kill
+       marks, no tombstones (20-medium.md § validity is a ledger
+       coordinate). *)
+    let liveness n =
+      match List.find_opt (fun (m, _) -> Id.equal m n) settled with
+      | None -> `In_flight
+      | Some (_, Ledger.Settlement.Retired) -> `Retired
+      | Some (_, (Ledger.Settlement.Faulted _ | Ledger.Settlement.Squashed _))
+        ->
+          `Dead
+    in
+    let base_of writer address =
+      Witness.observed_content (Witness.observed ledger ~node:writer) address
+    in
+    let drafts, swept =
+      List.fold_left
+        (fun (drafts, swept) (e : E.t) ->
+          match (e.kind, e.node) with
+          | E.Store { address; delta; _ }, Some n -> (
+              let swept =
+                match address with
+                | Ledger.Address.File rel -> rel :: swept
+                | Ledger.Address.Tuple _ | Ledger.Address.Contract _
+                | Ledger.Address.Resource _ ->
+                    swept
+              in
+              let drop drafts =
+                List.filter
+                  (fun (a, _) -> not (Ledger.Address.equal a address))
+                  drafts
+              in
+              match liveness n with
+              | `Dead ->
+                  (* provenance-dead: the event moves no top *)
+                  (drafts, swept)
+              | `Retired ->
+                  (* subsumed: the landing is committed state, so the top
+                     falls back to the committed half *)
+                  (drop drafts, swept)
+              | `In_flight -> (
+                  match Ledger.Delta_ref.oid delta with
+                  | Some oid -> (
+                      match Committed.blob_content committed oid with
+                      | None ->
+                          (* the object store does not hold the named oid —
+                             unreachable through the tool path, which
+                             writes the blob before the event *)
+                          (drafts, swept)
+                      | Some bytes ->
+                          ( drop drafts
+                            @ [
+                                ( address,
+                                  {
+                                    writer = n;
+                                    content =
+                                      Ledger.Content_hash.of_string bytes;
+                                    base = base_of n address;
+                                    oid;
+                                  } );
+                              ],
+                            swept ))
+                  | None ->
+                      (* a draft deletion: byte-less, and existence (or
+                         absence) of uncommitted state is not a witnessable
+                         claim in v0 — the top stays the committed prior
+                         until the deletion lands at retire (20-medium.md
+                         § event taxonomy) *)
+                      (drop drafts, swept)))
+          | _ -> (drafts, swept))
+        ([], []) evs
+    in
+    { ledger; committed; drafts; swept = List.sort_uniq String.compare swept }
+
+  (* The committed half of one address's top. In-run {!Committed.state}
+     carries the exact coordinate; when it answers [Absent] the one ref's
+     tip and the ledger's invalidation trail are consulted — the committed
+     state survives as ledger coordinates plus git objects
+     (30-scheduling.md § one ref), so a boot-opened (amnesiac) map still
+     yields the true top, and a seeded tree file no landing ever moved
+     tops as its own committed bytes rather than [Absent]. *)
+  let committed_state t address =
+    match Committed.state t.committed address with
+    | Witness.Committed_state.Absent -> (
+        match address with
+        | Ledger.Address.File rel -> (
+            match Committed.branch_content t.committed rel with
+            | Some bytes ->
+                Witness.Committed_state.Landed
+                  {
+                    generation =
+                      Option.value
+                        (recovered_floor t.ledger address)
+                        ~default:Ledger.Generation.zero;
+                    content = Ledger.Content_hash.of_string bytes;
+                  }
+            | None -> (
+                match recovered_floor t.ledger address with
+                | Some generation ->
+                    (* the branch does not hold the path but the address
+                       has a published coordinate: a committed deletion *)
+                    Witness.Committed_state.Deleted { generation }
+                | None -> Witness.Committed_state.Absent))
+        | Ledger.Address.Tuple _ | Ledger.Address.Contract _
+        | Ledger.Address.Resource _ ->
+            Witness.Committed_state.Absent)
+    | state -> state
+
+  let top t address =
+    match
+      List.find_opt (fun (a, _) -> Ledger.Address.equal a address) t.drafts
+    with
+    | Some (_, d) ->
+        In_flight { writer = d.writer; content = d.content; base = d.base }
+    | None -> Committed (committed_state t address)
+
+  (* Converge the tree to the frontier: write each address's live top,
+     delete files whose top is Absent or Deleted. Checkout, not restore —
+     no coordinate moves, nothing appends; run at boot, after a crash, and
+     as the hygiene sweep (20-medium.md § squash without isolation:
+     overwrite-on-reissue primary, this lazy convergence the backstop).
+     Byte-compare before every write keeps the converged tree untouched —
+     idempotence observable, not asserted. *)
+  let materialize t ~repo =
+    List.iter
+      (fun rel ->
+        let target = Filename.concat repo rel in
+        let current =
+          if Sys.file_exists target then
+            Some (In_channel.with_open_bin target In_channel.input_all)
+          else None
+        in
+        let converge bytes =
+          match bytes with
+          | None ->
+              (* no byte source (the bare committed mode the unit suites
+                 run on): the tree keeps its cache fill *)
+              ()
+          | Some b ->
+              if not (match current with Some c -> String.equal c b | None -> false)
+              then write_file target b
+        in
+        let address = Ledger.Address.File rel in
+        match
+          List.find_opt (fun (a, _) -> Ledger.Address.equal a address) t.drafts
+        with
+        | Some (_, d) ->
+            (* a live draft IS the top: hygiene never clobbers in-flight
+               work with committed content *)
+            converge (Committed.blob_content t.committed d.oid)
+        | None -> (
+            match committed_state t address with
+            | Witness.Committed_state.Landed _ ->
+                (* committed bytes come off the one ref's tip — the tree
+                   carries no authority, so the branch is the source
+                   (30-scheduling.md § one ref) *)
+                converge (Committed.branch_content t.committed rel)
+            | Witness.Committed_state.Absent
+            | Witness.Committed_state.Deleted _ ->
+                if Option.is_some current then
+                  try Sys.remove target with Sys_error _ -> ()))
+      t.swept
 end
 
 type generation_moved = {
@@ -590,6 +828,7 @@ let apply_stores ~committed ~ledger ~node ~witness =
         let prior = Committed.branch_content committed rel_path in
         let address = Ledger.Address.File rel_path in
         let base = Witness.observed_content witness address in
+        let floor = recovered_floor ledger address in
         match Ledger.Delta_ref.oid delta with
         | Some oid -> (
             match Committed.blob_content committed oid with
@@ -609,9 +848,11 @@ let apply_stores ~committed ~ledger ~node ~witness =
                        the oid, staged below *)
                     write_file repo_file landed;
                     Committed.stage_blob committed ~rel_path ~oid;
-                    let fresh = Option.is_none prior in
+                    let fresh =
+                      Option.is_none prior && Option.is_none floor
+                    in
                     let gen =
-                      Committed.advance committed ~node ~address ~fresh
+                      Committed.advance committed ~node ~address ~fresh ~floor
                         ~content:(Some (Ledger.Content_hash.of_string landed))
                         ~base ~delta:(Some delta)
                     in
@@ -624,7 +865,7 @@ let apply_stores ~committed ~ledger ~node ~witness =
                 Committed.stage_removal committed ~rel_path;
                 let gen =
                   Committed.advance committed ~node ~address ~fresh:false
-                    ~content:None ~base ~delta:(Some delta)
+                    ~floor ~content:None ~base ~delta:(Some delta)
                 in
                 Some (address, gen, false)))
       (write_set ledger node)
@@ -662,9 +903,10 @@ let insert_heads ~committed ~ledger ~node ~witness ~heads =
       match existing with
       | Some t when Yojson.Safe.equal t.Committed.payload h.payload -> ()
       | _ ->
-          let fresh = Option.is_none existing in
+          let floor = recovered_floor ledger address in
+          let fresh = Option.is_none existing && Option.is_none floor in
           let gen =
-            Committed.advance committed ~node ~address ~fresh
+            Committed.advance committed ~node ~address ~fresh ~floor
               ~content:
                 (Some
                    (Ledger.Content_hash.of_string
