@@ -134,15 +134,14 @@ effect-escape surfacing (the unexplained-bytes sweep) is owned at
 `20-medium.md` § the escape surfaces.
 
 **The v0 grant surface, recorded honestly.** The chase derives a node's
-grant from its template: `read_globs` from the declaration, the declared
-command line for shell-gate executors. `effects` is hard-coded empty
-because no template surface declares effect tools yet — `run_command` is
-unreachable through a theory, so F12's runtime half is held by the grant's
-type index plus direct-drive falsifiers; effect grants await the
-template-declaration surface. The shipped engine still dispatches with a
-worktree root where the design of record has `write_globs` — that gap
-lives in the migration ledger (`README.md` § design of record vs shipped
-engine), never as soon-dead wiring built here.
+grant from its template: `read_globs` and `write_globs` from the
+declaration, the declared command line for shell-gate executors, and
+`effects` from the template's declared effect tools. The shipped grant is
+the grant above — nodes dispatch with no worktree, the resolver consults
+the frontier, and a snooped read is a tracked store-buffer hypothesis
+(migration ledger row 4, landed). One residue remains config-side:
+`run.toml`'s `worktree_root` key is parsed and unused until row 5 deletes
+it (`README.md` § design of record vs shipped engine).
 
 ## The git ban
 

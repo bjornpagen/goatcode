@@ -4,12 +4,12 @@
 
    Git is the storage engine, not a metaphor: the committed tree is a
    branch, retirements are commits (one per node, dependency-ordered,
-   message = node provenance), worktrees are git worktrees, and this module
-   is the only writer of the committed branch. The landing is built from
-   the ledger — the write set from Store events, the bytes from the
-   object database's blobs, never from any tree — so the worktree is not
-   read at retire. Squash is [git worktree remove] plus a ledger suffix —
-   no compensating action is representable here. *)
+   message = node provenance), the object database is the blob store, and
+   this module is the only writer of the committed branch. The landing is
+   built from the ledger — the write set from Store events, the bytes
+   from the object database's blobs, never from any tree. Squash is the
+   settlement append — no compensating action is representable here;
+   dead tree bytes are Frontier.materialize's hygiene. *)
 
 module E = Ledger.Event
 

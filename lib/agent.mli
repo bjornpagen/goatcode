@@ -35,9 +35,12 @@
     suite (docs/architecture/80-validation.md § the falsifier
     discipline). *)
 
-(** Tool grants: the node's footprint made operational — reads within
-    granted globs, writes within its own worktree, the shell gates its
-    template declares.
+(** Tool grants: the node's footprint made operational — reads and writes
+    within granted globs over the ONE shared tree, the shell gates its
+    template declares. There is no private root: [write_globs] is the
+    load-bearing boundary that replaced the worktree
+    (docs/architecture/40-agents.md § tool grants; README.md § design of
+    record vs shipped engine, row 4).
 
     The grant is a type indexed by speculation status, and the forbidden
     combination has no constructor: effect-capable tools enter a grant only
@@ -81,23 +84,19 @@ module Grant : sig
   end
 
   type 'status t = {
-    read_globs : string list;  (** Readable paths, from the template. *)
-    worktree_root : string;  (** The one writable root: the store buffer. *)
-    committed_root : string;
-        (** The committed checkout an in-glob read falls through to when
-            the worktree misses — the run's repo directory, where the
-            committed branch stays checked out. Every read root is an
-            explicit grant coordinate: the harness process cwd is
-            operator state no footprint declares, and resolving
-            repo-relative paths against it both missed files that were
-            committed all along and could serve the operator's own
-            files to an agent (live trace 2026-07-15: an integrator
-            polled three times for a module committed 40s earlier).
-            Direct callers outside any engine pass ["."]. *)
-    snoop_mounts : string list;
-        (** Read-only mounts of upstream store buffers this node may snoop
-            (docs/architecture/30-channels.md § store-to-load
+    read_globs : string list;
+        (** Ambient visibility: readable, snoopable. Everything in-grant
+            is snoopable, automatically — a read whose address tops
+            [In_flight] at the frontier is a tracked store-buffer
+            hypothesis on exactly that writer, never a mount arrangement
+            (docs/architecture/20-medium.md § store-to-load
             forwarding). *)
+    write_globs : string list;
+        (** Where this node's stores may land in the shared tree. A store
+            path outside it fails the argument boundary with a typed
+            {!Refusal}. Hygiene, not a wall: overlapping grants are legal
+            and the base-coordinate disjoint law convicts an actual
+            clobber (docs/architecture/40-agents.md § tool grants). *)
     shell_gates : string list list;  (** Declared gate command lines. *)
     effects : 'status Effect_tool.t list;
   }
@@ -173,20 +172,48 @@ module Invocation : sig
             boundary parse owns conformance. *)
     grant : 'status Grant.t;
     pin : Theory.Pin.t;
-    committed : Ledger.Address.t -> Witness.Committed_state.t;
-        (** The committed-state lookup tool loads witness against. What a
-            load may claim is decided by where the read was served from
-            (the self-witness ruling,
-            docs/architecture/30-channels.md § mechanized witnesses): a
-            read served from committed bytes enters the observed witness
-            at its real committed generation; a snooped in-flight read
-            stays at [Ledger.Generation.zero] with the content hash
-            carrying the commit-point judgment
-            (docs/architecture/50-commit.md § law 3); a read served from
-            the node's OWN draft claims nothing. The chase supplies
-            [Retire.Committed.state] over the run's committed store;
+    repo : string;
+        (** The ONE shared tree the grant's globs range over — the run's
+            repo directory, where reads resolve and stores land. An
+            explicit invocation coordinate, never the harness process
+            cwd: the cwd is operator state no footprint declares, and
+            resolving repo-relative paths against it both missed files
+            that were committed all along and could serve the operator's
+            own files to an agent (live trace 2026-07-15: an integrator
+            polled three times for a module committed 40s earlier).
+            Direct callers outside any engine pass ["."]. *)
+    frontier : Ledger.Address.t -> Retire.Frontier.top;
+        (** The live-frontier lookup the read resolver consults — files
+            join the vocabulary the chase already speaks for tuples
+            (docs/architecture/20-medium.md § store-to-load forwarding).
+            What a load may claim is decided by the top its read was
+            served under (the self-witness ruling): a [Committed] top
+            enters the observed witness at its real committed
+            generation (an [Absent] one at [Ledger.Generation.zero],
+            the content hash carrying the commit-point judgment); an
+            [In_flight] top by ANOTHER writer is a snooped in-flight
+            observation — generation zero, content judged when that
+            producer lands, and a tracked hypothesis via [snoop]; an
+            [In_flight] top by the node ITSELF is its own draft and
+            claims nothing. The chase supplies [Retire.Frontier.top]
+            over a fresh derivation; direct callers outside any engine
+            supply
+            [fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent]. *)
+    snoop :
+      address:Ledger.Address.t ->
+      producer:Ledger.node Id.t ->
+      content:Ledger.Content_hash.t ->
+      Ledger.Event.kind list;
+        (** The tracked-hypothesis mint for a read served from another
+            node's in-flight store: the hypothesis tracker, not any
+            mount, is what makes snooping honest — the returned events
+            (a [Hypothesis_taken], when the engine tracks one) ride the
+            tool outcome and the consumer's retirement blocks until the
+            producer's landing discharges or drifts it
+            (docs/architecture/20-medium.md § store-to-load forwarding;
+            falsifier FL2). The chase supplies the registering closure;
             direct callers outside any engine supply
-            [fun _ -> Witness.Committed_state.Absent]. *)
+            [fun ~address:_ ~producer:_ ~content:_ -> []]. *)
   }
 end
 
@@ -370,13 +397,15 @@ val agent : stop:Stop.t list -> provider:Provider.t -> Executor.t
 
     The tool surface is a table of tool values derived from the grant at
     invocation start — the table {e is} the capability set: [read_file],
-    [glob_list], [grep] (loads), [write_file], [str_replace_edit] (stores,
-    landing only in the worktree; every store is one site, three
-    obligations, ordered — the full content into git's object database
-    first, so the Store event's {!Ledger.Delta_ref} names an oid the
-    store already holds, tmp+rename at the target second, so a reader
-    the domain does not schedule can never observe an interleaving, the
-    Store event third — docs/architecture/20-medium.md § event taxonomy;
+    [glob_list], [grep] (loads over the shared tree, place judged by the
+    invocation's frontier lookup), [write_file], [str_replace_edit]
+    (stores, landing in the shared tree at the grant's [write_globs];
+    every store is one site, three obligations, ordered — the full
+    content into git's object database first, so the Store event's
+    {!Ledger.Delta_ref} names an oid the store already holds, tmp+rename
+    at the target second, so a reader the domain does not schedule can
+    never observe an interleaving, the Store event third —
+    docs/architecture/20-medium.md § event taxonomy;
     falsifier FL7), and [run_command] {e only when} the
     grant's effects carry a tool of that name (which the status index
     already polices — F12/F15; it runs behind the mkdir-atomic,
@@ -439,14 +468,14 @@ val pure_fn : (Yojson.Safe.t -> (Yojson.Safe.t, string) result) -> Executor.t
 
 val shell_gate : Executor.t
 (** Runs the command line declared on the {!Theory.Executor.Shell_gate},
-    with the node's store buffer as its working directory — the worktree
-    is the checkout the gate's operands landed on, so the command judges
-    exactly that tree. Its judgment is its head tuple; a file the gate
+    with the invocation's shared tree ([repo]) as its working directory —
+    the one tree its operands landed on, so the command judges exactly
+    that tree. Its judgment is its head tuple; a file the gate
     writes into the tree is not an evented store and never lands at
     retire, because the landing is built from Store events alone
     (docs/architecture/README.md § design of record vs shipped engine,
-    row 2). The harness process cwd is ambient state no footprint
-    declares. Exit
+    row 2; migration row 6 re-scopes gates to a frontier snapshot). The
+    harness process cwd is ambient state no footprint declares. Exit
     status and captured output become the head tuple. A non-zero
     exit is data (a failing test run is a tuple, not a fault). The gate
     is an effect against shared machine state: it runs behind the

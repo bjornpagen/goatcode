@@ -166,14 +166,12 @@ let test_schema () =
   | Ok s -> s
   | Error _ -> failwith "test schema escaped the safe subset"
 
-let invocation ~worktree_root =
+let invocation () =
   let schema = test_schema () in
   let grant =
     {
       Agent.Grant.read_globs = [ "**" ];
-      worktree_root;
-      committed_root = ".";
-      snoop_mounts = [];
+      write_globs = [ "**" ];
       shell_gates = [];
       effects = [];
     }
@@ -188,19 +186,22 @@ let invocation ~worktree_root =
     grant;
     pin =
       { Theory.Pin.provider = "rigged"; model = "none"; sampling = []; options = [] };
-    (* Direct-drive tests run outside any engine: nothing is committed, so
-       tool loads witness [Absent] at generation zero. *)
-    committed = (fun _ -> Witness.Committed_state.Absent);
+    (* Direct-drive tests run outside any engine: nothing is committed
+       and nothing is in flight, so every top is Absent and tool loads
+       witness at generation zero (agent.mli § Invocation). *)
+    repo = ".";
+    frontier = (fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent);
+    snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
   }
 
 (* Run one lying reply through the primary lane and return the parsed
    value: proof the lie was accepted as data before the witness ignores
    it. *)
-let invoke_lying ~ledger ~registry ~node ~reply_text ~worktree_root =
+let invoke_lying ~ledger ~registry ~node ~reply_text =
   Agent.invoke
     ~executor:(Agent.Rigged.executor ~script:[ Agent.Rigged.Reply reply_text ])
     ?fallback:None ~codec:identity_codec ~registry
-    ~invocation:(invocation ~worktree_root)
+    ~invocation:(invocation ())
     ~budget:(Agent.Repair_budget.v 1) ~ledger ~node
     ~on_yield:(fun () -> [])
 
@@ -241,7 +242,6 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
   in
   (match
      invoke_lying ~ledger ~registry ~node:n ~reply_text:lie
-       ~worktree_root:(dir // "wt")
    with
   | Ok (`Assoc fields) ->
       Printf.printf "boundary parse: ok (claims %s)\n"
@@ -348,7 +348,6 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
   in
   (match
      invoke_lying ~ledger ~registry ~node:hider ~reply_text:denial
-       ~worktree_root:(scratch // "wt_hider")
    with
   | Ok _ -> print_endline "boundary parse: ok (denial accepted as data)"
   | Error _ -> print_endline "boundary parse: fault");

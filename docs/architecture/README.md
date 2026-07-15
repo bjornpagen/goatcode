@@ -80,8 +80,9 @@ ledger below.
 
 The flat org — one tree, no branches, no worktrees, coherence by ledger —
 is the **design of record** (operator ruling), and these docs describe it
-normatively. The shipped engine still runs the worktree machine. The gap,
-in full, each row struck when its change lands (suite green at every
+normatively. The shipped engine now runs it: nodes dispatch with no
+worktree against the one shared tree (rows 1–4 landed). The gap, in
+full, each row struck when its change lands (suite green at every
 step):
 
 1. **Blobs into git's object store** — store tools write content-addressed
@@ -94,7 +95,8 @@ step):
    `materialize` as boot/hygiene. Lands FL3, FL4. — LANDED (this commit)
 4. **Collapse the tree** — `Agent.Grant.t` loses `worktree_root`/
    `snoop_mounts`, gains `write_globs`; the read resolver consults the
-   frontier; nodes dispatch with no worktree. Lands FL2, FL5.
+   frontier; nodes dispatch with no worktree. Lands FL2, FL5. — LANDED
+   (this commit)
 5. **Delete `Worktree`** — the module dies; squash finalizers become the
    settlement append; `run.mli` `config.worktree_root` dies. Lands FL1 and
    the grep-gate (no worktree/restore vocabulary in lib/).

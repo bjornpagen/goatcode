@@ -106,6 +106,7 @@ module Executor = struct
         pin : Pin.t;
         preamble : string;
         read_globs : string list;
+        write_globs : string list;
         effects : Effect.t list;
       }
     | Pure_fn of { name : string }
@@ -834,6 +835,10 @@ module Meta = struct
             pin = pin_of_json (U.member "pin" j);
             preamble = U.to_string (U.member "preamble" j);
             read_globs = U.to_list (U.member "read_globs" j) |> List.map U.to_string;
+            write_globs =
+              (match U.member "write_globs" j with
+              | `Null -> []
+              | w -> U.to_list w |> List.map U.to_string);
             effects =
               (match U.member "effects" j with
               | `Null -> []
@@ -955,7 +960,8 @@ module Meta = struct
 
   let json_of_executor (e : Executor.t) : Yojson.Safe.t =
     match e with
-    | Executor.Agent_template { name; pin; preamble; read_globs; effects } ->
+    | Executor.Agent_template
+        { name; pin; preamble; read_globs; write_globs; effects } ->
         `Assoc
           [
             ("kind", `String "agent_template");
@@ -963,6 +969,7 @@ module Meta = struct
             ("pin", json_of_pin pin);
             ("preamble", `String preamble);
             ("read_globs", `List (List.map (fun g -> `String g) read_globs));
+            ("write_globs", `List (List.map (fun g -> `String g) write_globs));
             ("effects", `List (List.map json_of_effect effects));
             ("command", `Null);
           ]
@@ -974,6 +981,7 @@ module Meta = struct
             ("pin", `Null);
             ("preamble", `Null);
             ("read_globs", `Null);
+            ("write_globs", `Null);
             ("effects", `Null);
             ("command", `Null);
           ]
@@ -985,6 +993,7 @@ module Meta = struct
             ("pin", `Null);
             ("preamble", `Null);
             ("read_globs", `Null);
+            ("write_globs", `Null);
             ("effects", `Null);
             ("command", `List (List.map (fun c -> `String c) command));
           ]
@@ -1177,13 +1186,14 @@ module Meta = struct
       "type": "object",
       "description": "What a spawn statement's by clause names. kind picks the case; fields that do not belong to the case are null.",
       "additionalProperties": false,
-      "required": ["kind", "name", "pin", "preamble", "read_globs", "effects", "command"],
+      "required": ["kind", "name", "pin", "preamble", "read_globs", "write_globs", "effects", "command"],
       "properties": {
         "kind": { "type": "string", "enum": ["agent_template", "pure_fn", "shell_gate"], "description": "Executor case." },
         "name": { "type": "string", "description": "Executor name; pure functions are bound by this name in the run config." },
         "pin": { "anyOf": [ { "$ref": "#/$defs/pin" }, { "type": "null" } ], "description": "Model pin; agent_template only, null otherwise." },
         "preamble": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "Role text stating stance and method, never shape; agent_template only, null otherwise." },
-        "read_globs": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "File-glob half of the footprint grant; agent_template only, null otherwise." },
+        "read_globs": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "Read half of the file footprint grant (ambient visibility over the shared tree); agent_template only, null otherwise." },
+        "write_globs": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "Write half: where the template's stores may land in the shared tree; agent_template only, null otherwise." },
         "effects": {
           "anyOf": [ { "type": "array", "items": { "$ref": "#/$defs/effect" } }, { "type": "null" } ],
           "description": "Effect tools the template's nodes may run (run_command is the available runtime); agent_template only, null otherwise. Grant run_command with an idempotent_why to agents that must build or test their own work."
@@ -1198,7 +1208,7 @@ module Meta = struct
       "required": ["tool", "idempotent_why"],
       "properties": {
         "tool": { "type": "string", "description": "Effect tool name; run_command is the available runtime." },
-        "idempotent_why": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "The recorded idempotence argument (e.g. re-runnable build/test in the node's own worktree), or null for a non-idempotent effect." }
+        "idempotent_why": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "The recorded idempotence argument (e.g. a re-runnable build/test command), or null for a non-idempotent effect." }
       }
     },
     "window": {

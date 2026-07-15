@@ -107,11 +107,25 @@ let pin =
 
 let worker =
   Theory.Executor.Agent_template
-    { name = "worker"; pin; preamble = "produce the result tuple"; read_globs = []; effects = [] }
+    {
+      name = "worker";
+      pin;
+      preamble = "produce the result tuple";
+      read_globs = [];
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let summarizer =
   Theory.Executor.Agent_template
-    { name = "summarizer"; pin; preamble = "summarize the result"; read_globs = []; effects = [] }
+    {
+      name = "summarizer";
+      pin;
+      preamble = "summarize the result";
+      read_globs = [];
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let pipeline_theory () =
   match
@@ -572,6 +586,10 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
             (String.concat "; " (List.map tuple_key settled.tuples));
           Printf.printf "retire commits: [%s]\n"
             (String.concat "; " (retire_log ~repo));
+          (* Migration row 4 (README.md § design of record vs shipped
+             engine): nodes dispatch with no worktree, so no buffer dir
+             ever exists to leak or to keep — the empty listing is the
+             flat-org invariant. *)
           Printf.printf "buffers left: [%s]\n"
             (String.concat "; " (worktree_dirs wt));
           let nodes_settlements =
@@ -592,7 +610,7 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
             node#2: retired
             tuples: [task/task#0; task/task#1; result/result#0; summary/summary#0]
             retire commits: [node#0; node#2]
-            buffers left: [node#0; node#2]
+            buffers left: []
             invariant: ok
             |}])
 
@@ -706,13 +724,13 @@ let%expect_test "F5: downstream fault at every yield class keeps exactly the \
 (* engine mid-run is the process-death model: nothing runs after step k.  *)
 (* ==================================================================== *)
 
-let build_engine ~repo ~wt ~ledger_path =
+let build_engine ~repo ~wt:_ ~ledger_path =
   let theory = pipeline_theory () in
   let ledger = Ledger.create ~path:ledger_path in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
   let channels = Channel.open_all theory in
   let chase =
-    Chase.create ~theory ~ledger ~committed ~channels ~worktree_root:wt
+    Chase.create ~theory ~ledger ~committed ~channels
       ~ports:[ Chase.Port.open_ ~name:"main" ]
       ~executors:
         [

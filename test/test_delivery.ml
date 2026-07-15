@@ -14,13 +14,16 @@
      footprint covers the address receives it AND the typed drift note at
      its next yield — check-on-yield, buffered-socket semantics (queued
      before the consumer started).
-   - The drift-routing table's rejection-site consumer: a moved witness is
-     classified per consumer and routed by the table — a move touching all
-     of the consumer's reads flushes (breaking-broad); a move touching a
-     minority reconciles by reissue (breaking-narrow). Both notes carry
-     the typed class and the table's route, and replay re-judges them.
-   - The squash-cause taxonomy: a conflict loser settles
-     [Reissue_loser] (never [Operator_abort]) and reissues bounded.
+   - FL2 (50-api.md § the flat-org roster): ambient sensing over the ONE
+     shared tree — a tool read of a sibling's in-flight store is a
+     TRACKED store-buffer hypothesis (the tracked arm, discharged free on
+     the identical landing) and a consumer of provenance-dead state
+     cascade-squashes, changing no committed tuple (the cascade arm).
+   - FL5 (same roster): two live writers of one path from one base are
+     convicted by the disjoint law at retire; the loser settles
+     [Reissue_loser] (never [Operator_abort]), reissues against the
+     winner's landing, and senses the move as a typed drift note at its
+     yield; committed content stays single-writer coherent.
    - F6, the end-to-end half: an observed [read_file] tool load gates
      retirement through the real machinery (the claim/hide directions
      drive Retire.step directly in test_witness.ml).
@@ -58,7 +61,14 @@ let pin =
 
 let template ?(read_globs = []) name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = name ^ ": a rigged test template"; read_globs; effects = [] }
+    {
+      name;
+      pin;
+      preamble = name ^ ": a rigged test template";
+      read_globs;
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let binding ~by ~script =
   {
@@ -452,21 +462,28 @@ let%expect_test "delivery: the invalidation and the typed drift note reach \
     |}]
 
 (* ------------------------------------------------------------------ *)
-(* The drift table's rejection-site consumer (B6). A consumer reads the
-   committed base (its checkout) of a file a sibling lands differently;
-   the sibling retires first, the consumer's witness fails, and the
-   rejection is classified per consumer and routed by the table:
-   - reads ONLY the moved file: the move touches all of its reads —
-     breaking-broad, flush the subtree;
-   - reads the moved file and one other: a minority moved —
-     breaking-narrow, reconcile (serialize-reissue in the synchronous v0
-     engine).
-   Both reissue bounded; the second attempt retires against the landed
-   state. (The reads are committed fixtures, not the consumer's own
-   drafts: a draft read claims nothing in the witness — the self-witness
-   ruling, wave 3.) *)
+(* FL2, the tracked arm (50-api.md § the flat-org roster; 20-medium.md
+   § store-to-load forwarding; migration row 4, README.md § design of
+   record vs shipped engine). Under the ONE shared tree, a tool read of
+   a sibling's in-flight store is ambient sensing: the resolver consults
+   the frontier, the read is a TRACKED store-buffer hypothesis on
+   exactly that writer, and the snooped observation enters the witness
+   at the producer's uncommitted coordinate (generation zero). The
+   hypothesis GATES the reader's retirement — discharged silently when
+   the producer lands exactly the snooped bytes (the file-shaped F7),
+   so correct ambient sensing costs zero reconcile events.
 
-let run_moved_witness ~consumer_script =
+   This re-aims the pre-flat-org "moved witness at the rejection site"
+   pair: with one tree there is no stale checkout to read — a sibling's
+   bytes are either committed-current or tracked-in-flight, so the old
+   stale-committed-read scripts are unwritable through the engine. The
+   rejection-site classification table keeps its unit coverage (the
+   exhaustive landing judgment below; test_witness law-3 drives
+   Retire.step's content-judged refusal directly). *)
+
+let%expect_test "FL2 tracked arm: a tool read of a sibling's in-flight \
+                 store is a tracked hypothesis that gates retirement and \
+                 discharges free on the identical landing" =
   let task = json_relation "task" in
   let smid = json_relation "smid" in
   let cmid = json_relation "cmid" in
@@ -491,82 +508,216 @@ let run_moved_witness ~consumer_script =
         ]
   in
   let repo, worktrees, ledger_path =
-    sandbox
-      ~files:[ ("shared.txt", "base\n"); ("other.txt", "o1\n") ]
-      "goat_moved_"
+    sandbox ~files:[ ("shared.txt", "base\n") ] "goat_fl2_tracked_"
   in
   let executors =
     [
       binding ~by:lander
         ~script:[ write_tool "shared.txt" "landed"; R.Reply {|{"msg":"s"}|} ];
-      binding ~by:drafter ~script:consumer_script;
+      binding ~by:drafter
+        ~script:[ read_tool "shared.txt"; R.Reply {|{"msg":"c1"}|} ];
     ]
   in
-  match
-    Run.exec ~theory ~seed:(seed_task task)
-      ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
-  with
-  | Error _ -> failwith "run rejected as misuse"
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
       let events = Ledger.Replay.events settled.Run.ledger in
-      let attempts = nodes_of_stmt events "draft" in
-      (match attempts with
-      | [ first; second ] ->
-          List.iter print_endline (drift_notes events first);
-          Printf.printf "loser decisions: %s\n"
-            (String.concat ", "
-               (List.filter
-                  (fun d ->
-                    String.equal d "serialize-reissue"
-                    || String.equal d "flush-subtree")
-                  (decisions events first)));
-          Printf.printf "loser settled: %s\n"
-            (match settlement_of settled first with
-            | Some s -> settlement_str s
-            | None -> "unsettled");
-          Printf.printf "reissued attempt settled: %s\n"
-            (match settlement_of settled second with
-            | Some s -> settlement_str s
-            | None -> "unsettled")
+      let l_node =
+        match node_of_stmt events "land" with
+        | Some n -> n
+        | None -> failwith "land never fired"
+      in
+      (match nodes_of_stmt events "draft" with
+      | [ d_node ] ->
+          let taken =
+            List.find_map
+              (fun (e : Ledger.Event.t) ->
+                match e.kind with
+                | Ledger.Event.Hypothesis_taken { hypothesis; source; _ }
+                  when of_node d_node e ->
+                    Some (hypothesis, source)
+                | _ -> None)
+              events
+          in
+          (match taken with
+          | None -> print_endline "!! the reader took no hypothesis"
+          | Some (h, source) ->
+              check "the snooped read is tracked on exactly the writer"
+                (String.equal source ("store-buffer:" ^ Id.to_string l_node));
+              check
+                "the read entered the observed witness at the uncommitted \
+                 coordinate (read_file @ g0)"
+                (List.exists
+                   (String.equal "file:shared.txt @ g0")
+                   (file_load_triples events d_node));
+              let indexed = List.mapi (fun i e -> (i, e)) events in
+              let index_of pred =
+                List.find_map
+                  (fun (i, e) -> if pred e then Some i else None)
+                  indexed
+              in
+              let discharge =
+                index_of (fun (e : Ledger.Event.t) ->
+                    match e.kind with
+                    | Ledger.Event.Hypothesis_discharged { hypothesis } ->
+                        Id.equal hypothesis h
+                    | _ -> false)
+              in
+              let retired n =
+                index_of (fun (e : Ledger.Event.t) ->
+                    match e.kind with
+                    | Ledger.Event.Settled Ledger.Settlement.Retired ->
+                        of_node n e
+                    | _ -> false)
+              in
+              (match (discharge, retired l_node, retired d_node) with
+              | Some d, Some l, Some r ->
+                  check
+                    "the hypothesis gated retirement: producer landed, \
+                     then the discharge, then the reader retired"
+                    (l < d && d < r)
+              | _, _, _ -> print_endline "!! trace is missing an index"));
+          check "one attempt, retired, zero reconcile"
+            ((match settlement_of settled d_node with
+             | Some Ledger.Settlement.Retired -> true
+             | _ -> false)
+            && List.is_empty (drift_notes events d_node)
+            && not
+                 (List.exists
+                    (fun d ->
+                      String.equal d "serialize-reissue"
+                      || String.equal d "flush-subtree")
+                    (decisions events d_node)))
       | attempts ->
-          Printf.printf "!! expected 2 draft attempts, saw %d\n"
+          Printf.printf "!! expected 1 draft attempt, saw %d\n"
             (List.length attempts));
-      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger)
-
-let%expect_test "drift table at the rejection site: a move touching every \
-                 read flushes (breaking-broad)" =
-  run_moved_witness
-    ~consumer_script:
-      [
-        read_tool "shared.txt";
-        R.Reply {|{"msg":"c1"}|};
-        R.Reply {|{"msg":"c2"}|};
-      ];
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
   [%expect
     {|
-    file:shared.txt: breaking_broad -> flush_subtree
-    loser decisions: flush-subtree
-    loser settled: squashed(reissue-loser)
-    reissued attempt settled: retired
+    the snooped read is tracked on exactly the writer: true
+    the read entered the observed witness at the uncommitted coordinate (read_file @ g0): true
+    the hypothesis gated retirement: producer landed, then the discharge, then the reader retired: true
+    one attempt, retired, zero reconcile: true
     replay: coherent
     |}]
 
-let%expect_test "drift table at the rejection site: a minority move \
-                 reconciles by reissue (breaking-narrow)" =
-  run_moved_witness
-    ~consumer_script:
-      [
-        read_tool "shared.txt";
-        read_tool "other.txt";
-        R.Reply {|{"msg":"c1"}|};
-        R.Reply {|{"msg":"c2"}|};
-      ];
+(* FL2, the cascade arm: a consumer of provenance-dead state
+   cascade-squashes — the graph where any leak would change a committed
+   tuple, asserted to change none (F3's shape, re-aimed; 50-api.md § the
+   flat-org roster). The consumer snoop-reads the loser's in-flight
+   store; the loser is conflict-convicted at retire (FL5's disjoint law:
+   two writers, one path, one base) and squashed [Reissue_loser]; the
+   consumer's hypothesis provenance drags it into the squash set, its
+   head never becomes a committed tuple, and the reissued loser retires
+   clean. Committed content stays single-writer coherent. *)
+
+let%expect_test "FL2 cascade arm: a consumer of a squashed writer's dead \
+                 bytes cascade-squashes; no leak changes a committed tuple" =
+  let task = json_relation "task" in
+  let amid = json_relation "amid" in
+  let bmid = json_relation "bmid" in
+  let cmid = json_relation "cmid" in
+  let first = template "first-writer" in
+  let second = template "second-writer" in
+  let snooper = template "snooper" in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed amid;
+          Theory.Relation.Packed bmid;
+          Theory.Relation.Packed cmid;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"win" ~for_:"task"
+            ~exists:("amid", Theory.Window.nodes 1)
+            ~by:first ();
+          Theory.Spawn.v ~name:"lose" ~for_:"task"
+            ~exists:("bmid", Theory.Window.nodes 1)
+            ~by:second ();
+          Theory.Spawn.v ~name:"consume" ~for_:"task"
+            ~exists:("cmid", Theory.Window.nodes 1)
+            ~by:snooper ();
+        ]
+  in
+  let repo, worktrees, ledger_path = sandbox "goat_fl2_cascade_" in
+  let executors =
+    [
+      binding ~by:first
+        ~script:[ write_tool "clash.txt" "winner"; R.Reply {|{"msg":"a"}|} ];
+      binding ~by:second
+        ~script:
+          [
+            write_tool "clash.txt" "loser";
+            write_tool "notes.txt" "dead draft";
+            R.Reply {|{"msg":"b1"}|};
+            R.Reply {|{"msg":"b2"}|};
+          ];
+      binding ~by:snooper
+        ~script:[ read_tool "notes.txt"; R.Reply {|{"msg":"c1"}|} ];
+    ]
+  in
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      (match (nodes_of_stmt events "lose", nodes_of_stmt events "consume") with
+      | [ loser; reissued ], [ consumer ] ->
+          check "the consumer's read is tracked on the doomed writer"
+            (List.exists
+               (fun (e : Ledger.Event.t) ->
+                 match e.kind with
+                 | Ledger.Event.Hypothesis_taken { source; _ }
+                   when of_node consumer e ->
+                     String.equal source
+                       ("store-buffer:" ^ Id.to_string loser)
+                 | _ -> false)
+               events);
+          Printf.printf "loser settled: %s\n"
+            (match settlement_of settled loser with
+            | Some sett -> settlement_str sett
+            | None -> "unsettled");
+          Printf.printf "consumer settled: %s\n"
+            (match settlement_of settled consumer with
+            | Some sett -> settlement_str sett
+            | None -> "unsettled");
+          Printf.printf "reissued loser settled: %s\n"
+            (match settlement_of settled reissued with
+            | Some sett -> settlement_str sett
+            | None -> "unsettled");
+          check "no leak changed a committed tuple (no cmid ever landed)"
+            (not
+               (List.exists
+                  (fun (tu : Retire.Committed.tuple) ->
+                    String.equal tu.Retire.Committed.relation "cmid")
+                  settled.Run.tuples));
+          check "committed content is single-writer coherent"
+            (String.equal
+               (In_channel.with_open_bin
+                  (Filename.concat repo "clash.txt")
+                  In_channel.input_all)
+               "winner")
+      | lose_attempts, consume_attempts ->
+          Printf.printf "!! expected 2 lose and 1 consume, saw %d and %d\n"
+            (List.length lose_attempts)
+            (List.length consume_attempts));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
   [%expect
     {|
-    file:shared.txt: breaking_narrow -> reconcile_delta
-    loser decisions: serialize-reissue
+    the consumer's read is tracked on the doomed writer: true
     loser settled: squashed(reissue-loser)
-    reissued attempt settled: retired
+    consumer settled: squashed(upstream-squash)
+    reissued loser settled: retired
+    no leak changed a committed tuple (no cmid ever landed): true
+    committed content is single-writer coherent: true
     replay: coherent
     |}]
 
@@ -748,18 +899,29 @@ let%expect_test "the token ceiling binds: eager work deflected, announced, \
     |}]
 
 (* ------------------------------------------------------------------ *)
-(* The squash-cause taxonomy (B15): a write-set conflict loser settles
-   [Reissue_loser] — never [Operator_abort] — and its body match reissues
-   against the winner's committed state. Two blind writers, one file, no
-   merge function: the second to retire is the loser. *)
+(* FL5 — live clobber conviction (50-api.md § the flat-org roster;
+   migration row 4). Two in-flight writers store to one path from one
+   base in the shared tree — the later store live-clobbers the earlier
+   bytes in the tree, and coherence is the ledger's, not the tree's:
+   the disjoint law convicts the pair at retire (base equality — both
+   witnessed the same committed base), the loser settles
+   [Reissue_loser] — never [Operator_abort] — and its body match
+   reissues against the winner's landing; the reissued attempt receives
+   the winner's invalidation as a typed drift note at its first yield
+   (sensing, not surprise); committed content is single-writer
+   coherent. Subsumes the pre-flat-org squash-cause-taxonomy test
+   (B15). *)
 
-let%expect_test "squash causes: a conflict loser is a reissue-loser, and \
-                 reissues" =
+let%expect_test "FL5: two live writers of one path convict at retire; the \
+                 loser reissues against the landing with the drift note \
+                 at its yield; committed content is single-writer coherent" =
   let task = json_relation "task" in
   let amid = json_relation "amid" in
   let bmid = json_relation "bmid" in
   let first = template "first-writer" in
-  let second = template "second-writer" in
+  (* The loser's edge declares the clashing path, so the winner's
+     invalidation is delivered at the reissued attempt's yield. *)
+  let second = template ~read_globs:[ "same.txt" ] "second-writer" in
   let theory =
     admit
       ~relations:
@@ -778,7 +940,12 @@ let%expect_test "squash causes: a conflict loser is a reissue-loser, and \
             ~by:second ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_conflict_" in
+  (* One committed base for both writers: the disjoint law's coordinate
+     (and a real generation move at the winner's landing, so the
+     invalidation exists to deliver). *)
+  let repo, worktrees, ledger_path =
+    sandbox ~files:[ ("same.txt", "base\n") ] "goat_fl5_"
+  in
   let executors =
     [
       binding ~by:first
@@ -788,6 +955,7 @@ let%expect_test "squash causes: a conflict loser is a reissue-loser, and \
           [
             write_tool "same.txt" "loser";
             R.Reply {|{"msg":"b1"}|};
+            R.Yield;
             R.Reply {|{"msg":"b2"}|};
           ];
     ]
@@ -811,12 +979,15 @@ let%expect_test "squash causes: a conflict loser is a reissue-loser, and \
         | None -> "unsettled");
       (match attempts with
       | [ first_try; second_try ] ->
-          check "the loser's rejection routed serialize-reissue"
+          check "the loser's conviction routed serialize-reissue"
             (List.mem "serialize-reissue" (decisions events first_try));
           Printf.printf "loser settled: %s\n"
             (match settlement_of settled first_try with
             | Some s -> settlement_str s
             | None -> "unsettled");
+          List.iter
+            (fun d -> Printf.printf "reissue drift at its yield: %s\n" d)
+            (drift_notes events second_try);
           Printf.printf "reissued attempt settled: %s\n"
             (match settlement_of settled second_try with
             | Some s -> settlement_str s
@@ -824,13 +995,21 @@ let%expect_test "squash causes: a conflict loser is a reissue-loser, and \
       | attempts ->
           Printf.printf "!! expected 2 lose attempts, saw %d\n"
             (List.length attempts));
+      check "committed content is single-writer coherent"
+        (String.equal
+           (In_channel.with_open_bin
+              (Filename.concat repo "same.txt")
+              In_channel.input_all)
+           "winner");
       Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
   [%expect
     {|
     winner settled: retired
-    the loser's rejection routed serialize-reissue: true
+    the loser's conviction routed serialize-reissue: true
     loser settled: squashed(reissue-loser)
+    reissue drift at its yield: file:same.txt: additive -> reconcile_note
     reissued attempt settled: retired
+    committed content is single-writer coherent: true
     replay: coherent
     |}]
 
@@ -968,13 +1147,18 @@ let%expect_test "footprint escape: an uncovered load surfaces at retire as \
    with hand-appended events in test_witness.ml; this runs the ENGINE):
    a rigged node's [read_file] tool load enters the observed witness
    through the real tool loop, and gates its retirement through the real
-   machinery — the sibling lands new content over the file first, the
-   reader's witness fails to hold at retire, the typed Witness_moved
-   rejection is classified per consumer and routed by the drift table,
-   and the bounded reissue retires against the landed state. *)
+   machinery. Re-aimed for migration row 4 (README.md § design of record
+   vs shipped engine; 20-medium.md § store-to-load forwarding): with one
+   shared tree the sibling's in-flight bytes are ambiently visible, so
+   the observed read is the SNOOPED coordinate (generation zero, the
+   producer's uncommitted content) and the gate it buys is the tracked
+   hypothesis — the reader cannot retire until the mover's landing
+   judges it. The pre-flat-org stale-checkout arm (Witness_moved at the
+   rejection site) is unwritable through this engine and keeps its
+   direct-drive coverage in test_witness.ml. *)
 
 let%expect_test "F6 end-to-end: an observed tool read gates retirement \
-                 (stale content -> Witness_moved through the engine)" =
+                 through the real machinery" =
   let task = json_relation "task" in
   let mmid = json_relation "mmid" in
   let rmid = json_relation "rmid" in
@@ -998,28 +1182,18 @@ let%expect_test "F6 end-to-end: an observed tool read gates retirement \
             ~by:reader ();
         ]
   in
-  (* notes.txt is committed repository state before the run: the reader's
-     worktree checkout carries v1 until the mover's landing moves it. *)
+  (* notes.txt is committed repository state before the run; the mover's
+     store moves it in the shared tree before the reader looks. *)
   let repo, worktrees, ledger_path =
     sandbox ~files:[ ("notes.txt", "v1\n") ] "goat_f6_e2e_"
   in
   let executors =
     [
       binding ~by:mover
-        ~script:[ write_tool "notes.txt" "v2\n"; R.Reply {|{"msg":"moved"}|} ];
-      (* Steps are consumed across attempts of the same executor value:
-         the reissued attempt drains the landing's queued invalidation at
-         a read-free yield (additive for a node that has read nothing —
-         the delivery test's pattern), then re-reads and re-replies. *)
-      binding ~by:reader
         ~script:
-          [
-            read_tool "notes.txt";
-            R.Reply {|{"msg":"r1"}|};
-            R.Yield;
-            read_tool "notes.txt";
-            R.Reply {|{"msg":"r2"}|};
-          ];
+          [ write_tool "notes.txt" "v2\n"; R.Reply {|{"msg":"moved"}|} ];
+      binding ~by:reader
+        ~script:[ read_tool "notes.txt"; R.Reply {|{"msg":"r1"}|} ];
     ]
   in
   (match
@@ -1029,41 +1203,59 @@ let%expect_test "F6 end-to-end: an observed tool read gates retirement \
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
       let events = Ledger.Replay.events settled.Run.ledger in
+      let m_node =
+        match node_of_stmt events "move" with
+        | Some n -> n
+        | None -> failwith "move never fired"
+      in
       (match nodes_of_stmt events "read" with
-      | [ first; second ] ->
-          check "the tool read entered the observed witness (read_file Load)"
-            (not (List.is_empty (file_load_triples events first)));
+      | [ r_node ] ->
+          (* The read is observed at the producer's uncommitted
+             coordinate — never the committed stamp a stale claim would
+             need — and it is tracked. *)
           List.iter
-            (fun d -> Printf.printf "first attempt drift: %s\n" d)
-            (drift_notes events first);
-          Printf.printf "first attempt settled: %s\n"
-            (match settlement_of settled first with
+            (fun t -> Printf.printf "reader witnessed %s\n" t)
+            (file_load_triples events r_node);
+          check "the read is tracked on the mover"
+            (List.exists
+               (fun (e : Ledger.Event.t) ->
+                 match e.kind with
+                 | Ledger.Event.Hypothesis_taken { source; _ }
+                   when of_node r_node e ->
+                     String.equal source
+                       ("store-buffer:" ^ Id.to_string m_node)
+                 | _ -> false)
+               events);
+          let indexed = List.mapi (fun i e -> (i, e)) events in
+          let retired n =
+            List.find_map
+              (fun (i, (e : Ledger.Event.t)) ->
+                match e.kind with
+                | Ledger.Event.Settled Ledger.Settlement.Retired
+                  when of_node n e ->
+                    Some i
+                | _ -> None)
+              indexed
+          in
+          (match (retired m_node, retired r_node) with
+          | Some m, Some r ->
+              check "the tracked read gated retirement behind the landing"
+                (m < r)
+          | _, _ -> print_endline "!! trace is missing a retirement");
+          Printf.printf "reader settled: %s\n"
+            (match settlement_of settled r_node with
             | Some s -> settlement_str s
-            | None -> "unsettled");
-          List.iter
-            (fun d -> Printf.printf "reissue drift: %s\n" d)
-            (drift_notes events second);
-          Printf.printf "reissued attempt settled: %s\n"
-            (match settlement_of settled second with
-            | Some s -> settlement_str s
-            | None -> "unsettled");
-          (* The reissue read the landed state: its witness triple carries
-             the moved file's committed generation, not a zero stamp. *)
-          List.iter
-            (fun t -> Printf.printf "reissue witnessed %s\n" t)
-            (file_load_triples events second)
+            | None -> "unsettled")
       | attempts ->
-          Printf.printf "!! expected 2 read attempts, saw %d\n"
+          Printf.printf "!! expected 1 read attempt, saw %d\n"
             (List.length attempts));
       Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
   [%expect
     {|
-    the tool read entered the observed witness (read_file Load): true
-    first attempt drift: file:notes.txt: breaking_broad -> flush_subtree
-    first attempt settled: squashed(reissue-loser)
-    reissue drift: file:notes.txt: additive -> reconcile_note
-    reissued attempt settled: retired
-    reissue witnessed file:notes.txt @ g1
+    reader witnessed file:notes.txt @ g0
+    the read is tracked on the mover: true
+    the tracked read gated retirement behind the landing: true
+    reader settled: retired
     replay: coherent
     |}]
 

@@ -169,8 +169,16 @@ module Executor : sig
                 stance and method, never shape — shape derives from the
                 contract (docs/architecture/60-agents.md § prompt assembly). *)
         read_globs : string list;
-            (** The file-glob half of the footprint grant; ref-slot reads
-                are derived from the contract. *)
+            (** The read half of the file footprint grant — ambient
+                visibility over the shared tree (readable, snoopable);
+                ref-slot reads are derived from the contract. *)
+        write_globs : string list;
+            (** The write half: where the template's nodes' stores may
+                land in the shared tree. A store outside it is a typed
+                {!Agent.Grant.Refusal} at the tool boundary. Hygiene, not
+                a wall: overlapping grants are legal, and the disjoint
+                law convicts an actual clobber
+                (docs/architecture/40-agents.md § tool grants). *)
         effects : Effect.t list;
             (** Effect tools the template's nodes may run ([run_command]
                 is the one v0 runtime): declarations here become grant

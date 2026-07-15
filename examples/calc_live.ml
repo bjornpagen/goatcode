@@ -82,7 +82,7 @@ let module_schema =
   obj
     ~desc:
       "One implemented module. Both files MUST be written into the \
-       worktree with the write_file tool before this tuple is emitted."
+       shared tree with the write_file tool before this tuple is emitted."
     ~required:[ "file"; "test_file"; "summary"; "module_spec"; "spec" ]
     [
       ("file", str_field ~desc:"The module file written." ());
@@ -105,7 +105,7 @@ let integration_schema =
     ~desc:
       "The integration: calc.py wiring the three modules into a CLI, \
        plus its integration test. Both files MUST be written into the \
-       worktree with the write_file tool before this tuple is emitted."
+       shared tree with the write_file tool before this tuple is emitted."
     ~required:[ "files"; "summary"; "spec" ]
     [
       ( "files",
@@ -178,20 +178,19 @@ let module_implementer =
          module_spec operand states — other agents are implementing the \
          other modules against the same contracts right now, so any \
          deviation breaks the integration. Stdlib only. Write your module \
-         file and its test file into your worktree with the write_file \
+         file and its test file into the shared tree with the write_file \
          tool. The test file must be directly runnable (plain asserts, \
          exit 0 on success, no pytest) and must import only YOUR module. \
          Before emitting your tuple, RUN your test file with run_command \
          and fix what fails; do not emit until it exits 0.";
       read_globs = [];
+      write_globs = [ "*.py" ];
       effects =
         [
           Theory.Executor.Effect.Idempotent
             {
               tool = "run_command";
-              why =
-                "build/test commands in the node's own worktree, freely \
-                 re-runnable";
+              why = "build/test commands in the shared tree, freely re-runnable";
             };
         ];
     }
@@ -215,10 +214,11 @@ let integrator =
          summary if any module file was missing or unreadable when you \
          looked.";
       read_globs = [ "*.py" ];
+      write_globs = [ "*.py" ];
       (* No run_command here on purpose: the integration test needs the
-         full module set, which may not be in THIS node's worktree yet —
-         running it is the downstream gate's job, against the committed
-         tree that has everything. *)
+         full module set, which may not have landed in the shared tree
+         yet — running it is the downstream gate's job, after every
+         module retired. *)
       effects = [];
     }
 

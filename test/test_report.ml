@@ -49,7 +49,14 @@ let pin =
 
 let review_by =
   Theory.Executor.Agent_template
-    { name = "refuter"; pin; preamble = "Refute the finding."; read_globs = []; effects = [] }
+    {
+      name = "refuter";
+      pin;
+      preamble = "Refute the finding.";
+      read_globs = [];
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let review_sid () =
   let finding =

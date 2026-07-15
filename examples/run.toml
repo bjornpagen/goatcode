@@ -15,9 +15,9 @@
 #
 # Self-contained by design: everything this example touches lives under
 # ./.goat/ — never the repository the operator happens to stand in (a
-# `repo = "."` would commit a goat-committed branch into it, and a
-# worktree_root outside any repository silently degrades store buffers
-# to bare directories; both burned a wave-3 finding).
+# `repo = "."` would commit a goat-committed branch into it and let the
+# swarm write the operator's own tree; a wave-3 finding burned on the
+# ambient-cwd cousin of this mistake).
 #
 # One-time setup — goat never runs git for you (workers are banned from
 # git, and the harness only ever writes the committed branch; creating
@@ -27,19 +27,19 @@
 #   git -C .goat/demo-repo init -q
 #   git -C .goat/demo-repo commit --allow-empty -m "goat demo root"
 
-# The git repository holding the committed branch. Retirement is the only
-# writer of committed state, and git is its storage engine: retirements
-# are commits, store buffers are worktrees (50-commit.md).
+# The git repository holding the committed branch — the ONE shared tree
+# every node reads and writes (the flat org, README.md § design of
+# record vs shipped engine). Retirement is the only writer of committed
+# state, and git is its storage engine: blobs land in its object
+# database at store time, retirements are commits.
 repo = ".goat/demo-repo"
 
 # The branch retirements commit to. Created on first run if absent.
 committed_branch = "goat-committed"
 
-# Where node store buffers are created. Lives INSIDE the repo above: a
-# store buffer is a detached git worktree of the committed tree, so its
-# root must sit inside the repository it buffers (an outside root has no
-# repository to check out — the degradation is a loud stderr warning and
-# a bare directory whose work can never land).
+# Unused since migration row 4 (nodes dispatch with no worktree; stores
+# land in the shared tree). Still parsed; the key dies with row 5
+# (README.md § design of record vs shipped engine).
 worktree_root = ".goat/demo-repo/.goat-worktrees"
 
 # The append-only event ledger. Created on run open; read back by

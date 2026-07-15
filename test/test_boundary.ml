@@ -98,9 +98,7 @@ let pin =
 let speculative_grant : Agent.Grant.speculative Agent.Grant.t =
   {
     Agent.Grant.read_globs = [ "src/**/*.ml" ];
-    worktree_root = "/tmp/goat-test-worktree";
-    committed_root = ".";
-    snoop_mounts = [];
+    write_globs = [ "src/**/*.ml" ];
     shell_gates = [];
     effects =
       [
@@ -110,7 +108,15 @@ let speculative_grant : Agent.Grant.speculative Agent.Grant.t =
       ];
   }
 
-let invocation grant =
+(* Direct-drive invocations run outside any engine: nothing is committed
+   and nothing is in flight, so every frontier top is Absent, tool loads
+   witness at generation zero, and no snoop is ever tracked (agent.mli
+   § Invocation). [repo] defaults to the process-transparent "." for
+   tool-free lanes; tool-driving tests pass their fixture repo. *)
+let invocation ?(repo = ".")
+    ?(frontier =
+      fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent) grant
+    =
   {
     Agent.Invocation.prompt =
       Agent.Prompt.assemble ~preamble:"You judge findings." ~schema:wire_schema
@@ -118,10 +124,9 @@ let invocation grant =
     schema = wire_schema;
     grant;
     pin;
-    (* Direct-drive tests run outside any engine: nothing is committed, so
-       tool loads witness [Absent] at generation zero (agent.mli
-       § Invocation). *)
-    committed = (fun _ -> Witness.Committed_state.Absent);
+    repo;
+    frontier;
+    snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
   }
 
 type env = {
@@ -389,7 +394,14 @@ let digest_rel =
 
 let template name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = "You refute findings."; read_globs = [ "src/**" ]; effects = [] }
+    {
+      name;
+      pin;
+      preamble = "You refute findings.";
+      read_globs = [ "src/**" ];
+      write_globs = [];
+      effects = [];
+    }
 
 let boundary_theory =
   match
@@ -816,9 +828,11 @@ let%expect_test "F12: every constructible speculative grant is free of \
             (fun why -> List.map (fun t -> idempotent n why :: t) tails)
             whys
   in
+  (* The grant surface is the flat-org one — read/write globs over the
+     shared tree (migration row 4, README.md § design of record vs
+     shipped engine): the sweep spans both glob dimensions. *)
   let glob_choices = [ []; [ "src/**" ]; [ "src/**"; "docs/*.md" ] ] in
   let gate_choices = [ []; [ [ "dune"; "build" ] ] ] in
-  let snoop_choices = [ []; [ "/tmp/goat-upstream-buffer" ] ] in
   let generated = ref 0 and offenders = ref 0 in
   List.iter
     (fun effects ->
@@ -827,16 +841,9 @@ let%expect_test "F12: every constructible speculative grant is free of \
           List.iter
             (fun shell_gates ->
               List.iter
-                (fun snoop_mounts ->
+                (fun write_globs ->
                   let grant : Agent.Grant.speculative Agent.Grant.t =
-                    {
-                      Agent.Grant.read_globs;
-                      worktree_root = "/tmp/goat-test-worktree";
-                      committed_root = ".";
-                      snoop_mounts;
-                      shell_gates;
-                      effects;
-                    }
+                    { Agent.Grant.read_globs; write_globs; shell_gates; effects }
                   in
                   incr generated;
                   (* The rendered tool surface is what the agent reads; a
@@ -844,14 +851,14 @@ let%expect_test "F12: every constructible speculative grant is free of \
                      carried one. *)
                   if contains (Agent.Grant.describe grant) "non-idempotent"
                   then incr offenders)
-                snoop_choices)
+                glob_choices)
             gate_choices)
         glob_choices)
     (effect_sets names);
   Printf.printf
     "speculative grants generated: %d, non-idempotent effects found: %d\n"
     !generated !offenders;
-  [%expect {| speculative grants generated: 324, non-idempotent effects found: 0 |}]
+  [%expect {| speculative grants generated: 486, non-idempotent effects found: 0 |}]
 
 let%expect_test "F12: the non-idempotent case exists only at the committed \
                  index, and both stamps render honestly" =
@@ -861,9 +868,7 @@ let%expect_test "F12: the non-idempotent case exists only at the committed \
   let committed : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
-      worktree_root = "/tmp/goat-test-worktree";
-      committed_root = ".";
-      snoop_mounts = [];
+      write_globs = [ "dist/**" ];
       shell_gates = [];
       effects =
         [
@@ -875,9 +880,13 @@ let%expect_test "F12: the non-idempotent case exists only at the committed \
     }
   in
   print_string (Agent.Grant.describe committed);
+  (* The footprint section renders the flat-org grant: read/write globs
+     over the shared tree, no worktree coordinate (migration row 4;
+     40-agents.md § tool grants). *)
   [%expect {|
-    Writable root (your worktree, the store buffer): /tmp/goat-test-worktree
-    Readable paths: none beyond your worktree.
+    Readable paths (read_globs): none declared.
+    Writable paths (write_globs):
+    - dist/**
     Effect tools:
     - deploy — effect, non-idempotent (grantable on witnessed operands only)
     - cache_write — effect, idempotent by declaration (content-keyed cache write)
@@ -909,21 +918,26 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
             (Filename.quote d)));
     d
   in
-  let worktree =
-    let d = Filename.temp_file "goat-wt-" "" in
-    Sys.remove d;
-    Unix.mkdir d 0o755;
-    d
-  in
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [ "src/**/*.ml" ];
-      worktree_root = worktree;
-      committed_root = repo;
-      snoop_mounts = [];
+      write_globs = [ "src/**" ];
       shell_gates = [];
       effects = [];
     }
+  in
+  (* The fixture plays the chase's frontier role (migration row 4,
+     README.md § design of record vs shipped engine): after the store,
+     src/gen.ml tops In_flight by THIS node — its own draft. *)
+  let frontier address =
+    if Ledger.Address.equal address (Ledger.Address.File "src/gen.ml") then
+      Retire.Frontier.In_flight
+        {
+          writer = e.node;
+          content = Ledger.Content_hash.of_string "let x = 1\n";
+          base = None;
+        }
+    else Retire.Frontier.Committed Witness.Committed_state.Absent
   in
   let script =
     [
@@ -937,8 +951,8 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
                 ("content", `String "let x = 1\n");
               ];
         };
-      (* The node reads its own store buffer: the draft it just wrote is
-         readable back, and the Load is evented — but it observes NOTHING
+      (* The node reads its own in-flight store back from the shared
+         tree, and the Load is evented — but it observes NOTHING
          (store-to-load forwarding of in-flight work claims no witness
          triple; the self-witness ruling, wave 3). *)
       Agent.Rigged.Call_tool
@@ -953,6 +967,17 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
           name = "read_file";
           input = `Assoc [ ("path", `String "../escape.ml") ];
         };
+      (* A store outside write_globs is the typed in-band refusal at the
+         argument boundary — write grants are the load-bearing boundary
+         that replaced the private worktree root (migration row 4;
+         40-agents.md § tool grants): no event, no bytes. *)
+      Agent.Rigged.Call_tool
+        {
+          name = "write_file";
+          input =
+            `Assoc
+              [ ("path", `String "notes.txt"); ("content", `String "stray") ];
+        };
       Agent.Rigged.Reply "{\"verdict\": \"done\"}";
     ]
   in
@@ -960,11 +985,13 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     (Agent.invoke
        ~executor:(Agent.Rigged.executor ~script)
        ?fallback:None ~codec:verdict_codec ~registry:e.registry
-       ~invocation:(invocation grant)
+       ~invocation:(invocation ~repo ~frontier grant)
        ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
        ~on_yield:(fun () -> []));
-  Printf.printf "draft landed in worktree: %b\n"
-    (Sys.file_exists (Filename.concat worktree "src/gen.ml"));
+  Printf.printf "store landed in the shared tree: %b\n"
+    (Sys.file_exists (Filename.concat repo "src/gen.ml"));
+  Printf.printf "out-of-grant store left no bytes: %b\n"
+    (not (Sys.file_exists (Filename.concat repo "notes.txt")));
   List.iter
     (fun (ev : Ledger.Event.t) ->
       match ev.kind with
@@ -985,7 +1012,8 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     (Ledger.Replay.events e.ledger);
   [%expect {|
     Ok "done"
-    draft landed in worktree: true
+    store landed in the shared tree: true
+    out-of-grant store left no bytes: true
     Store write_file at file:src/gen.ml (delta 0547b3d0eee9716f43dd8da30daecbb59e562ae0)
     Load read_file observing []
     |}]
@@ -1002,18 +1030,10 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
 let%expect_test "F17: run_command names git -> typed in-band refusal, no \
                  Effect event; command-position precision holds" =
   let e = env () in
-  let worktree =
-    let d = Filename.temp_file "goat-git-ban-" "" in
-    Sys.remove d;
-    Unix.mkdir d 0o755;
-    d
-  in
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
-      worktree_root = worktree;
-      committed_root = ".";
-      snoop_mounts = [];
+      write_globs = [];
       shell_gates = [];
       effects =
         [
@@ -1127,17 +1147,12 @@ let%expect_test "F17: run_command names git -> typed in-band refusal, no \
 let%expect_test "shell_gate: the gate run is an Effect event carrying the \
                  declared command line" =
   let e = env () in
-  (* The engine creates the store buffer before dispatch; the gate runs
-     inside it (cwd = the worktree), so the fixture honors the same
-     invariant. *)
-  (try Unix.mkdir "/tmp/goat-test-worktree" 0o755
-   with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  (* The gate runs in the shared tree (cwd = the invocation's repo,
+     migration row 4); "." is a fine tree for a printf gate. *)
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
-      worktree_root = "/tmp/goat-test-worktree";
-      committed_root = ".";
-      snoop_mounts = [];
+      write_globs = [];
       shell_gates = [ [ "printf"; "gate-ok" ] ];
       effects = [];
     }
@@ -1365,7 +1380,10 @@ let%expect_test "anthropic sends no structured-output format; openai \
       schema;
       grant = speculative_grant;
       pin;
-      committed = (fun _ -> Witness.Committed_state.Absent);
+      repo = ".";
+      frontier =
+        (fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent);
+      snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
     }
   in
   (match
@@ -1496,15 +1514,10 @@ let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
   Out_channel.with_open_bin (Filename.concat lock_dir "holder") (fun oc ->
       Out_channel.output_string oc "crashed-run pid=4194304");
   let e = env () in
-  (* Same invariant as the gate-event test: the buffer exists at dispatch. *)
-  (try Unix.mkdir "/tmp/goat-test-worktree" 0o755
-   with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
-      worktree_root = "/tmp/goat-test-worktree";
-      committed_root = ".";
-      snoop_mounts = [];
+      write_globs = [];
       shell_gates = [ [ "printf"; "gate-after-stale" ] ];
       effects = [];
     }
@@ -1563,18 +1576,17 @@ let%expect_test "FL7: torn-read impossibility — an out-of-domain reader \
     (Sys.command
        (Printf.sprintf "git -C %s init -q >/dev/null 2>&1"
           (Filename.quote repo)));
-  let buffer = fresh_dir "goat-fl7-buffer-" in
   let obs_dir = fresh_dir "goat-fl7-obs-" in
   let scratch = fresh_dir "goat-fl7-scratch-" in
   let stop = Filename.concat scratch "stop" in
   let reader_done = Filename.concat scratch "reader-done" in
-  let target = Filename.concat buffer "doc.bin" in
+  (* Stores land in the ONE shared tree (migration row 4): the reader
+     races the tool path on the repo file itself. *)
+  let target = Filename.concat repo "doc.bin" in
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
-      worktree_root = buffer;
-      committed_root = repo;
-      snoop_mounts = [];
+      write_globs = [ "doc.bin" ];
       shell_gates = [];
       effects = [];
     }
@@ -1602,7 +1614,7 @@ let%expect_test "FL7: torn-read impossibility — an out-of-domain reader \
     Agent.invoke
       ~executor:(Agent.Rigged.executor ~script)
       ?fallback:None ~codec:verdict_codec ~registry:e.registry
-      ~invocation:(invocation grant)
+      ~invocation:(invocation ~repo grant)
       ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
       ~on_yield:(fun () -> [])
   in
@@ -1707,13 +1719,12 @@ let%expect_test "FL7: torn-read impossibility — an out-of-domain reader \
     (List.for_all (fun m -> m = `Former || m = `Latter) materialized);
   Printf.printf "both contents live in the object store: %b\n"
     (List.mem `Former materialized && List.mem `Latter materialized);
-  Printf.printf "tmp litter in the buffer after stores: %d\n"
-    (Array.length (Sys.readdir buffer) - 1);
+  Printf.printf "tmp litter in the shared tree after stores: %d\n"
+    (Array.length (Sys.readdir repo) - 2 (* .git + doc.bin *));
   ignore
     (Sys.command
-       (Printf.sprintf "rm -rf %s %s %s %s" (Filename.quote repo)
-          (Filename.quote buffer) (Filename.quote obs_dir)
-          (Filename.quote scratch)));
+       (Printf.sprintf "rm -rf %s %s %s" (Filename.quote repo)
+          (Filename.quote obs_dir) (Filename.quote scratch)));
   [%expect
     {|
     Ok "done"
@@ -1725,5 +1736,5 @@ let%expect_test "FL7: torn-read impossibility — an out-of-domain reader \
     store events: 14, every delta a blob oid: true
     every event oid materializes whole stored bytes: true
     both contents live in the object store: true
-    tmp litter in the buffer after stores: 0
+    tmp litter in the shared tree after stores: 0
     |}]

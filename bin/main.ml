@@ -729,6 +729,7 @@ let plan_bootstrap ~spec ~pin =
         pin;
         preamble = planner_preamble;
         read_globs = [];
+        write_globs = [];
         effects = [];
       }
   in
@@ -773,53 +774,12 @@ let refuse_existing_ledger ~command path =
   end
   else true
 
-(* Store buffers are detached git worktrees of the config's repo, so
-   [worktree_root] must live inside that repository: an outside root
-   makes [Retire.Worktree.create]'s fallback degrade every buffer to a
-   bare directory (no committed checkout for the agent to read against —
-   landing itself now rides Store events, README.md § design of record
-   vs shipped engine, row 2), and a root inside a DIFFERENT repository
-   checks out the wrong tree.
-   Bare mode is a designed engine mode for the unit suites, so the
-   engine stays quiet — the operator-facing loudness lives here, one
-   stderr line at bind time, before any node runs (the probe is
-   read-only: goat never creates or initializes a repository for you). *)
-let git_toplevel dir =
-  let rec existing d =
-    if Sys.file_exists d then d
-    else
-      let parent = Filename.dirname d in
-      if String.equal parent d then d else existing parent
-  in
-  let ic =
-    Unix.open_process_in
-      (Printf.sprintf "git -C %s rev-parse --show-toplevel 2>/dev/null"
-         (Filename.quote (existing dir)))
-  in
-  let line = In_channel.input_line ic in
-  match (Unix.close_process_in ic, line) with
-  | Unix.WEXITED 0, Some top -> Some top
-  | _ -> None
-
-let warn_degraded_worktree_root ~command (file : Config_file.t) =
-  match (Config_file.str file "worktree_root", Config_file.str file "repo") with
-  | Some root, Some repo -> (
-      match (git_toplevel root, git_toplevel repo) with
-      | Some root_top, Some repo_top when String.equal root_top repo_top -> ()
-      | None, _ ->
-          Printf.eprintf
-            "goat %s: warning: worktree_root %s is not inside a git \
-             repository — every store buffer will degrade to a bare \
-             directory (no committed checkout for agents to read \
-             against); point it inside repo %s\n"
-            command root repo
-      | Some root_top, _ ->
-          Printf.eprintf
-            "goat %s: warning: worktree_root %s sits in repository %s, \
-             not in the config's repo %s — store buffers would check out \
-             the wrong tree; point it inside the repo\n"
-            command root root_top repo)
-  | _ -> ()
+(* Nodes dispatch with no worktree since migration row 4 (README.md
+   § design of record vs shipped engine): reads and stores range over the
+   config's repo — the one shared tree — so the old degraded-buffer
+   warning has nothing left to warn about and is gone. [worktree_root]
+   stays a parsed config key until row 5 deletes it, so existing run
+   configs keep binding. *)
 
 (* Theories compile to executables that link the library and call
    [Run.exec]; run spawns exactly that, holding no semantics of its
@@ -843,7 +803,6 @@ let cmd_run ~theory_exe ~seed ~config =
           Printf.eprintf "goat run: %s\n" msg;
           1
       | Ok file -> (
-          warn_degraded_worktree_root ~command:"run" file;
           match Config_file.str file "ledger_path" with
           | Some p when not (refuse_existing_ledger ~command:"run" p) -> 1
           | Some _ | None ->
@@ -985,7 +944,6 @@ let cmd_plan ~spec ~config_path =
         Printf.eprintf "goat plan: %s\n" msg;
         1
     | Ok file -> (
-        warn_degraded_worktree_root ~command:"plan" file;
         let ledger_path =
           match Config_file.str file "ledger_path" with
           | Some p -> p

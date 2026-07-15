@@ -106,7 +106,14 @@ let disjoint_theory () =
   in
   let worker =
     Theory.Executor.Agent_template
-      { name = "worker"; pin; preamble = "produce the result"; read_globs = []; effects = [] }
+      {
+        name = "worker";
+        pin;
+        preamble = "produce the result";
+        read_globs = [];
+        write_globs = [ "**" ];
+        effects = [];
+      }
   in
   match
     Theory.declare

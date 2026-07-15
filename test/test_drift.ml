@@ -347,6 +347,7 @@ let sweep_by =
       pin;
       preamble = "You sweep the diff for findings.";
       read_globs = [];
+      write_globs = [ "**" ];
       effects = [];
     }
 
@@ -357,6 +358,7 @@ let review_by =
       pin;
       preamble = "You review one finding.";
       read_globs = [];
+      write_globs = [ "**" ];
       effects = [];
     }
 

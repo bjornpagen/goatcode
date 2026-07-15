@@ -52,7 +52,7 @@ let implementation_schema : Yojson.Safe.t =
       ( "description",
         `String
           "One implementation of the specified project. Every listed file \
-           MUST be written into the worktree with the write_file tool \
+           MUST be written into the shared tree with the write_file tool \
            before this tuple is emitted; the tuple records what was \
            written." );
       ( "properties",
@@ -151,21 +151,20 @@ let implementer =
       preamble =
         "You are the implementer. Build exactly the small project the \
          specification asks for, stdlib only, no external dependencies. \
-         Write every file into your worktree with the write_file tool. \
+         Write every file into the shared tree with the write_file tool. \
          The test file must be directly runnable (plain asserts, exit 0 \
          on success, non-zero on failure) — it is executed by an \
          automated gate, so it must not require pytest or any runner. \
          Before emitting your tuple, RUN your test file with run_command \
          and fix what fails; do not emit until it exits 0.";
       read_globs = [];
+      write_globs = [ "**" ];
       effects =
         [
           Theory.Executor.Effect.Idempotent
             {
               tool = "run_command";
-              why =
-                "build/test commands in the node's own worktree, freely \
-                 re-runnable";
+              why = "build/test commands in the shared tree, freely re-runnable";
             };
         ];
     }

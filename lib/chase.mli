@@ -26,7 +26,7 @@ module Port : sig
 
   val bounded : name:string -> limit:int -> bottleneck:string -> t
   (** A concurrency bound with its forcing bottleneck named (a model
-      provider's concurrency ceiling, N resident worktrees on one disk).
+      provider's concurrency ceiling, one build lock on one machine).
       The [bottleneck] argument is required by construction: a bound
       without a documented reason is unwritable. *)
 
@@ -102,7 +102,6 @@ val create :
   committed:Retire.Committed.t ->
   channels:Channel.registry ->
   ?transport:Fiber.Transport.t ->
-  worktree_root:string ->
   ports:Port.t list ->
   executors:executor_binding list ->
   backstops:Speculate.Backstops.t ->
@@ -126,8 +125,10 @@ val create :
     operand reads park mid-flight on exactly the missing address (a
     landing wakes exactly the fibers that address names), its provider
     calls perform [Http_post] and overlap on one domain, and squash
-    discontinues — a squashed node cannot run further, and its worktree
-    drop rides the fiber's own [Fun.protect]. [transport] is the
+    discontinues — a squashed node cannot run further; its stores sit in
+    the shared tree as provenance-dead bytes for hygiene
+    ({!Retire.Frontier.materialize}), nothing filesystem-shaped rides a
+    finalizer. [transport] is the
     [Http_post] lane: curl-multi by default (created lazily, at the first
     transfer); falsifiers rig a scripted one to prove overlap and
     completion-order determinism without a network. *)

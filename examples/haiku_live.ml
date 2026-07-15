@@ -54,9 +54,9 @@ let haiku_schema : Yojson.Safe.t =
       ("type", `String "object");
       ( "description",
         `String
-          "One written haiku. The file MUST be written into the worktree \
-           with the write_file tool before this tuple is emitted; the \
-           tuple records what was written." );
+          "One written haiku. The file MUST be written into the shared \
+           tree with the write_file tool before this tuple is emitted; \
+           the tuple records what was written." );
       ( "properties",
         `Assoc
           [
@@ -66,7 +66,7 @@ let haiku_schema : Yojson.Safe.t =
                   ("type", `String "string");
                   ( "description",
                     `String
-                      "Worktree-relative path of the written file: \
+                      "Repo-relative path of the written file: \
                        docs/haiku.md" );
                 ] );
             ( "text",
@@ -96,7 +96,7 @@ let review_schema : Yojson.Safe.t =
       ( "description",
         `String
           "One review of a haiku. The review file MUST be written into \
-           the worktree with the write_file tool before this tuple is \
+           the shared tree with the write_file tool before this tuple is \
            emitted." );
       ( "properties",
         `Assoc
@@ -107,7 +107,7 @@ let review_schema : Yojson.Safe.t =
                   ("type", `String "string");
                   ( "description",
                     `String
-                      "Worktree-relative path of the written review: \
+                      "Repo-relative path of the written review: \
                        docs/haiku-review.md" );
                 ] );
             ( "verdict",
@@ -157,10 +157,11 @@ let writer =
       pin;
       preamble =
         "You are the haiku writer. Compose one original haiku (5-7-5) on \
-         the requested subject and write it to the requested file in your \
-         worktree with the write_file tool. Keep the file minimal: a \
-         markdown title line and the haiku.";
+         the requested subject and write it to the requested file with \
+         the write_file tool. Keep the file minimal: a markdown title \
+         line and the haiku.";
       read_globs = [];
+      write_globs = [ "docs/*" ];
       effects = [];
     }
 
@@ -171,11 +172,12 @@ let reviewer =
       pin;
       preamble =
         "You are the haiku reviewer. Read the haiku under review from the \
-         committed tree, judge its form (syllable shape, imagery, \
-         subject fit), and write a short review to the requested file in \
-         your worktree with the write_file tool: a markdown title, two or \
+         shared tree, judge its form (syllable shape, imagery, \
+         subject fit), and write a short review to the requested file \
+         with the write_file tool: a markdown title, two or \
          three sentences of judgment, and your verdict.";
       read_globs = [ "docs/*" ];
+      write_globs = [ "docs/*" ];
       effects = [];
     }
 

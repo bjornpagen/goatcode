@@ -53,16 +53,16 @@ type settled = {
 
 let directory_exists path = Sys.file_exists path && Sys.is_directory path
 
-(* [repo] and [worktree_root] must exist as directories; [ledger_path]
-   itself is created on open ([Ledger.create]), so the host error there is
-   a missing parent directory. [committed_branch] is not a filesystem
-   path; a bad branch surfaces from [Retire.Committed.open_], the layer
-   that owns git. *)
+(* [repo] must exist as a directory; [ledger_path] itself is created on
+   open ([Ledger.create]), so the host error there is a missing parent
+   directory. [committed_branch] is not a filesystem path; a bad branch
+   surfaces from [Retire.Committed.open_], the layer that owns git. *)
 (* Two kinds of configured paths, distinguished here so [Missing_path] can
    only ever name an operator-owned one: [repo] is the operator's act
    (goat never creates a repository — the same posture as the git ban),
-   while [worktree_root] and the ledger's parent are goat-owned scratch,
-   made to exist rather than guarded against not existing. *)
+   while the ledger's parent is goat-owned scratch, made to exist rather
+   than guarded against not existing. [worktree_root] is unused since
+   migration row 4 and dies with row 5 (run.mli). *)
 let rec ensure_dir dir =
   if dir = "." || dir = "/" || directory_exists dir then ()
   else begin
@@ -74,7 +74,6 @@ let parse_paths (config : config) =
   if not (directory_exists config.repo) then
     Error (Missing_path { field = "repo"; path = config.repo })
   else begin
-    ensure_dir config.worktree_root;
     ensure_dir (Filename.dirname config.ledger_path);
     Ok ()
   end
@@ -191,9 +190,9 @@ let start ~theory ~seed ~config =
   let channels = Channel.open_all theory in
   let chase =
     Chase.create ~theory ~ledger:run_ledger ~committed ~channels
-      ~worktree_root:config.worktree_root ~ports:config.ports
-      ~executors:config.executors ~backstops:config.backstops
-      ~switches:config.switches ~merges:config.merges ~seed ()
+      ~ports:config.ports ~executors:config.executors
+      ~backstops:config.backstops ~switches:config.switches
+      ~merges:config.merges ~seed ()
   in
   Ok { chase; run_ledger; outcome = None }
 

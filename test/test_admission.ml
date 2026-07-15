@@ -45,7 +45,14 @@ let rigged_pin =
 
 let agent name =
   Theory.Executor.Agent_template
-    { name; pin = rigged_pin; preamble = "rigged " ^ name; read_globs = []; effects = [] }
+    {
+      name;
+      pin = rigged_pin;
+      preamble = "rigged " ^ name;
+      read_globs = [];
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let bind executor script =
   {
@@ -103,9 +110,8 @@ let drive_bounded ~theory ~seed ~bindings =
   in
   let channels = Channel.open_all theory in
   let chase =
-    Chase.create ~theory ~ledger ~committed ~channels
-      ~worktree_root:(Filename.concat dir "wt") ~ports ~executors:bindings
-      ~backstops:Speculate.Backstops.default ~switches:[]
+    Chase.create ~theory ~ledger ~committed ~channels ~ports
+      ~executors:bindings ~backstops:Speculate.Backstops.default ~switches:[]
       ~merges:Retire.Merge_registry.empty ~seed ()
   in
   let budget = 10_000 in

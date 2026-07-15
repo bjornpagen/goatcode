@@ -12,9 +12,15 @@
     with the same law verdicts, only slower (falsifier F9 asserts exactly
     this equivalence). *)
 type config = {
-  repo : string;  (** The git repository holding the committed branch. *)
+  repo : string;
+      (** The git repository holding the committed branch — the ONE
+          shared tree every node reads and writes (README.md § design of
+          record vs shipped engine, row 4). *)
   committed_branch : string;
   worktree_root : string;
+      (** Unused since migration row 4 (nodes dispatch with no worktree);
+          the field dies with row 5. Kept so run configs stay parseable
+          across the migration. *)
   ledger_path : string;
   ports : Chase.Port.t list;
       (** The port table: provider ceilings and other documented

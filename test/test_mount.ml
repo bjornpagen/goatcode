@@ -76,7 +76,14 @@ let anthropic_pin =
 
 let template ?(pin = rigged_pin) name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = name ^ ": a test template"; read_globs = []; effects = [] }
+    {
+      name;
+      pin;
+      preamble = name ^ ": a test template";
+      read_globs = [];
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let binding ~by ~runtime =
   {
@@ -133,13 +140,12 @@ let sandbox ?(files = []) prefix =
 
 let engine ?(backstops = Speculate.Backstops.default)
     ?(merges = Retire.Merge_registry.empty) ~theory ~executors ~transport
-    ~seed (repo, worktrees, ledger_path) =
+    ~seed (repo, _worktrees, ledger_path) =
   let ledger = Ledger.create ~path:ledger_path in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat-committed" in
   let channels = Channel.open_all theory in
   let chase =
     Chase.create ~theory ~ledger ~committed ~channels ~transport
-      ~worktree_root:worktrees
       ~ports:[ Chase.Port.open_ ~name:"main" ]
       ~executors ~backstops ~switches:[] ~merges ~seed ()
   in
@@ -630,6 +636,7 @@ let%expect_test "FM4: a breaking-broad note at a yield discontinues the \
         pin = anthropic_pin;
         preamble = "watcher: a test template";
         read_globs = [ "shared.txt" ];
+        write_globs = [ "**" ];
         effects = [];
       }
   in

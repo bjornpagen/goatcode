@@ -1,30 +1,31 @@
 (** Retirement: how speculative state becomes committed state, and how
     everything else becomes nothing.
 
-    A node's entire mutable output lives in its own git worktree and its
-    ledger events. Squash is: drop the worktree, mark the events squashed —
-    nothing else exists to clean up; "failed work leaves nothing" is true
-    by construction, never by rollback, and no compensating action is
-    representable here (docs/architecture/30-scheduling.md § abort by
-    construction).
+    A node's entire mutable output is its ledger events — its stores land
+    in the ONE shared tree at store time, with the bytes content-addressed
+    into git's object database. Squash is the settlement append: the
+    subtree's events become provenance-dead by derivation, its tree bytes
+    are the hygiene sweep's ({!Frontier.materialize}) — "failed work
+    leaves nothing committable" is true by construction, never by
+    rollback, and no compensating action is representable here
+    (docs/architecture/20-medium.md § squash without isolation).
 
     Nodes retire in dependency order — a node's producers retire before it
     does — and retirement is the only writer of committed state. Git is the
     storage engine, not a metaphor: the committed tree is a branch,
-    retirements are commits, worktrees are git worktrees, and the engine
-    holds the only writer lock on the committed branch; agents never run
-    git against it (docs/architecture/30-scheduling.md § durability
-    boundary). The landing is built from the ledger, never from any tree:
-    the write set from the node's Store events, the bytes from the object
-    database's blobs, the commit's tree entries from the store events'
-    oids — the worktree is not read at retire
-    (docs/architecture/30-scheduling.md § retirement order and the
-    landing). *)
+    retirements are commits, the object database is the blob store, and
+    the engine holds the only writer lock on the committed branch; agents
+    never run git against it (docs/architecture/30-scheduling.md
+    § durability boundary). The landing is built from the ledger, never
+    from any tree: the write set from the node's Store events, the bytes
+    from the object database's blobs, the commit's tree entries from the
+    store events' oids (docs/architecture/30-scheduling.md § retirement
+    order and the landing). *)
 
-(** A node's store buffer: its git worktree. Uncommitted, squashable by
-    dropping, snoopable by speculative consumers
-    (docs/architecture/30-channels.md § event taxonomy, § store-to-load
-    forwarding). *)
+(** The former store buffer (a per-node git worktree). Dead machinery
+    since migration row 4 — nodes dispatch with no worktree and the
+    engine never constructs one; the module dies with row 5 (README.md
+    § design of record vs shipped engine). *)
 module Worktree : sig
   type t
 
@@ -49,8 +50,9 @@ module Committed : sig
 
   val root : t -> string
   (** The repo directory the committed branch stays checked out in — the
-      read root an agent's in-glob load falls through to when its own
-      worktree misses ({!Agent.Grant.t} [committed_root]). *)
+      ONE shared tree agents' reads resolve and stores land in
+      ({!Agent.Invocation.t} [repo]; README.md § design of record vs
+      shipped engine, row 4). *)
 
   val generation : t -> Ledger.Address.t -> Ledger.Generation.t option
   (** The committed generation of an address — the engine's read-time
@@ -242,9 +244,11 @@ val squash :
   worktrees:(Ledger.node Id.t * Worktree.t) list ->
   cause:Ledger.Squash_cause.t ->
   unit
-(** Execute a squash: {!squash_set}, drop each worktree, drop the subtree's
-    provisional ids, append [Settled (Squashed cause)] for each node.
-    Nothing renumbers; nothing compensates. *)
+(** Execute a squash: {!squash_set}, drop the subtree's provisional ids,
+    append [Settled (Squashed cause)] for each node. Nothing renumbers;
+    nothing compensates. [worktrees] is dead machinery since migration
+    row 4 (the engine passes [[]]; nothing filesystem-shaped rides a
+    squash); the argument dies with row 5. *)
 
 val judge :
   theory:Theory.admitted ->

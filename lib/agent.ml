@@ -67,11 +67,10 @@ module Grant = struct
 
   type 'status t = {
     read_globs : string list;
-    worktree_root : string;
-    committed_root : string;
-        (* The committed checkout in-glob reads fall through to — never
-           the harness process cwd (agent.mli owns the ruling). *)
-    snoop_mounts : string list;
+    write_globs : string list;
+        (* The load-bearing boundary that replaced the private worktree
+           root: stores land in the ONE shared tree, within these globs
+           (agent.mli owns the ruling; 40-agents.md § tool grants). *)
     shell_gates : string list list;
     effects : 'status Effect_tool.t list;
   }
@@ -95,17 +94,16 @@ module Grant = struct
           Buffer.add_char b '\n')
         fmt
     in
-    line "Writable root (your worktree, the store buffer): %s" g.worktree_root;
     (match g.read_globs with
-    | [] -> line "Readable paths: none beyond your worktree."
+    | [] -> line "Readable paths (read_globs): none declared."
     | globs ->
-        line "Readable paths:";
+        line "Readable paths (read_globs):";
         List.iter (fun glob -> line "- %s" glob) globs);
-    (match g.snoop_mounts with
-    | [] -> ()
-    | mounts ->
-        line "Read-only snoop mounts (upstream store buffers):";
-        List.iter (fun m -> line "- %s" m) mounts);
+    (match g.write_globs with
+    | [] -> line "Writable paths (write_globs): none — this node stores nothing."
+    | globs ->
+        line "Writable paths (write_globs):";
+        List.iter (fun glob -> line "- %s" glob) globs);
     (match g.shell_gates with
     | [] -> ()
     | gates ->
@@ -266,11 +264,21 @@ module Invocation = struct
     schema : Contract.Wire_schema.t;
     grant : 'status Grant.t;
     pin : Theory.Pin.t;
-    committed : Ledger.Address.t -> Witness.Committed_state.t;
-        (* The committed-state lookup tool loads witness against
-           (agent.mli): the chase threads [Retire.Committed.state] here so
-           an agent's read of committed state witnesses the real
-           generation, not a zero stamp. *)
+    repo : string;
+        (* The ONE shared tree the grant's globs range over — an explicit
+           invocation coordinate, never the harness process cwd
+           (agent.mli). *)
+    frontier : Ledger.Address.t -> Retire.Frontier.top;
+        (* The live-frontier lookup the read resolver consults: the place
+           a read is served under decides what its load may claim
+           (agent.mli; 20-medium.md § store-to-load forwarding). *)
+    snoop :
+      address:Ledger.Address.t ->
+      producer:Ledger.node Id.t ->
+      content:Ledger.Content_hash.t ->
+      Ledger.Event.kind list;
+        (* The tracked-hypothesis mint for reads served from another
+           node's in-flight store (agent.mli; falsifier FL2). *)
   }
 end
 
@@ -1072,10 +1080,12 @@ end
 
    Capability is a table: {!Toolset.of_grant} derives the tool values a
    grant admits, and dispatch is lookup — an ungranted tool has no entry,
-   so there is no run-time grant check to forget. Reads resolve worktree
-   first (the node snoops its own store buffer), then read_globs against
-   the committed checkout at the process CWD, then snoop mounts; writes
-   land only in the worktree. *)
+   so there is no run-time grant check to forget. Reads resolve against
+   the ONE shared tree, place judged by the invocation's frontier lookup
+   (own in-flight top = draft, another's = snooped, else committed);
+   writes land in the same tree, within the grant's write_globs
+   (20-medium.md § store-to-load forwarding; README.md § design of
+   record vs shipped engine, row 4). *)
 
 (* A repo-relative, escape-free path or glob pattern: the bounds proof,
    carried by the type. Parsed once at the tool-argument boundary;
@@ -1129,7 +1139,7 @@ let glob_matches pattern path =
   go (String.split_on_char '/' pattern) (String.split_on_char '/' path)
 
 (* Regular files under [root], as root-relative paths. Dot-entries and
-   _build are pruned: worktrees and checkouts, not build state. *)
+   _build are pruned: the shared tree's sources, not build state. *)
 let walk root =
   let acc = ref [] in
   let rec go rel_dir =
@@ -1153,103 +1163,52 @@ let walk root =
   go "";
   List.rev !acc
 
-(* The node's draft set: which paths its own buffer has CHANGED relative
-   to the checkout base. The buffer is a detached checkout of the
-   committed tree (Retire.Worktree), so a file merely EXISTING there is
-   usually committed bytes; only a changed path is the node's own
-   in-flight work. [-uall] so an untracked file inside an untracked
-   directory is listed by its own path. [None]: the buffer is a bare
-   directory (no enclosing repository — Worktree.create's fallback),
-   where every file was stored by this node, so everything is a draft. *)
-let buffer_changes root =
-  (* "XY path" or "XY old -> new": the change lives at the new path — a
-     porcelain read of the node's own draft surface; retire reads none of
-     this (the landing is built from Store events, README.md § design of
-     record vs shipped engine, row 2). *)
-  let porcelain_path line =
-    if String.length line < 4 then None
-    else
-      let path = String.sub line 3 (String.length line - 3) in
-      let path =
-        let marker = " -> " in
-        let n = String.length path and m = String.length marker in
-        let rec find i =
-          if i + m > n then None
-          else if String.equal (String.sub path i m) marker then Some (i + m)
-          else find (i + 1)
-        in
-        match find 0 with
-        | Some i -> String.sub path i (n - i)
-        | None -> path
-      in
-      let n = String.length path in
-      if n >= 2 && path.[0] = '"' && path.[n - 1] = '"' then
-        Some (String.sub path 1 (n - 2))
-      else Some path
-  in
-  let ic =
-    Unix.open_process_in
-      (Printf.sprintf "git -C %s status --porcelain -uall 2>/dev/null"
-         (Filename.quote root))
-  in
-  let lines = In_channel.input_lines ic in
-  match Unix.close_process_in ic with
-  | Unix.WEXITED 0 -> Some (List.filter_map porcelain_path lines)
-  | _ -> None
-
-(* Where one in-bounds path reads from, decided once: worktree draft, then
-   the committed checkout when a read_glob admits it, then snoop mounts.
-   [`Missing] (in-grant, absent on disk) and [`Outside_grant] carry the
-   distinction the two failure messages need — no caller re-derives it.
+(* Where one path reads from, decided once against the ONE shared tree.
+   Reads are unwalled — the read declaration is a filter, never a wall
+   (20-medium.md § footprint filtering): an out-of-declaration load
+   surfaces at retire as a [Footprint_escape], it is not refused here.
+   Only [`Missing] remains as a read failure.
 
    [place] records WHERE the read is served from — the fact the observed
-   witness needs (see [load_observation]): the node's own draft, committed
-   bytes (the checkout base or the committed tree at the process CWD), or
-   another node's in-flight buffer. A worktree-served file is a draft only
-   when the buffer CHANGED it; an unchanged worktree file is the checkout
-   base — committed bytes as of the buffer's fork, which is exactly what a
-   staleness judgment must see (falsifier F6). *)
+   witness needs (see [load_observation]) — and it is a frontier
+   judgment, never a filesystem one (20-medium.md § validity is a ledger
+   coordinate): an address topping [In_flight] by the reading node
+   itself is its own draft; by another writer, a snooped in-flight
+   observation carrying that producer; a [Committed] top carries the
+   committed state the witness stamps generations from. *)
 module Source = struct
-  type place = Draft | Committed | Snooped
+  (* The resolver's coordinates, bound once per invocation: the reading
+     node, the shared tree, and the chase-supplied frontier/snoop
+     closures (agent.mli § Invocation). *)
+  type view = {
+    me : Ledger.node Id.t;
+    repo : string;
+    frontier : Ledger.Address.t -> Retire.Frontier.top;
+    snoop :
+      address:Ledger.Address.t ->
+      producer:Ledger.node Id.t ->
+      content:Ledger.Content_hash.t ->
+      Ledger.Event.kind list;
+  }
+
+  type place =
+    | Draft
+    | Committed of Witness.Committed_state.t
+    | Snooped of Ledger.node Id.t
 
   type t = { rel : string; disk : string; place : place }
 
-  let place_in_buffer ~changes rel =
-    match changes with
-    | None -> Draft
-    | Some changed ->
-        if List.exists (String.equal rel) changed then Draft else Committed
+  let place_of view rel =
+    match view.frontier (Ledger.Address.File rel) with
+    | Retire.Frontier.In_flight { writer; _ } ->
+        if Id.equal writer view.me then Draft else Snooped writer
+    | Retire.Frontier.Committed state -> Committed state
 
-  let resolve (grant : _ Grant.t) (path : Relpath.t) =
+  let resolve view (path : Relpath.t) =
     let rel = Relpath.to_string path in
-    let draft = Filename.concat grant.Grant.worktree_root rel in
-    let committed_disk = Filename.concat grant.Grant.committed_root rel in
-    let in_globs =
-      List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
-    in
-    if Sys.file_exists draft then
-      Ok
-        {
-          rel;
-          disk = draft;
-          place =
-            place_in_buffer
-              ~changes:(buffer_changes grant.Grant.worktree_root)
-              rel;
-        }
-    else if in_globs && Sys.file_exists committed_disk then
-      Ok { rel; disk = committed_disk; place = Committed }
-    else
-      match
-        List.find_map
-          (fun mount ->
-            let disk = Filename.concat mount rel in
-            if Sys.file_exists disk then Some { rel; disk; place = Snooped }
-            else None)
-          grant.Grant.snoop_mounts
-      with
-      | Some source -> Ok source
-      | None -> if in_globs then Error `Missing else Error `Outside_grant
+    let disk = Filename.concat view.repo rel in
+    if Sys.file_exists disk then Ok { rel; disk; place = place_of view rel }
+    else Error `Missing
 end
 
 (* The wildcard-free leading segments of a pattern: where a committed-tree
@@ -1262,76 +1221,35 @@ let static_prefix pattern =
   in
   String.concat "/" (take [] (String.split_on_char '/' pattern))
 
-(* Every (relative path, on-disk path, place) the grant lets this node
-   read for [pattern], deduped with worktree drafts shadowing committed
-   state shadowing snoop mounts (store-to-load forwarding order,
-   docs/architecture/30-channels.md). The buffer's change set is read
-   once and each worktree file's place derives from it, exactly as
-   [Source.resolve] judges a single path. *)
-let readable_matches (grant : _ Grant.t) pattern =
-  let seen = Hashtbl.create 16 in
-  let add acc rel disk place =
-    if Hashtbl.mem seen rel then acc
-    else begin
-      Hashtbl.add seen rel ();
-      (rel, disk, place) :: acc
-    end
+(* Every (relative path, on-disk path, place) [pattern] matches in the
+   shared tree — ONE walk, each path's place a frontier judgment, exactly
+   as [Source.resolve] judges a single path. The walk starts at the
+   pattern's wildcard-free prefix — never the harness process cwd
+   ([view.repo] owns the coordinate); rels stay repo-relative, disks
+   absolute under the root. *)
+let readable_matches (view : Source.view) pattern =
+  let prefix = static_prefix pattern in
+  let base =
+    if prefix = "" then view.Source.repo
+    else Filename.concat view.Source.repo prefix
   in
-  let changes = buffer_changes grant.Grant.worktree_root in
-  let acc =
-    List.fold_left
-      (fun acc rel ->
-        if glob_matches pattern rel then
-          add acc rel
-            (Filename.concat grant.Grant.worktree_root rel)
-            (Source.place_in_buffer ~changes rel)
-        else acc)
-      []
-      (walk grant.Grant.worktree_root)
-  in
-  let committed =
-    (* The committed walk starts in the grant's committed checkout —
-       never the harness process cwd (Source.resolve owns the same
-       ruling); rels stay repo-relative, disks absolute under the
-       root. *)
-    let prefix = static_prefix pattern in
-    let base =
-      if prefix = "" then grant.Grant.committed_root
-      else Filename.concat grant.Grant.committed_root prefix
-    in
+  let rels =
     match Sys.is_directory base with
     | exception Sys_error _ -> []
     | true ->
         walk base
-        |> List.map (fun rel ->
-               if prefix = "" then rel else prefix ^ "/" ^ rel)
+        |> List.map (fun rel -> if prefix = "" then rel else prefix ^ "/" ^ rel)
     | false -> if Sys.file_exists base then [ prefix ] else []
   in
-  let acc =
-    List.fold_left
-      (fun acc rel ->
-        if
-          glob_matches pattern rel
-          && List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
-        then
-          add acc rel
-            (Filename.concat grant.Grant.committed_root rel)
-            Source.Committed
-        else acc)
-      acc committed
-  in
-  let acc =
-    List.fold_left
-      (fun acc mount ->
-        List.fold_left
-          (fun acc rel ->
-            if glob_matches pattern rel then
-              add acc rel (Filename.concat mount rel) Source.Snooped
-            else acc)
-          acc (walk mount))
-      acc grant.Grant.snoop_mounts
-  in
-  List.rev acc
+  List.filter_map
+    (fun rel ->
+      if glob_matches pattern rel then
+        Some
+          ( rel,
+            Filename.concat view.Source.repo rel,
+            Source.place_of view rel )
+      else None)
+    rels
 
 let rec mkdirs dir =
   if dir = "." || dir = "/" || Sys.file_exists dir then ()
@@ -1367,8 +1285,9 @@ let replace_first ~needle ~replacement hay =
 let contains ~needle hay = count_occurrences ~needle hay > 0
 
 (* The mkdir-atomic, holder-named machine lock every effect runs behind:
-   shared machine state is outside every worktree, so effects serialize
-   machine-wide (docs/architecture/30-channels.md § event taxonomy).
+   shared machine state is outside every granted write surface, so
+   effects serialize machine-wide (docs/architecture/20-medium.md § event
+   taxonomy; migration row 6 re-scopes this to per-resource locks).
 
    The holder file carries the holder's NAME and PID: a crashed run
    cannot release its lock, so a lock whose recorded pid no longer runs
@@ -1476,21 +1395,25 @@ let path_arg ~tool ~boundary name input : (Relpath.t, Tool.failure) result =
         (Tool.Refused
            { Grant.Refusal.requested = tool ^ " " ^ raw; boundary })
 
-let read_boundary = "reads: read_globs + your worktree + snoop mounts"
-let write_boundary = "writes: your worktree only"
+let read_boundary = "reads: repo-relative paths within the shared tree"
+
+let write_boundary (grant : _ Grant.t) =
+  match grant.Grant.write_globs with
+  | [] -> "writes: no write_globs granted"
+  | globs -> "writes: write_globs [" ^ String.concat ", " globs ^ "]"
 
 (* What one served read may CLAIM in the observed witness, decided by the
    place it was served from (the self-witness ruling, wave 3):
 
-   - [Committed]: the read observed committed bytes (the checkout base or
-     the committed tree) — stamp the REAL committed generation from the
-     lookup the invocation carries; the content hash is the bytes
-     actually read, so a stale checkout still fails [Witness.holds]
+   - [Committed]: the read observed committed bytes — stamp the REAL
+     committed generation the place already carries; the content hash is
+     the bytes actually read, so a stale tree still fails [Witness.holds]
      (falsifier F6). An address with no committed entry stays at [zero]
      with the content carrying the commit-point judgment (B7).
-   - [Snooped]: an in-flight observation of another node's buffer —
+   - [Snooped]: an in-flight observation of another node's store —
      generation zero, content judged when that producer lands (F7's
-     free-commit discrimination).
+     free-commit discrimination). The tracked-hypothesis half rides
+     [snoop_events] below.
    - [Draft]: store-to-load forwarding of the node's OWN in-flight work —
      not an observation of shared state, so it claims NOTHING. A draft
      triple could never hold at the node's own retire (its landing has
@@ -1500,21 +1423,35 @@ let write_boundary = "writes: your worktree only"
      judgment's witnessed-membership proof. The claims that gate
      retirement are the committed reads that seeded the draft and the
      write's base coordinate. *)
-let load_observation ~committed ~place rel bytes =
+let load_observation ~place rel bytes =
   let address = Ledger.Address.File rel in
   match (place : Source.place) with
   | Source.Draft -> []
-  | Source.Snooped ->
+  | Source.Snooped _ ->
       [ (address, Ledger.Generation.zero, Ledger.Content_hash.of_string bytes) ]
-  | Source.Committed ->
+  | Source.Committed state ->
       let generation =
-        match committed address with
+        match state with
         | Witness.Committed_state.Landed { generation; _ }
         | Witness.Committed_state.Deleted { generation } ->
             generation
         | Witness.Committed_state.Absent -> Ledger.Generation.zero
       in
       [ (address, generation, Ledger.Content_hash.of_string bytes) ]
+
+(* The tracked half of a snooped read: everything in-grant is snoopable,
+   automatically, and the hypothesis tracker — not any mount — is what
+   makes it honest (20-medium.md § store-to-load forwarding). The
+   chase-supplied closure mints and registers the [Hypothesis_taken];
+   the events ride the tool outcome like any other (falsifier FL2). *)
+let snoop_events (view : Source.view) ~place rel bytes =
+  match (place : Source.place) with
+  | Source.Snooped producer ->
+      view.Source.snoop
+        ~address:(Ledger.Address.File rel)
+        ~producer
+        ~content:(Ledger.Content_hash.of_string bytes)
+  | Source.Draft | Source.Committed _ -> []
 
 let decl name description props ~required : Provider.Tool_decl.t =
   {
@@ -1540,10 +1477,10 @@ let decl name description props ~required : Provider.Tool_decl.t =
         ];
   }
 
-let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
+let read_file_tool (view : Source.view) : Tool.t =
   {
     decl =
-      decl "read_file" "Read one file within your grant."
+      decl "read_file" "Read one file from the shared tree."
         [ ("path", "Repo-relative path.") ]
         ~required:[ "path" ];
     run =
@@ -1551,15 +1488,7 @@ let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
         let* path =
           path_arg ~tool:"read_file" ~boundary:read_boundary "path" input
         in
-        match Source.resolve grant path with
-        | Error `Outside_grant ->
-            Error
-              (Tool.Refused
-                 {
-                   Grant.Refusal.requested =
-                     "read_file " ^ Relpath.to_string path;
-                   boundary = read_boundary;
-                 })
+        match Source.resolve view path with
         | Error `Missing ->
             Error
               (Tool.Errored
@@ -1572,14 +1501,14 @@ let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
                   {
                     Tool.payload = bytes;
                     events =
-                      [
-                        Ledger.Event.Load
-                          {
-                            tool = "read_file";
-                            observed =
-                              load_observation ~committed ~place rel bytes;
-                          };
-                      ];
+                      snoop_events view ~place rel bytes
+                      @ [
+                          Ledger.Event.Load
+                            {
+                              tool = "read_file";
+                              observed = load_observation ~place rel bytes;
+                            };
+                        ];
                   }));
   }
 
@@ -1600,10 +1529,25 @@ let blob_into_object_store ~repo file =
   | Unix.WEXITED 0, Some printed -> Ledger.Delta_ref.blob printed
   | _, _ -> None
 
+(* The write half of the argument boundary: the [Relpath] parse plus the
+   write_globs judgment, one site — a store path outside the grant is the
+   typed in-band refusal, and nothing downstream re-checks
+   (40-agents.md § tool grants; README.md § design of record vs shipped
+   engine, row 4). *)
+let store_path_arg ~tool (grant : _ Grant.t) name input :
+    (Relpath.t, Tool.failure) result =
+  let boundary = write_boundary grant in
+  let* path = path_arg ~tool ~boundary name input in
+  let rel = Relpath.to_string path in
+  if List.exists (fun g -> glob_matches g rel) grant.Grant.write_globs then
+    Ok path
+  else
+    Error (Tool.Refused { Grant.Refusal.requested = tool ^ " " ^ rel; boundary })
+
 (* Every file store lands through this one site, three obligations,
    ordered (docs/architecture/20-medium.md § event taxonomy): blob first —
-   the full content into the object database at the committed root, so
-   the oid exists before any event names it; rename second — the bytes
+   the full content into the object database at the shared tree's repo,
+   so the oid exists before any event names it; rename second — the bytes
    move from a same-directory temporary into place by rename(2), atomic
    on POSIX, so the readers the domain does not schedule (gate
    subprocesses, external tools, the operator's own editor) can never
@@ -1611,10 +1555,10 @@ let blob_into_object_store ~repo file =
    as data for the tool loop to append. A store whose blob cannot land is
    a typed tool error, not a write: no event may name an oid the object
    store does not hold. *)
-let store_file ~tool (grant : _ Grant.t) rel content :
+let store_file ~tool (view : Source.view) rel content :
     (Ledger.Event.kind, Tool.failure) result =
   let errored m = Error (Tool.Errored (tool ^ ": " ^ m)) in
-  let target = Filename.concat grant.Grant.worktree_root rel in
+  let target = Filename.concat view.Source.repo rel in
   match
     mkdirs (Filename.dirname target);
     Filename.temp_file ~temp_dir:(Filename.dirname target) ".goat-store" ".tmp"
@@ -1632,14 +1576,12 @@ let store_file ~tool (grant : _ Grant.t) rel content :
           remove_quietly tmp;
           errored m
       | () -> (
-          match
-            blob_into_object_store ~repo:grant.Grant.committed_root tmp
-          with
+          match blob_into_object_store ~repo:view.Source.repo tmp with
           | None ->
               remove_quietly tmp;
               errored
                 ("the object store refused the content (no repository at "
-                ^ grant.Grant.committed_root ^ ")")
+                ^ view.Source.repo ^ ")")
           | Some delta -> (
               match Sys.rename tmp target with
               | exception Sys_error m ->
@@ -1650,25 +1592,23 @@ let store_file ~tool (grant : _ Grant.t) rel content :
                     (Ledger.Event.Store
                        { tool; address = Ledger.Address.File rel; delta }))))
 
-let write_file_tool (grant : _ Grant.t) : Tool.t =
+let write_file_tool (view : Source.view) (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "write_file"
-        "Write one file in your worktree (the only writable root), creating \
-         parent directories as needed."
+        "Write one file in the shared tree, within your write_globs, \
+         creating parent directories as needed."
         [
-          ("path", "Repo-relative path; lands in your worktree.");
+          ("path", "Repo-relative path; must match your write_globs.");
           ("content", "The full file contents to write.");
         ]
         ~required:[ "path"; "content" ];
     run =
       (fun input ->
-        let* path =
-          path_arg ~tool:"write_file" ~boundary:write_boundary "path" input
-        in
+        let* path = store_path_arg ~tool:"write_file" grant "path" input in
         let* content = str_arg "content" input in
         let rel = Relpath.to_string path in
-        let* store_event = store_file ~tool:"write_file" grant rel content in
+        let* store_event = store_file ~tool:"write_file" view rel content in
         Ok
           {
             Tool.payload =
@@ -1678,35 +1618,24 @@ let write_file_tool (grant : _ Grant.t) : Tool.t =
           });
   }
 
-let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
+let str_replace_edit_tool (view : Source.view) (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "str_replace_edit"
         "Replace one exact occurrence of old_str with new_str; the edited \
-         file lands in your worktree."
+         file lands in the shared tree, within your write_globs."
         [
-          ("path", "Repo-relative path.");
+          ("path", "Repo-relative path; must match your write_globs.");
           ("old_str", "Exact text to replace; must occur exactly once.");
           ("new_str", "Replacement text.");
         ]
         ~required:[ "path"; "old_str"; "new_str" ];
     run =
       (fun input ->
-        let* path =
-          path_arg ~tool:"str_replace_edit" ~boundary:write_boundary "path"
-            input
-        in
+        let* path = store_path_arg ~tool:"str_replace_edit" grant "path" input in
         let* old_str = str_arg "old_str" input in
         let* new_str = str_arg "new_str" input in
-        match Source.resolve grant path with
-        | Error `Outside_grant ->
-            Error
-              (Tool.Refused
-                 {
-                   Grant.Refusal.requested =
-                     "str_replace_edit " ^ Relpath.to_string path;
-                   boundary = read_boundary;
-                 })
+        match Source.resolve view path with
         | Error `Missing ->
             Error
               (Tool.Errored
@@ -1716,15 +1645,20 @@ let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
             | exception Sys_error m ->
                 Error (Tool.Errored ("str_replace_edit: " ^ m))
             | bytes -> (
-                (* An edit is a read of the source (committed or draft)
-                   plus a store into the draft — both evented; only a
-                   committed-served source claims a witness triple. *)
-                let read_event =
-                  Ledger.Event.Load
-                    {
-                      tool = "str_replace_edit";
-                      observed = load_observation ~committed ~place rel bytes;
-                    }
+                (* An edit is a read of the source (committed, snooped, or
+                   the node's own draft) plus a store — both evented; the
+                   place decides what the read claims, and a snooped
+                   source is a tracked hypothesis like any other snooped
+                   read. *)
+                let read_events =
+                  snoop_events view ~place rel bytes
+                  @ [
+                      Ledger.Event.Load
+                        {
+                          tool = "str_replace_edit";
+                          observed = load_observation ~place rel bytes;
+                        };
+                    ]
                 in
                 match count_occurrences ~needle:old_str bytes with
                 | 0 ->
@@ -1745,19 +1679,19 @@ let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
                            bytes)
                     in
                     let* store_event =
-                      store_file ~tool:"str_replace_edit" grant rel edited
+                      store_file ~tool:"str_replace_edit" view rel edited
                     in
                     Ok
                       {
                         Tool.payload = "edited " ^ rel;
-                        events = [ read_event; store_event ];
+                        events = read_events @ [ store_event ];
                       })));
   }
 
-let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =
+let glob_list_tool (view : Source.view) : Tool.t =
   {
     decl =
-      decl "glob_list" "List readable files matching a glob pattern."
+      decl "glob_list" "List files in the shared tree matching a glob pattern."
         [ ("pattern", "Glob; ** spans directories, * and ? stay in one.") ]
         ~required:[ "pattern" ];
     run =
@@ -1765,23 +1699,23 @@ let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =
         let* pattern =
           path_arg ~tool:"glob_list" ~boundary:read_boundary "pattern" input
         in
-        let matches = readable_matches grant (Relpath.to_string pattern) in
+        let matches = readable_matches view (Relpath.to_string pattern) in
         Ok
           {
             Tool.payload =
               Yojson.Safe.to_string
                 (`List (List.map (fun (rel, _, _) -> `String rel) matches));
             (* The observation a glob contributes is the listing itself:
-               which paths exist. For a path whose committed state is
+               which paths exist. For a path whose top is Committed
                Landed, the listing witnesses the committed (generation,
-               content) pair straight from the lookup — the node read no
+               content) pair straight from the place — the node read no
                bytes, so the recorded content is the committed record,
                never a hash of the path string. A path that exists only
                in flight (a draft, a snoop, absent from committed state)
                contributes no triple: existence-of-uncommitted is not a
                claim [Witness.holds] can judge in v0 — the recorded
-               choice; the listing-shaped witness belongs to the
-               flat-org grant rework (docs/architecture/91-flat-org.md). *)
+               choice (docs/architecture/20-medium.md § event
+               taxonomy). *)
             events =
               [
                 Ledger.Event.Load
@@ -1789,14 +1723,15 @@ let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =
                     tool = "glob_list";
                     observed =
                       List.filter_map
-                        (fun (rel, _, _) ->
-                          let address = Ledger.Address.File rel in
-                          match committed address with
-                          | Witness.Committed_state.Landed
-                              { generation; content } ->
-                              Some (address, generation, content)
-                          | Witness.Committed_state.Absent
-                          | Witness.Committed_state.Deleted _ ->
+                        (fun (rel, _, place) ->
+                          match (place : Source.place) with
+                          | Source.Committed
+                              (Witness.Committed_state.Landed
+                                { generation; content }) ->
+                              Some
+                                (Ledger.Address.File rel, generation, content)
+                          | Source.Committed _ | Source.Draft
+                          | Source.Snooped _ ->
                               None)
                         matches;
                   };
@@ -1804,7 +1739,7 @@ let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =
           });
   }
 
-let grep_tool ~committed (grant : _ Grant.t) : Tool.t =
+let grep_tool (view : Source.view) : Tool.t =
   {
     decl =
       decl "grep"
@@ -1827,9 +1762,10 @@ let grep_tool ~committed (grant : _ Grant.t) : Tool.t =
               in
               Ok (Relpath.to_string g)
         in
-        let files = readable_matches grant glob in
+        let files = readable_matches view glob in
         let out = Buffer.create 256 in
         let observed = ref [] in
+        let snooped = ref [] in
         let hits = ref 0 in
         List.iter
           (fun (rel, disk, place) ->
@@ -1837,8 +1773,8 @@ let grep_tool ~committed (grant : _ Grant.t) : Tool.t =
               match read_file_bytes disk with
               | exception Sys_error _ -> ()
               | bytes ->
-                  observed :=
-                    load_observation ~committed ~place rel bytes @ !observed;
+                  observed := load_observation ~place rel bytes @ !observed;
+                  snooped := snoop_events view ~place rel bytes @ !snooped;
                   List.iteri
                     (fun i line ->
                       if !hits < 200 && contains ~needle:pattern line then begin
@@ -1854,7 +1790,11 @@ let grep_tool ~committed (grant : _ Grant.t) : Tool.t =
               (if Buffer.length out = 0 then "no matches"
                else Buffer.contents out);
             events =
-              [ Ledger.Event.Load { tool = "grep"; observed = List.rev !observed } ];
+              List.rev !snooped
+              @ [
+                  Ledger.Event.Load
+                    { tool = "grep"; observed = List.rev !observed };
+                ];
           });
   }
 
@@ -1947,13 +1887,13 @@ let names_git command =
   in
   scan true tokens
 
-let run_command_tool ~holder ~idempotent (grant : _ Grant.t) : Tool.t =
+let run_command_tool ~idempotent (view : Source.view) : Tool.t =
   {
     decl =
       decl "run_command"
-        "Run one shell command in your worktree, behind the machine effect \
-         lock; exit status and output come back. Git is banned: the \
-         harness owns the commit substrate."
+        "Run one shell command in the shared tree, behind the machine \
+         effect lock; exit status and output come back. Git is banned: \
+         the harness owns the commit substrate."
         [ ("command", "The shell command line.") ]
         ~required:[ "command" ];
     run =
@@ -1977,12 +1917,12 @@ let run_command_tool ~holder ~idempotent (grant : _ Grant.t) : Tool.t =
               let status =
                 Sys.command
                   (Printf.sprintf "cd %s && ( %s ) > %s 2>&1"
-                     (Filename.quote grant.Grant.worktree_root)
+                     (Filename.quote view.Source.repo)
                      command (Filename.quote out_file))
               in
               (status, read_file_bytes out_file))
         in
-        match with_effect_lock ~holder run with
+        match with_effect_lock ~holder:(Id.to_string view.Source.me) run with
         | Error m -> Error (Tool.Errored ("run_command: " ^ m))
         | Ok (status, output) ->
             Ok
@@ -2014,17 +1954,17 @@ let run_command_tool ~holder ~idempotent (grant : _ Grant.t) : Tool.t =
 module Toolset = struct
   type t = (string * Tool.t) list
 
-  (* [holder] names the node on the effect lock (holder-named by law);
-     [committed] is the committed-state lookup load triples witness
-     against. *)
-  let of_grant ~holder ~committed (grant : _ Grant.t) : t =
+  (* [view] carries the node identity (the effect lock's holder name and
+     the draft judgment), the shared tree, and the frontier/snoop
+     closures the invocation supplied. *)
+  let of_grant ~(view : Source.view) (grant : _ Grant.t) : t =
     let base =
       [
-        read_file_tool ~committed grant;
-        write_file_tool grant;
-        str_replace_edit_tool ~committed grant;
-        glob_list_tool ~committed grant;
-        grep_tool ~committed grant;
+        read_file_tool view;
+        write_file_tool view grant;
+        str_replace_edit_tool view grant;
+        glob_list_tool view;
+        grep_tool view;
       ]
     in
     let effects =
@@ -2032,9 +1972,9 @@ module Toolset = struct
         (fun (e : _ Grant.Effect_tool.t) ->
           match e with
           | Grant.Effect_tool.Idempotent { name = "run_command"; _ } ->
-              Some (run_command_tool ~holder ~idempotent:true grant)
+              Some (run_command_tool ~idempotent:true view)
           | Grant.Effect_tool.Non_idempotent { name = "run_command" } ->
-              Some (run_command_tool ~holder ~idempotent:false grant)
+              Some (run_command_tool ~idempotent:false view)
           | _ -> None)
         grant.Grant.effects
     in
@@ -2101,8 +2041,15 @@ let agent ~stop ~provider =
       ignore (Ledger.append ledger ~node kind : Ledger.Event.t)
     in
     let toolset =
-      Toolset.of_grant ~holder:(Id.to_string node)
-        ~committed:inv.Invocation.committed inv.Invocation.grant
+      Toolset.of_grant
+        ~view:
+          {
+            Source.me = node;
+            repo = inv.Invocation.repo;
+            frontier = inv.Invocation.frontier;
+            snoop = inv.Invocation.snoop;
+          }
+        inv.Invocation.grant
     in
     let tools = Toolset.decls toolset in
     let conditions =
@@ -2326,23 +2273,22 @@ let shell_gate =
             Fun.protect
               ~finally:(fun () -> remove_quietly out_file)
               (fun () ->
-                (* The gate runs IN the node's store buffer: its worktree
-                   is the checkout the gate's body operands landed on, so
-                   the command sees exactly the committed tree it was
-                   spawned to judge. The gate's judgment is its head
-                   tuple; a file it writes into the buffer is not an
-                   evented store, and the landing is built from Store
-                   events alone (README.md § design of record vs shipped
-                   engine, row 2) — so gate tree-writes never land at
-                   retire (migration step 6 re-scopes gates). The
-                   harness process cwd is ambient machine state no
-                   footprint declares (live trace 2026-07-15: a test
-                   gate resolved its test file against the operator's
-                   shell cwd and reported a spurious red). *)
+                (* The gate runs IN the shared tree: the one tree its
+                   body operands landed on, so the command sees exactly
+                   the state it was spawned to judge. The gate's judgment
+                   is its head tuple; a file it writes into the tree is
+                   not an evented store, and the landing is built from
+                   Store events alone (README.md § design of record vs
+                   shipped engine, row 2) — so gate tree-writes never
+                   land at retire (migration row 6 re-scopes gates to a
+                   frontier snapshot). The harness process cwd is
+                   ambient machine state no footprint declares (live
+                   trace 2026-07-15: a test gate resolved its test file
+                   against the operator's shell cwd and reported a
+                   spurious red). *)
                 let command =
                   Printf.sprintf "cd %s && %s > %s 2>&1"
-                    (Filename.quote
-                       invocation.Invocation.grant.Grant.worktree_root)
+                    (Filename.quote invocation.Invocation.repo)
                     (String.concat " " (List.map Filename.quote gate))
                     (Filename.quote out_file)
                 in

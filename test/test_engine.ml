@@ -67,7 +67,14 @@ let pin =
 
 let template name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = name ^ ": a rigged test template"; read_globs = []; effects = [] }
+    {
+      name;
+      pin;
+      preamble = name ^ ": a rigged test template";
+      read_globs = [];
+      write_globs = [ "**" ];
+      effects = [];
+    }
 
 let binding ~by ~port ~script =
   {
@@ -511,7 +518,6 @@ let%expect_test "F4 dispatch purity: settlement-to-issue is the ledger append an
   let channels = Channel.open_all theory in
   let chase =
     Chase.create ~theory ~ledger ~committed ~channels
-      ~worktree_root:sb.worktrees
       ~ports:[ Chase.Port.open_ ~name:"main" ]
       ~executors:
         [
