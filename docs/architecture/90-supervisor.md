@@ -1,22 +1,22 @@
-# 90 — Puppeteer
+# 90 — Supervisor (project codename: puppeteer)
 
 The supervisory plane: a frontier model that watches a running engine through
 the ledger and steers it through a typed, evented vocabulary. In the machine
 analogy this is the plane the first eight docs left unoccupied — the
 performance-monitoring unit, the exception/interrupt architecture, and
 (bounded) microcode patching — occupied by a model instead of firmware.
-Readers of this doc: the operator; the `Puppeteer` module (doc-resident
+Readers of this doc: the operator; the `Supervisor` module (doc-resident
 until its implementation trigger, § the module); `30-channels.md` (whose
 ledger-reader list this doc extends); `80-validation.md` (whose falsifier
 roster gains this doc's probes). Existing-file amendments this design
 demands are recorded in § HANDOFF, deferred under doc rule 4 until the
 concurrent engine work lands.
 
-The word is new house vocabulary, defined once: the **puppeteer** is a
+The word is new house vocabulary, defined once: the **supervisor** is a
 standing supervision session over one run. It is not the *planner* (an
 agent that emits a theory), not the *scheduler* (mechanical,
 policy-bearing), and not an "orchestrator" (deleted vocabulary — the word
-that blurs them stays banned). The puppeteer plans nothing and schedules
+that blurs them stays banned). The supervisor plans nothing and schedules
 nothing: it watches settlements and steers with an operator's powers,
 never a god's.
 
@@ -34,21 +34,21 @@ design exists to kill:
   work — no code had changed, and nothing in the harness could tell
   (docs/executor-campaign.md § failure this session). Mechanized witnesses
   closed that hole for *workers* (`30-channels.md` § mechanized witnesses:
-  read-sets by observation, never self-report). The puppeteer closes it for
+  read-sets by observation, never self-report). The supervisor closes it for
   supervision itself: **its eyes are ledger events** — settlements, drift
   notes, law verdicts, counters — which are observations the harness
-  appended, not claims any agent made. A worker cannot lie to the puppeteer
-  about work, because the puppeteer never asks the worker; it asks the
+  appended, not claims any agent made. A worker cannot lie to the supervisor
+  about work, because the supervisor never asks the worker; it asks the
   ledger.
 - **Ultracode's hands are prose.** It steers by talking, and its
   interventions live nowhere but its own context — unrecorded, unreplayable,
-  unauditable, and lost at context exhaustion. The puppeteer steers through
+  unauditable, and lost at context exhaustion. The supervisor steers through
   a **typed sum** (§ the steering vocabulary), every actuation a ledger
-  event before it applies: **the witnessed puppeteer** — its interventions
+  event before it applies: **the witnessed supervisor** — its interventions
   exactly as audited as any agent's tool calls, replay re-judging each one.
 
 What this design does *not* fix, stated so nobody buys it as more than it
-is: **worker judgment quality.** A puppeteer cannot make a refuter sharper
+is: **worker judgment quality.** A supervisor cannot make a refuter sharper
 or an implementer more careful; adversarial verification stays where the
 theory put it — refuter statements and retire laws (`10-theory.md`). And it
 carries a **standing token bill**: a model that watches a run costs tokens
@@ -73,11 +73,11 @@ is the exploit class this doc opened with.
 
 ## The fifth reader
 
-**The puppeteer reads the ledger through a named reader — `Supervision`,
+**The supervisor reads the ledger through a named reader — `Supervision`,
 joining Replay, Telemetry, Predictor_history, and the Witness index**
 (`30-channels.md` § the ledger; the anti-transcription rule demands the
 name, and the HANDOFF amends the four-reader list). It is not a firehose.
-What the puppeteer is *pushed* is governed by a **subscription table as
+What the supervisor is *pushed* is governed by a **subscription table as
 data**: rows of event class × threshold → escalation level — inspectable,
 amendable mid-run (the amendment is itself a steer, evented like any
 other), and replayable (the current table is a fold of the default plus
@@ -91,8 +91,8 @@ module Subscription : sig
   module Level : sig
     type t =
       | Mute  (** Ledger-only: available to pull, never delivered. *)
-      | Digest  (** Coalesced into the next puppeteer turn's digest. *)
-      | Wake  (** Queue a puppeteer turn now (§ the cadence law). *)
+      | Digest  (** Coalesced into the next supervisor turn's digest. *)
+      | Wake  (** Queue a supervisor turn now (§ the cadence law). *)
   end
 
   (** The supervision-relevant condition classes: mostly event kinds at
@@ -187,27 +187,46 @@ session is the session's context, and per-event play-by-play fills it
 exactly the way update-flooding fills a bus.
 
 **Decision — a subscription table, not a firehose and not a fixed feed.**
-**Alternative:** stream every ledger event into the puppeteer's context
+**Alternative:** stream every ledger event into the supervisor's context
 (the ultracode posture: the supervisor sees everything) — lost because the
 context window is the session's scarce resource and the bill is standing;
 a firehose either exhausts the session mid-run or trains it to skim, and a
 supervisor that skims is worse than a counter. **Alternative:** a fixed,
-code-owned escalation policy (no table, just "faults wake the puppeteer")
+code-owned escalation policy (no table, just "faults wake the supervisor")
 — lost on doc rule 8: escalation policy is exactly the branching that must
 be reified as data, and a mid-run-amendable table is what lets the
-puppeteer *narrow* its own attention when a run turns noisy (the
+supervisor *narrow* its own attention when a run turns noisy (the
 amendment evented, so the narrowing is auditable too). **Reverses if:**
 measured session token bills show the table's flexibility unused across
 real pipelines (every run rides the default) — then the default hardens
 into the code and the amendment steer is deleted with its constructor.
 
+### Go to the bottleneck
+
+**The machine computes where the supervisor should stand.** Attention
+allocation is not a vibe: `Report.summary` carries `critical_path` (the
+node chain that determined wall clock), `port_queues` (seconds queued per
+reservation station), `realized_parallelism`, and the per-shape
+speculation counters. The standing playbook is a query, not an
+impression: read the scoreboard, find the constraint as a value, retarget
+the subscription to that port/shape/node (a `Subscribe` steer, evented),
+drill its ledger traffic on demand, steer through the vocabulary below.
+The steers stay law-bound where human floor-walking is not: widening a
+port demands the named bottleneck `Port.bounded` already requires, and
+killing a flailing shape's speculation demands churn evidence — "a bad
+feeling" is not a legal steer; "survival 0.31 over 14 samples" is. Amdahl
+aligns the incentive exactly: attending the critical path is the only
+attention that buys wall clock, wall clock is the machine's one
+objective, and a supervisor loitering anywhere else is measurably wasting
+its own ledgered bill.
+
 ## The cadence law
 
-**The puppeteer lives at settlement granularity and is never on the
+**The supervisor lives at settlement granularity and is never on the
 dispatch path.** F4 is inviolable: between a settlement and the dispatch of
 its dependents the engine performs no I/O beyond the ledger append — and
 the subscription judgment is a pure fold over that already-owed append, so
-supervision adds nothing to the path. A `Wake` **queues** a puppeteer turn;
+supervision adds nothing to the path. A `Wake` **queues** a supervisor turn;
 it never blocks anything on one. The turn runs beside the engine,
 overlapping work exactly as any provider call overlaps on the fiber
 substrate (`Fiber`), and its steers apply at the engine's existing
@@ -216,7 +235,7 @@ the squash path, a tune at the next judgment that reads the tuned value.
 No dispatch ever waits on a model's answer, because the wall-clock
 objective dies the day model latency enters dispatch
 (`40-scheduling.md` § the objective). The falsifier is F17 (§ HANDOFF): a
-rigged puppeteer with an arbitrarily slow scripted turn changes no
+rigged supervisor with an arbitrarily slow scripted turn changes no
 unrelated node's dispatch timing — the F2 discipline, applied to the
 supervisor.
 
@@ -224,7 +243,7 @@ supervisor.
 nothing, so no fold over appends can notice it. The stall probe is a host
 timer owned by the session; its wake is recorded by the turn it starts
 (the turn's events carry ledger timestamps), so replay's story is the same
-as for any executor — puppeteer turns are substituted from the ledger, and
+as for any executor — supervisor turns are substituted from the ledger, and
 the wake's timing rides the recorded events. The heartbeat's exact
 representation is OPEN (below).
 
@@ -232,7 +251,7 @@ representation is OPEN (below).
 
 **A steer is a constructor of a sum, never free prose — and almost every
 constructor is a thin handle on machinery the engine already has.** That
-collapse is the design's spine: the puppeteer needed almost no new
+collapse is the design's spine: the supervisor needed almost no new
 actuators because the engine's control surface was already reified as data
 and typed signals; the vocabulary names what exists.
 
@@ -273,7 +292,7 @@ module Steer : sig
             [Abort], one act per constructor. *)
     | Abort of { node : Ledger.node Id.t }
         (** Kill: the existing squash path, with the typed cause
-            [Ledger.Squash_cause.Puppeteer_abort { reason }] (the reason
+            [Ledger.Squash_cause.Supervisor_abort { reason }] (the reason
             copied from this steer's event). Squash precision is the
             engine's, untouched: the provenance-closed subtree, worktrees
             dropped, nothing renumbered. *)
@@ -292,7 +311,7 @@ module Steer : sig
         (** Speculation off, per shape. The value itself is the evidence
             law: [Speculate.Switch.throw] requires a [Churn.measurement],
             which has no public constructor and comes only from a ledger —
-            the puppeteer is bound exactly as the operator and the
+            the supervisor is bound exactly as the operator and the
             scheduler are, by construction. *)
     | Amend_theory of Theory.Meta.t
         (** Restructure: a theory amendment {e through admission} —
@@ -303,16 +322,16 @@ module Steer : sig
             the run boundary (§ OPEN: mid-run splice). *)
     | Tune of Tune.t
     | Subscribe of Subscription.row
-        (** Amend the puppeteer's own feed — attention is steerable too,
+        (** Amend the supervisor's own feed — attention is steerable too,
             and the amendment is audited like everything else. *)
     | Observe of { subject : string; text : string }
         (** An actuation whose entire effect is its event: the recorded
             observation. This is the succession checkpoint (§ statelessness)
-            — what a puppeteer wants its successor to know is in the
+            — what a supervisor wants its successor to know is in the
             ledger or it does not exist. *)
 
   (** The intake's answer: typed, in-band, never an exception — the
-      puppeteer routes around obstacles it can see, the same posture as
+      supervisor routes around obstacles it can see, the same posture as
       [Agent.Grant.Refusal]. *)
   type outcome =
     | Applied
@@ -332,23 +351,23 @@ the counters consulted — the same explainability contract as scheduler
 `Decision` events), then executes through the named machinery, which
 appends *its* existing events: an applied `Bump_pin` is a `Steered` event
 followed by the `Pin_bump` event the machinery already emits; an applied
-`Abort` is `Steered` followed by `Settled (Squashed (Puppeteer_abort _))`.
+`Abort` is `Steered` followed by `Settled (Squashed (Supervisor_abort _))`.
 Readers of `Steered`, named: replay (which re-judges every application),
 `Report.explain` (a steered node's story shows who steered it and why),
 the operator, and the successor session's boot query. An application the
 event does not precede is not writable: the intake owns both the append
 and the call, and falsifier F16 asserts the order.
 
-**Decision — a dedicated squash cause, `Puppeteer_abort of { reason :
+**Decision — a dedicated squash cause, `Supervisor_abort of { reason :
 string }`.** The settled map's rule is that a reader sees the real cause —
 the same ruling that forbade spelling reissue-losers as operator aborts
-(`40-scheduling.md` § settlement). A puppeteer kill spelled `Operator_abort`
+(`40-scheduling.md` § settlement). A supervisor kill spelled `Operator_abort`
 lies about who acted and severs the audit trail from the `Steered` event
-that ordered it. **Alternative:** reuse `Operator_abort` (the puppeteer
+that ordered it. **Alternative:** reuse `Operator_abort` (the supervisor
 "is" an operator) — lost on exactly that rule: the operator is sovereign
-and unaccountable; the puppeteer is accountable by design, and its cause
+and unaccountable; the supervisor is accountable by design, and its cause
 must be traceable to its evented reason. **Alternative:** generalize to
-`Abort of { by : [ `Operator | `Puppeteer ]; reason : string }` — lost
+`Abort of { by : [ `Operator | `Supervisor ]; reason : string }` — lost
 because it churns every existing match to carry a distinction one new
 constructor carries alone. **Reverses if:** a third killer class appears
 (a policy daemon, a second supervision plane) — then the by-field
@@ -371,7 +390,7 @@ never for the single listening point; the note-sum shape itself reverses
 if the fiber substrate ever types yields per statement shape (then the
 note sum is per-contract data).
 
-**Decision — the puppeteer's pin bump applies mid-run.** The recorded
+**Decision — the supervisor's pin bump applies mid-run.** The recorded
 correction lane for a mis-routed shape was "a pin bump on the next theory"
 (`60-agents.md`). A mid-run provider incident — a refusal storm, a latency
 collapse, a model behaving out of character on one shape — is exactly the
@@ -386,7 +405,7 @@ as a norm) — then the lane narrows to provider-incident causes only.
 
 ## Unforgeability by construction
 
-**The puppeteer gets an operator's powers, never a god's.** The forbidden
+**The supervisor gets an operator's powers, never a god's.** The forbidden
 powers, enumerated, each with the representation that makes it
 unconstructible and the F15 negative-compilation probe that pins it
 (HANDOFF: `80-validation.md` F15 roster):
@@ -396,7 +415,7 @@ unconstructible and the F15 negative-compilation probe that pins it
    witnesses), and the session's surface exposes no `Ledger.append` — its
    ledger handle is the reader surface. *Probe P1: appending a
    hand-built `Event.kind.Load` through any value reachable from
-   `Puppeteer.session` must not typecheck.*
+   `Supervisor.session` must not typecheck.*
 2. **It cannot mint or commit a tuple.** No `Id.Minter.t`, no
    `Retire.Committed.t`, and no channel end is reachable from the session;
    the `Steer` sum has no tuple-bearing constructor. *Probe P2: obtaining
@@ -413,7 +432,7 @@ unconstructible and the F15 negative-compilation probe that pins it
    already pins this; the steer adds no second path.*
 5. **It cannot loosen its own leash.** `Tune` has no constructor for the
    session's own stop bounds — the leash is `attach`'s operator-supplied
-   argument (§ the puppeteer beside the machine). *Probe P4: a `Tune`
+   argument (§ the supervisor beside the machine). *Probe P4: a `Tune`
    value naming the session budget must not typecheck (no constructor).*
 6. **It cannot steer unrecorded.** The intake appends `Steered` before
    applying; the application functions are not exposed apart from it.
@@ -433,7 +452,7 @@ applied to the supervisor.
 
 ## Statelessness via the ledger
 
-**A puppeteer session holds no state a fresh session cannot rebuild from
+**A supervisor session holds no state a fresh session cannot rebuild from
 the ledger.** This is not a discipline; it is the falsified completeness
 law doing new work: replay determinism already asserts that every input to
 every decision is ledger-recorded (`80-validation.md` § replay
@@ -471,7 +490,7 @@ pull):
 **Decision — no new checkpoint representation.** The boot query is served
 entirely by existing surfaces plus this doc's reader; the only addition is
 `Observe` (an event, not a store) and the succession event.
-**Alternative:** a periodic puppeteer checkpoint blob (a serialized
+**Alternative:** a periodic supervisor checkpoint blob (a serialized
 "understanding of the run" the successor deserializes) — lost because it
 is a summary held in a head with extra steps: unaudited judgment
 compressed into an unreplayable artifact, exactly the ultracode failure
@@ -481,9 +500,9 @@ query) dominates the session bill on long runs — the recorded upgrade is a
 *derived* digest cache (a pure function of the ledger, recomputable and
 therefore not a second supply), never an authored checkpoint.
 
-## The puppeteer beside the machine
+## The supervisor beside the machine
 
-The deepest representational question: is the puppeteer **inside** the
+The deepest representational question: is the supervisor **inside** the
 theory — an agent-template node with a standing grant, its reads ledger
 queries, its writes the steering vocabulary — or **beside** it, a
 host-level surface like `Run.handle`?
@@ -493,19 +512,19 @@ accounting, mechanized witnessing, and settlement discipline for free, and
 "the planner is an agent template like any other" (`60-agents.md`) argues
 the supervisor should be too. The case collapses on the representation:
 a node is *one firing of a dependency statement* — body tuples in, head
-tuples out, one settlement, counted by quiescence. The puppeteer fires on
+tuples out, one settlement, counted by quiescence. The supervisor fires on
 no body match, mints no head tuples, and **never settles while the run
 lives**; a standing node poisons quiescence ("every started node has
 settled") unless quiescence grows an exemption representation, and an
 exemption for exactly one privileged node is a guard wearing a type's
-clothing — doc rule 8 read against itself. Worse, a puppeteer-in-theory
+clothing — doc rule 8 read against itself. Worse, a supervisor-in-theory
 makes the supervisor's own events fireable facts: its steers would be
 tuples, its subscriptions edges, and the theory acquires a reader of every
 relation whose writes feed back into scheduling — a cycle in the one graph
 the whole design keeps acyclic, exempted only by the scheduler because
 the scheduler is mechanical and the theory cannot see it.
 
-**Decision — beside the theory, inside the audit.** The puppeteer is a
+**Decision — beside the theory, inside the audit.** The supervisor is a
 host-level standing session attached to a `Run.handle`, and its runtime is
 the same `Agent.agent` layer over a provider lane as every worker — one
 tool loop, one grant boundary, one eventing path — with a supervision
@@ -524,7 +543,7 @@ cycle, the settled map polluted by a node that is not work).
 **Reverses if:** human-in-the-loop nodes (`README.md` OPEN) force a
 standing-node representation into the theory anyway — a human approver is
 also a long-lived non-settling participant, and if that work builds the
-exemption representation honestly, the puppeteer collapses onto it and
+exemption representation honestly, the supervisor collapses onto it and
 the host surface is deleted; or if supervision itself needs adversarial
 review *as a theory* (refuter panels over steers), which requires steers
 to be tuples — the recorded growth path below gets there without the
@@ -536,11 +555,11 @@ the applications; `Report.explain` on a steered node names the steerer and
 its reason); the **operator** (the session is host-owned: the leash is the
 operator's argument at `attach`, `detach` is unconditional, and the same
 steer intake serves the operator's own interventions — so a manual abort
-is exactly as recorded as a puppeteer's, closing the unrecorded-manual-
+is exactly as recorded as a supervisor's, closing the unrecorded-manual-
 intervention hole from the same class); and, as the recorded growth path,
 **the machine itself**: a run's `Steered` events are seedable facts, so an
 adversarial review of a run's supervision is census workload #2 over its
-own ledger — representable today, built when a puppeteer's judgment first
+own ledger — representable today, built when a supervisor's judgment first
 costs a run something a refuter would have caught.
 
 **The session surface** (doc-resident with the module, § below):
@@ -587,14 +606,14 @@ what watching cost exactly as they read what speculation cost.
 
 ## The module
 
-**The `Puppeteer` module is doc-resident: this doc's signatures are its
+**The `Supervisor` module is doc-resident: this doc's signatures are its
 `.mli` until the implementation trigger, and no lib module lands before it
 has a consumer** (the anti-transcription rule — an unconsumed supervision
 layer is transcription of this doc into dead code). The module's
 implementation trigger: **the first live pipeline whose ledger shows a
 Wake-class condition (a fault, a `Ceiling_bound`, a churn switch) that the
 operator learned of only from the settled map** — the measured form of
-"nobody was watching." At the trigger, the module lands as `lib/puppeteer`
+"nobody was watching." At the trigger, the module lands as `lib/supervisor`
 with exactly these signatures (`Subscription`, `Supervision` as ledger
 reader 5, `Tune`, `Steer`, the session surface), plus the HANDOFF
 amendments in the same change, per doc rule 4.
@@ -623,7 +642,7 @@ amendments in the same change, per doc rule 4.
   straddles a handoff — is unbuilt. *Trigger: the first session that
   faults mid-incident.*
 - **Steer contention.** Two occupants of the intake (operator and
-  puppeteer) can steer the same target oppositely; v0 is last-write-wins
+  supervisor) can steer the same target oppositely; v0 is last-write-wins
   with both recorded, and the operator's remedy is `detach`. *Trigger: the
   first contradictory steer pair in a real ledger.*
 
@@ -636,16 +655,16 @@ with the merge):
 
 1. **`docs/architecture/30-channels.md` § the ledger** — "One log, four
    named readers" becomes five; add reader 5: *"**Supervision** — the
-   puppeteer's subscription-filtered escalation query and drill-down
-   surface, pull-only (`90-puppeteer.md`)."*
+   supervisor's subscription-filtered escalation query and drill-down
+   surface, pull-only (`90-supervisor.md`)."*
 2. **`lib/ledger.mli`** — the header's "four named readers" comment
    likewise; add the `Supervision` reader module (this doc's signature);
-   `Squash_cause` gains `Puppeteer_abort of { reason : string }`;
+   `Squash_cause` gains `Supervisor_abort of { reason : string }`;
    `Event.kind` gains `Steered of { steer : (* compact form of Steer.t;
    payloads by Delta_ref *); reason : string; counters : (string * float)
    list }` and `Supervisor_session of { succeeding : node Id.t option }`.
 3. **`lib/speculate.mli`** — `Switch.throw`'s `thrown_by` widens to
-   ``[ `Operator | `Scheduler | `Puppeteer ]``; the yield-note type
+   ``[ `Operator | `Scheduler | `Supervisor ]``; the yield-note type
    generalizes to the sum ``Drift of Drift.note | Supervisory of { text :
    string; delta : Ledger.Delta_ref.t option; disposition : [ `Continue |
    `Patch_then_continue ] }`` (with `Drift.note` unchanged inside it).
@@ -659,8 +678,8 @@ with the merge):
    entry to the same intake); `Report.summary` gains a supervision usage
    line beside the speculation account (`lib/report.mli`).
 6. **`docs/architecture/40-scheduling.md` § settlement** — the squash
-   cause list gains the puppeteer cause, with the same
-   never-mislabeled rule extended: a puppeteer kill is never spelled as an
+   cause list gains the supervisor cause, with the same
+   never-mislabeled rule extended: a supervisor kill is never spelled as an
    operator abort.
 7. **`docs/architecture/60-agents.md`** — § drift notes at yield notes the
    supervisory case of the note sum; § model pins records the mid-run bump
@@ -670,12 +689,12 @@ with the merge):
    (§ unforgeability); the roster gains **F16 — witnessed steering** (a
    rigged session drives every `Steer` constructor; each application's
    machinery events are preceded by its `Steered` event; replay reproduces
-   every application with puppeteer turns substituted from the ledger) and
+   every application with supervisor turns substituted from the ledger) and
    **F17 — supervision never delays dispatch** (an arbitrarily slow rigged
-   puppeteer turn changes no unrelated node's dispatch timing; F4's
+   supervisor turn changes no unrelated node's dispatch timing; F4's
    instrumentation extended over the feed fold).
 9. **`docs/architecture/README.md`** — the documents table gains the
-   `90-puppeteer.md` row: *"The supervisory plane: the fifth ledger
+   `90-supervisor.md` row: *"The supervisory plane: the fifth ledger
    reader and its subscription table, the typed steering vocabulary,
    unforgeability probes, session succession, the beside-the-machine
    ruling."*

@@ -5,7 +5,7 @@ Status: **the flat-org redesign, in flight.** Until the migration lands,
 describe the shipped worktree machine and this doc is the design of record
 for its successor; each migration step amends the owning doc in the same
 change (doc rule 4) and strikes the corresponding HANDOFF row below. The
-cross-cutting puppeteer surface (`90-puppeteer.md`) is in flight on a
+cross-cutting supervisor surface (`90-supervisor.md`) is in flight on a
 sibling branch; where this doc touches its territory (leveled interruption,
 the anti-firehose law) it cites the shared ruling, never the file.
 
@@ -63,7 +63,7 @@ It is three existing channels, now ambient: (a) snoop reads of the shared
 tree — every read of in-flight state is a tracked hypothesis, no mount to
 arrange; (b) drift notes at yield, footprint-filtered (landed, B3/B6);
 (c) the operand and channel machinery. Full visibility, leveled
-interruption — the same anti-firehose law as the puppeteer design:
+interruption — the same anti-firehose law as the supervisor design (90-supervisor.md):
 notifications are invalidations, payloads are pulled, and nothing
 interrupts a turn mid-flight.
 
@@ -443,7 +443,7 @@ ledger's live frontier. Workers start at t=0, read ambiently within their
 grants, and *sense* each other through witnessed state: a read of a
 neighbor's in-flight draft is a tracked hypothesis, a neighbor's landing
 is an invalidation, a divergence is a drift note at the next yield with
-its route already decided. The puppeteer sits above with the same
+its route already decided. The supervisor sits above with the same
 anti-firehose law — full visibility, leveled interruption. Speculation is
 the concurrency model: every overlap the machine wins is a bet the ledger
 can settle, and every conflict it admits is one the ledger can attribute
