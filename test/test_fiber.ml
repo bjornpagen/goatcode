@@ -55,6 +55,8 @@ let show_cause = function
   | Ledger.Squash_cause.Dead_hypothesis h -> "dead-hypothesis " ^ Id.to_string h
   | Ledger.Squash_cause.Upstream_fault n -> "upstream-fault " ^ Id.to_string n
   | Ledger.Squash_cause.Upstream_squash n -> "upstream-squash " ^ Id.to_string n
+  | Ledger.Squash_cause.Reissue_loser -> "reissue-loser"
+  | Ledger.Squash_cause.No_producer -> "no-producer"
 
 let show_settlement show = function
   | None -> "unsettled"
