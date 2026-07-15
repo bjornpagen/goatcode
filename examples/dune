@@ -1,0 +1,8 @@
+; The live smoke: a hand-declared theory linked against the library —
+; the "compile it against the library" shape the CLI's run-it-yourself
+; guidance names, written out once. Never run by the test suite (it is a
+; live model call); build-only here.
+(executables
+ (names haiku_live coding_live calc_live dump_ledger)
+ (modules haiku_live coding_live calc_live dump_ledger)
+ (libraries goatcode))
