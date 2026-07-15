@@ -141,6 +141,26 @@ Working tree: clean except `.claude/` (untracked, ignore).
   `https://platform.openai.com/docs/api-reference/responses` (or WebFetch)
   before trusting the field names.
 
+## Effects ruling (operator, 2026-07-14)
+
+**Go full OCaml 5 effects.** Overrides run.mli's "blocking in v0" posture
+and the earlier stop-short reasoning; part of the motive is testing the
+language itself before the substrate decision (OxCaml vs Rust — effects
+are the one feature with no Rust analogue, so this port IS evidence for
+the substrate ruling). Verified on the switch: perform/continue work, and
+`discontinue` runs `Fun.protect` finalizers — squash-by-discontinue with
+worktree cleanup is real. `Curl.Multi` is available for HTTP-as-an-effect.
+
+Sequencing (ownership-driven, not timidity): a substrate agent builds
+`lib/fiber` NOW in parallel with wave 1 (effect vocabulary as typed data,
+Deep-handler scheduler, park/resume/squash, curl-multi HTTP effect,
+falsifiers, and `docs/effects-evaluation.md` — the language-test report);
+the wave-2 tail mounts chase dispatch + the agent loop on it after the
+B-findings rewiring lands, so the port wraps the wired engine, not the
+skeleton. The evaluation doc is a first-class deliverable: what effects
+bought, every sharp edge (untyped effects, one-shot continuations,
+Unhandled, OxCaml quirks), and what it implies for the Rust port trigger.
+
 ## The plan — three phases
 
 ### Phase A — executor rebuild (executor layer only) — DONE, see "Where we are"
