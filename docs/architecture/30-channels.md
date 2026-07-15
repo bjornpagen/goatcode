@@ -124,6 +124,24 @@ my read-set × your write-set at a newer generation — memory disambiguation,
 mechanized. Reader: `50-commit.md`'s conflict judge; this is also why the
 witness needs no trust boundary of its own.
 
+What a load may *claim* is decided by **where the read was served from**
+(the self-witness ruling): a read served from committed bytes (the
+checkout base, or the committed tree through a read-glob) witnesses the
+real committed (generation, content); a read served from another node's
+in-flight buffer is an in-flight observation (generation zero, content
+judged when that producer lands); a read served from the node's **own
+draft** is store-to-load forwarding of its own in-flight work and claims
+**nothing** — such a triple could never hold at the node's own retire
+(its landing hasn't happened when the witness is judged), and a vacuous
+one would shield the conflict judgment. The Load event is still appended
+(the footprint is real); only the witness triple is withheld. Likewise a
+`glob_list` observes the listing itself: a listed path whose committed
+state is Landed witnesses the committed (generation, content) pair
+straight from the lookup; a path that exists only in flight contributes
+no triple — existence-of-uncommitted is not a witnessable claim in v0
+(the listing-shaped witness belongs to the flat-org grant rework,
+`91-flat-org.md`).
+
 ## Invalidate, don't update
 
 **A notification is an invalidation — small, typed, payload-free:**

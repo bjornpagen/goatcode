@@ -940,12 +940,70 @@ let walk root =
   go "";
   List.rev !acc
 
+(* The node's draft set: which paths its own buffer has CHANGED relative
+   to the checkout base. The buffer is a detached checkout of the
+   committed tree (Retire.Worktree), so a file merely EXISTING there is
+   usually committed bytes; only a changed path is the node's own
+   in-flight work. [-uall] so an untracked file inside an untracked
+   directory is listed by its own path. [None]: the buffer is a bare
+   directory (no enclosing repository — Worktree.create's fallback),
+   where every file was stored by this node, so everything is a draft. *)
+let buffer_changes root =
+  (* "XY path" or "XY old -> new": the change lives at the new path — the
+     same porcelain read Retire.Worktree coalesces net deltas from. *)
+  let porcelain_path line =
+    if String.length line < 4 then None
+    else
+      let path = String.sub line 3 (String.length line - 3) in
+      let path =
+        let marker = " -> " in
+        let n = String.length path and m = String.length marker in
+        let rec find i =
+          if i + m > n then None
+          else if String.equal (String.sub path i m) marker then Some (i + m)
+          else find (i + 1)
+        in
+        match find 0 with
+        | Some i -> String.sub path i (n - i)
+        | None -> path
+      in
+      let n = String.length path in
+      if n >= 2 && path.[0] = '"' && path.[n - 1] = '"' then
+        Some (String.sub path 1 (n - 2))
+      else Some path
+  in
+  let ic =
+    Unix.open_process_in
+      (Printf.sprintf "git -C %s status --porcelain -uall 2>/dev/null"
+         (Filename.quote root))
+  in
+  let lines = In_channel.input_lines ic in
+  match Unix.close_process_in ic with
+  | Unix.WEXITED 0 -> Some (List.filter_map porcelain_path lines)
+  | _ -> None
+
 (* Where one in-bounds path reads from, decided once: worktree draft, then
    the committed checkout when a read_glob admits it, then snoop mounts.
    [`Missing] (in-grant, absent on disk) and [`Outside_grant] carry the
-   distinction the two failure messages need — no caller re-derives it. *)
+   distinction the two failure messages need — no caller re-derives it.
+
+   [place] records WHERE the read is served from — the fact the observed
+   witness needs (see [load_observation]): the node's own draft, committed
+   bytes (the checkout base or the committed tree at the process CWD), or
+   another node's in-flight buffer. A worktree-served file is a draft only
+   when the buffer CHANGED it; an unchanged worktree file is the checkout
+   base — committed bytes as of the buffer's fork, which is exactly what a
+   staleness judgment must see (falsifier F6). *)
 module Source = struct
-  type t = { rel : string; disk : string }
+  type place = Draft | Committed | Snooped
+
+  type t = { rel : string; disk : string; place : place }
+
+  let place_in_buffer ~changes rel =
+    match changes with
+    | None -> Draft
+    | Some changed ->
+        if List.exists (String.equal rel) changed then Draft else Committed
 
   let resolve (grant : _ Grant.t) (path : Relpath.t) =
     let rel = Relpath.to_string path in
@@ -953,14 +1011,25 @@ module Source = struct
     let in_globs =
       List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
     in
-    if Sys.file_exists draft then Ok { rel; disk = draft }
-    else if in_globs && Sys.file_exists rel then Ok { rel; disk = rel }
+    if Sys.file_exists draft then
+      Ok
+        {
+          rel;
+          disk = draft;
+          place =
+            place_in_buffer
+              ~changes:(buffer_changes grant.Grant.worktree_root)
+              rel;
+        }
+    else if in_globs && Sys.file_exists rel then
+      Ok { rel; disk = rel; place = Committed }
     else
       match
         List.find_map
           (fun mount ->
             let disk = Filename.concat mount rel in
-            if Sys.file_exists disk then Some { rel; disk } else None)
+            if Sys.file_exists disk then Some { rel; disk; place = Snooped }
+            else None)
           grant.Grant.snoop_mounts
       with
       | Some source -> Ok source
@@ -977,24 +1046,29 @@ let static_prefix pattern =
   in
   String.concat "/" (take [] (String.split_on_char '/' pattern))
 
-(* Every (relative path, on-disk path) the grant lets this node read for
-   [pattern], deduped with worktree drafts shadowing committed state
-   shadowing snoop mounts (store-to-load forwarding order,
-   docs/architecture/30-channels.md). *)
+(* Every (relative path, on-disk path, place) the grant lets this node
+   read for [pattern], deduped with worktree drafts shadowing committed
+   state shadowing snoop mounts (store-to-load forwarding order,
+   docs/architecture/30-channels.md). The buffer's change set is read
+   once and each worktree file's place derives from it, exactly as
+   [Source.resolve] judges a single path. *)
 let readable_matches (grant : _ Grant.t) pattern =
   let seen = Hashtbl.create 16 in
-  let add acc rel disk =
+  let add acc rel disk place =
     if Hashtbl.mem seen rel then acc
     else begin
       Hashtbl.add seen rel ();
-      (rel, disk) :: acc
+      (rel, disk, place) :: acc
     end
   in
+  let changes = buffer_changes grant.Grant.worktree_root in
   let acc =
     List.fold_left
       (fun acc rel ->
         if glob_matches pattern rel then
-          add acc rel (Filename.concat grant.Grant.worktree_root rel)
+          add acc rel
+            (Filename.concat grant.Grant.worktree_root rel)
+            (Source.place_in_buffer ~changes rel)
         else acc)
       []
       (walk grant.Grant.worktree_root)
@@ -1016,7 +1090,7 @@ let readable_matches (grant : _ Grant.t) pattern =
         if
           glob_matches pattern rel
           && List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
-        then add acc rel rel
+        then add acc rel rel Source.Committed
         else acc)
       acc committed
   in
@@ -1026,7 +1100,7 @@ let readable_matches (grant : _ Grant.t) pattern =
         List.fold_left
           (fun acc rel ->
             if glob_matches pattern rel then
-              add acc rel (Filename.concat mount rel)
+              add acc rel (Filename.concat mount rel) Source.Snooped
             else acc)
           acc (walk mount))
       acc grant.Grant.snoop_mounts
@@ -1139,22 +1213,42 @@ let path_arg ~tool ~boundary name input : (Relpath.t, Tool.failure) result =
 let read_boundary = "reads: read_globs + your worktree + snoop mounts"
 let write_boundary = "writes: your worktree only"
 
-(* Observed witness triples for tool loads: the content hash by
-   observation, the generation from the committed-state lookup the
-   invocation carries — a load of a committed address witnesses the REAL
-   committed generation; in-flight and absent addresses stay at [zero],
-   the content hash carrying the commit-point judgment either way (B7:
-   [Witness.holds] judges content; the generation is law 2's shadow). *)
-let load_triple ~committed rel bytes =
+(* What one served read may CLAIM in the observed witness, decided by the
+   place it was served from (the self-witness ruling, wave 3):
+
+   - [Committed]: the read observed committed bytes (the checkout base or
+     the committed tree) — stamp the REAL committed generation from the
+     lookup the invocation carries; the content hash is the bytes
+     actually read, so a stale checkout still fails [Witness.holds]
+     (falsifier F6). An address with no committed entry stays at [zero]
+     with the content carrying the commit-point judgment (B7).
+   - [Snooped]: an in-flight observation of another node's buffer —
+     generation zero, content judged when that producer lands (F7's
+     free-commit discrimination).
+   - [Draft]: store-to-load forwarding of the node's OWN in-flight work —
+     not an observation of shared state, so it claims NOTHING. A draft
+     triple could never hold at the node's own retire (its landing has
+     not happened when the witness is judged: pre-fix, an edited file
+     read back poisoned the witness into spurious Witness_moved
+     reissues), and a vacuously-held one would shield the conflict
+     judgment's witnessed-membership proof. The claims that gate
+     retirement are the committed reads that seeded the draft and the
+     write's base coordinate. *)
+let load_observation ~committed ~place rel bytes =
   let address = Ledger.Address.File rel in
-  let generation =
-    match committed address with
-    | Witness.Committed_state.Landed { generation; _ }
-    | Witness.Committed_state.Deleted { generation } ->
-        generation
-    | Witness.Committed_state.Absent -> Ledger.Generation.zero
-  in
-  (address, generation, Ledger.Content_hash.of_string bytes)
+  match (place : Source.place) with
+  | Source.Draft -> []
+  | Source.Snooped ->
+      [ (address, Ledger.Generation.zero, Ledger.Content_hash.of_string bytes) ]
+  | Source.Committed ->
+      let generation =
+        match committed address with
+        | Witness.Committed_state.Landed { generation; _ }
+        | Witness.Committed_state.Deleted { generation } ->
+            generation
+        | Witness.Committed_state.Absent -> Ledger.Generation.zero
+      in
+      [ (address, generation, Ledger.Content_hash.of_string bytes) ]
 
 let decl name description props ~required : Provider.Tool_decl.t =
   {
@@ -1204,7 +1298,7 @@ let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
             Error
               (Tool.Errored
                  ("read_file: no such file: " ^ Relpath.to_string path))
-        | Ok { Source.rel; disk } -> (
+        | Ok { Source.rel; disk; place } -> (
             match read_file_bytes disk with
             | exception Sys_error m -> Error (Tool.Errored ("read_file: " ^ m))
             | bytes ->
@@ -1216,7 +1310,8 @@ let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
                         Ledger.Event.Load
                           {
                             tool = "read_file";
-                            observed = [ load_triple ~committed rel bytes ];
+                            observed =
+                              load_observation ~committed ~place rel bytes;
                           };
                       ];
                   }));
@@ -1297,18 +1392,19 @@ let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
             Error
               (Tool.Errored
                  ("str_replace_edit: no such file: " ^ Relpath.to_string path))
-        | Ok { Source.rel; disk } -> (
+        | Ok { Source.rel; disk; place } -> (
             match read_file_bytes disk with
             | exception Sys_error m ->
                 Error (Tool.Errored ("str_replace_edit: " ^ m))
             | bytes -> (
                 (* An edit is a read of the source (committed or draft)
-                   plus a store into the draft — both evented. *)
+                   plus a store into the draft — both evented; only a
+                   committed-served source claims a witness triple. *)
                 let read_event =
                   Ledger.Event.Load
                     {
                       tool = "str_replace_edit";
-                      observed = [ load_triple ~committed rel bytes ];
+                      observed = load_observation ~committed ~place rel bytes;
                     }
                 in
                 match count_occurrences ~needle:old_str bytes with
@@ -1371,17 +1467,34 @@ let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =
           {
             Tool.payload =
               Yojson.Safe.to_string
-                (`List (List.map (fun (rel, _) -> `String rel) matches));
+                (`List (List.map (fun (rel, _, _) -> `String rel) matches));
             (* The observation a glob contributes is the listing itself:
-               which paths exist. *)
+               which paths exist. For a path whose committed state is
+               Landed, the listing witnesses the committed (generation,
+               content) pair straight from the lookup — the node read no
+               bytes, so the recorded content is the committed record,
+               never a hash of the path string. A path that exists only
+               in flight (a draft, a snoop, absent from committed state)
+               contributes no triple: existence-of-uncommitted is not a
+               claim [Witness.holds] can judge in v0 — the recorded
+               choice; the listing-shaped witness belongs to the
+               flat-org grant rework (docs/architecture/91-flat-org.md). *)
             events =
               [
                 Ledger.Event.Load
                   {
                     tool = "glob_list";
                     observed =
-                      List.map
-                        (fun (rel, _) -> load_triple ~committed rel rel)
+                      List.filter_map
+                        (fun (rel, _, _) ->
+                          let address = Ledger.Address.File rel in
+                          match committed address with
+                          | Witness.Committed_state.Landed
+                              { generation; content } ->
+                              Some (address, generation, content)
+                          | Witness.Committed_state.Absent
+                          | Witness.Committed_state.Deleted _ ->
+                              None)
                         matches;
                   };
               ];
@@ -1416,12 +1529,13 @@ let grep_tool ~committed (grant : _ Grant.t) : Tool.t =
         let observed = ref [] in
         let hits = ref 0 in
         List.iter
-          (fun (rel, disk) ->
+          (fun (rel, disk, place) ->
             if !hits < 200 then
               match read_file_bytes disk with
               | exception Sys_error _ -> ()
               | bytes ->
-                  observed := load_triple ~committed rel bytes :: !observed;
+                  observed :=
+                    load_observation ~committed ~place rel bytes @ !observed;
                   List.iteri
                     (fun i line ->
                       if !hits < 200 && contains ~needle:pattern line then begin

@@ -160,12 +160,16 @@ module Invocation : sig
     grant : 'status Grant.t;
     pin : Theory.Pin.t;
     committed : Ledger.Address.t -> Witness.Committed_state.t;
-        (** The committed-state lookup tool loads witness against: a load
-            of a committed address enters the observed witness at its real
-            committed generation; in-flight and absent addresses stay at
-            [Ledger.Generation.zero], with the content hash carrying the
-            commit-point judgment either way
-            (docs/architecture/50-commit.md § law 3). The chase supplies
+        (** The committed-state lookup tool loads witness against. What a
+            load may claim is decided by where the read was served from
+            (the self-witness ruling,
+            docs/architecture/30-channels.md § mechanized witnesses): a
+            read served from committed bytes enters the observed witness
+            at its real committed generation; a snooped in-flight read
+            stays at [Ledger.Generation.zero] with the content hash
+            carrying the commit-point judgment
+            (docs/architecture/50-commit.md § law 3); a read served from
+            the node's OWN draft claims nothing. The chase supplies
             [Retire.Committed.state] over the run's committed store;
             direct callers outside any engine supply
             [fun _ -> Witness.Committed_state.Absent]. *)

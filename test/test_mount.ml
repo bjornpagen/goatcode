@@ -104,7 +104,7 @@ let admit ~relations ~statements =
       List.iter (fun e -> print_endline (Theory.Admission.to_string e)) errors;
       failwith "theory did not admit"
 
-let sandbox prefix =
+let sandbox ?(files = []) prefix =
   let root = Filename.temp_dir prefix "" in
   let repo = Filename.concat root "repo" in
   Unix.mkdir repo 0o755;
@@ -113,6 +113,15 @@ let sandbox prefix =
       failwith ("fixture command failed: " ^ cmd)
   in
   sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
+  (* Optional committed fixture files: pre-run repository state a node
+     may read through its worktree checkout. *)
+  List.iter
+    (fun (path, contents) ->
+      Out_channel.with_open_bin (Filename.concat repo path) (fun oc ->
+          Out_channel.output_string oc contents))
+    files;
+  if files <> [] then
+    sh (Printf.sprintf "git -C %s add -A" (Filename.quote repo));
   sh
     (Printf.sprintf
        "git -C %s -c user.name=goatcode-test -c user.email=test@localhost \
@@ -647,9 +656,11 @@ let%expect_test "FM4: a breaking-broad note at a yield discontinues the \
   in
   (* Speculation default-on: the watcher starts against writer-two's
      store buffer and is IN FLIGHT when writer-two's retirement moves
-     shared.txt. Its one assistant turn writes AND reads its draft of
-     the moved file in a single batch, so the yield after the batch
-     drains the invalidation against a witness that provably read it:
+     shared.txt. Its one assistant turn drafts its own product AND reads
+     the committed fixture shared.txt through its checkout in a single
+     batch (a read of its own draft would claim nothing — the
+     self-witness ruling), so the yield after the batch drains the
+     invalidation against a witness that provably read the moved file:
      breaking-broad, flush, stop-cleanly — the handler discontinues, and
      the transport never sees another submit from this fiber. *)
   let merges =
@@ -666,7 +677,7 @@ let%expect_test "FM4: a breaking-broad note at a yield discontinues the \
             "write_file",
             `Assoc
               [
-                ("path", `String "shared.txt"); ("content", `String "draft");
+                ("path", `String "product.txt"); ("content", `String "draft");
               ] );
           ("t2", "read_file", `Assoc [ ("path", `String "shared.txt") ]);
         ];
@@ -695,13 +706,18 @@ let%expect_test "FM4: a breaking-broad note at a yield discontinues the \
             order);
     }
   in
-  let ((_, worktrees, _) as sb) = sandbox "goat_fm4_" in
+  let ((_, worktrees, _) as sb) =
+    sandbox ~files:[ ("shared.txt", "zero\n") ] "goat_fm4_"
+  in
   let chase, ledger =
     engine ~merges ~theory
       ~executors:
         [
+          (* writer-one writes its OWN product: shared.txt (a committed
+             fixture) moves exactly once — at writer-two's landing — so
+             the yield drains exactly one invalidation. *)
           rigged ~by:w1
-            ~script:[ write_tool "shared.txt" "one"; R.Reply {|{"msg":"m1"}|} ];
+            ~script:[ write_tool "w1.txt" "one"; R.Reply {|{"msg":"m1"}|} ];
           rigged ~by:w2
             ~script:[ write_tool "shared.txt" "two"; R.Reply {|{"msg":"m2"}|} ];
           fibered_anthropic ~by:c;

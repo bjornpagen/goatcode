@@ -909,8 +909,10 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
                 ("content", `String "let x = 1\n");
               ];
         };
-      (* The node snoops its own store buffer: the draft it just wrote is
-         readable back. *)
+      (* The node reads its own store buffer: the draft it just wrote is
+         readable back, and the Load is evented — but it observes NOTHING
+         (store-to-load forwarding of in-flight work claims no witness
+         triple; the self-witness ruling, wave 3). *)
       Agent.Rigged.Call_tool
         {
           name = "read_file";
@@ -957,7 +959,7 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     Ok "done"
     draft landed in worktree: true
     Store write_file at file:src/gen.ml (delta src/gen.ml)
-    Load read_file observing [file:src/gen.ml]
+    Load read_file observing []
     |}]
 
 (* ------------------------------------------------------------------ *)

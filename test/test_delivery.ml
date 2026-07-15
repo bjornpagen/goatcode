@@ -80,7 +80,7 @@ let admit ~relations ~statements =
    generation moves, and the write log all ride it
    (docs/architecture/50-commit.md § durability boundary). Store buffers
    live inside it so they are real git worktrees. *)
-let sandbox ?file prefix =
+let sandbox ?(files = []) prefix =
   let root = Filename.temp_dir prefix "" in
   let repo = Filename.concat root "repo" in
   Unix.mkdir repo 0o755;
@@ -89,14 +89,15 @@ let sandbox ?file prefix =
       failwith ("fixture command failed: " ^ cmd)
   in
   sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
-  (* An optional committed fixture file: pre-run repository state a node
+  (* Optional committed fixture files: pre-run repository state a node
      may read through its worktree checkout. *)
-  (match file with
-  | None -> ()
-  | Some (path, contents) ->
+  List.iter
+    (fun (path, contents) ->
       Out_channel.with_open_bin (Filename.concat repo path) (fun oc ->
-          Out_channel.output_string oc contents);
-      sh (Printf.sprintf "git -C %s add -A" (Filename.quote repo)));
+          Out_channel.output_string oc contents))
+    files;
+  if files <> [] then
+    sh (Printf.sprintf "git -C %s add -A" (Filename.quote repo));
   sh
     (Printf.sprintf
        "git -C %s -c user.name=goatcode-test -c user.email=test@localhost \
@@ -451,17 +452,19 @@ let%expect_test "delivery: the invalidation and the typed drift note reach \
     |}]
 
 (* ------------------------------------------------------------------ *)
-(* The drift table's rejection-site consumer (B6). A consumer drafts and
-   reads its own copy of a file a sibling lands differently; the sibling
-   retires first, the consumer's witness fails, and the rejection is
-   classified per consumer and routed by the table:
+(* The drift table's rejection-site consumer (B6). A consumer reads the
+   committed base (its checkout) of a file a sibling lands differently;
+   the sibling retires first, the consumer's witness fails, and the
+   rejection is classified per consumer and routed by the table:
    - reads ONLY the moved file: the move touches all of its reads —
      breaking-broad, flush the subtree;
    - reads the moved file and one other: a minority moved —
      breaking-narrow, reconcile (serialize-reissue in the synchronous v0
      engine).
    Both reissue bounded; the second attempt retires against the landed
-   state. *)
+   state. (The reads are committed fixtures, not the consumer's own
+   drafts: a draft read claims nothing in the witness — the self-witness
+   ruling, wave 3.) *)
 
 let run_moved_witness ~consumer_script =
   let task = json_relation "task" in
@@ -487,7 +490,11 @@ let run_moved_witness ~consumer_script =
             ~by:drafter ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_moved_" in
+  let repo, worktrees, ledger_path =
+    sandbox
+      ~files:[ ("shared.txt", "base\n"); ("other.txt", "o1\n") ]
+      "goat_moved_"
+  in
   let executors =
     [
       binding ~by:lander
@@ -531,7 +538,6 @@ let%expect_test "drift table at the rejection site: a move touching every \
   run_moved_witness
     ~consumer_script:
       [
-        write_tool "shared.txt" "draft";
         read_tool "shared.txt";
         R.Reply {|{"msg":"c1"}|};
         R.Reply {|{"msg":"c2"}|};
@@ -550,9 +556,7 @@ let%expect_test "drift table at the rejection site: a minority move \
   run_moved_witness
     ~consumer_script:
       [
-        write_tool "shared.txt" "draft";
         read_tool "shared.txt";
-        write_tool "other.txt" "mine";
         read_tool "other.txt";
         R.Reply {|{"msg":"c1"}|};
         R.Reply {|{"msg":"c2"}|};
@@ -867,29 +871,29 @@ let%expect_test "footprint escape: an uncovered load surfaces at retire as \
             ~by:covered ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_escape_" in
+  let repo, worktrees, ledger_path =
+    sandbox
+      ~files:[ ("notes.txt", "n1\n"); ("covered.txt", "c1\n") ]
+      "goat_escape_"
+  in
   let executors =
     [
-      (* The escapee drafts and re-reads notes.txt — twice, so the
-         one-event-per-address dedup is exercised — with an empty
-         read_globs declaration: the load lands outside the compiled
-         footprint. *)
+      (* The escapee reads the committed fixture notes.txt through its
+         checkout — twice, so the one-event-per-address dedup is
+         exercised — with an empty read_globs declaration: the load lands
+         outside the compiled footprint (the constructible v0 escape; a
+         read of the node's OWN draft is not one — it observes nothing,
+         per the self-witness ruling). *)
       binding ~by:escapee
         ~script:
           [
-            write_tool "notes.txt" "scratch";
             read_tool "notes.txt";
             read_tool "notes.txt";
             R.Reply {|{"msg":"escaped"}|};
           ];
       (* The control performs the same shape with the read declared. *)
       binding ~by:covered
-        ~script:
-          [
-            write_tool "covered.txt" "scratch";
-            read_tool "covered.txt";
-            R.Reply {|{"msg":"covered"}|};
-          ];
+        ~script:[ read_tool "covered.txt"; R.Reply {|{"msg":"covered"}|} ];
     ]
   in
   (match
@@ -997,7 +1001,7 @@ let%expect_test "F6 end-to-end: an observed tool read gates retirement \
   (* notes.txt is committed repository state before the run: the reader's
      worktree checkout carries v1 until the mover's landing moves it. *)
   let repo, worktrees, ledger_path =
-    sandbox ~file:("notes.txt", "v1\n") "goat_f6_e2e_"
+    sandbox ~files:[ ("notes.txt", "v1\n") ] "goat_f6_e2e_"
   in
   let executors =
     [
@@ -1072,13 +1076,17 @@ let%expect_test "F6 end-to-end: an observed tool read gates retirement \
    consumer parks (floor above any chain) so it provably reads after the
    landing. *)
 
-let%expect_test "tool loads witness the real committed generation once the \
-                 address is committed" =
+(* Shared skeleton for the committed-read falsifiers below (B7 threading,
+   C1 self-witness, C2 glob listing): a mover lands notes.txt v2 (the
+   committed entry moves to g1), and a floored reader — parked on the
+   mover's head, so it provably runs after the landing — exercises one
+   read shape against it. *)
+let run_reader_after_landing ~prefix ~reader_globs ~reader_script =
   let task = json_relation "task" in
   let mid = json_relation "mid" in
   let out = json_relation "out" in
   let mover = template "gen-mover" in
-  let reader = template ~read_globs:[ "notes.txt" ] "gen-reader" in
+  let reader = template ~read_globs:reader_globs "gen-reader" in
   let theory =
     admit
       ~relations:
@@ -1097,18 +1105,12 @@ let%expect_test "tool loads witness the real committed generation once the \
             ~by:reader ();
         ]
   in
-  let repo, worktrees, ledger_path =
-    sandbox ~file:("notes.txt", "v1\n") "goat_gen_"
-  in
+  let repo, worktrees, ledger_path = sandbox ~files:[ ("notes.txt", "v1\n") ] prefix in
   let executors =
     [
       binding ~by:mover
         ~script:[ write_tool "notes.txt" "v2\n"; R.Reply {|{"msg":"m"}|} ];
-      (* The read-free yield drains the landing's invalidation (additive
-         for a node that has read nothing) so the falsifier isolates the
-         generation stamp, not the delivery lane. *)
-      binding ~by:reader
-        ~script:[ R.Yield; read_tool "notes.txt"; R.Reply {|{"msg":"r"}|} ];
+      binding ~by:reader ~script:reader_script;
     ]
   in
   (* The floor suspends the read instead of hypothesizing, so the reader
@@ -1116,10 +1118,19 @@ let%expect_test "tool loads witness the real committed generation once the \
   let backstops =
     { Speculate.Backstops.default with confidence_floor = 2.0 }
   in
+  Run.exec ~theory ~seed:(seed_task task)
+    ~config:(config ~repo ~worktrees ~ledger_path ~backstops ~executors ())
+
+let%expect_test "tool loads witness the real committed generation once the \
+                 address is committed" =
+  (* The read-free yield drains the landing's invalidation (additive
+     for a node that has read nothing) so the falsifier isolates the
+     generation stamp, not the delivery lane. *)
   (match
-     Run.exec ~theory ~seed:(seed_task task)
-       ~config:
-         (config ~repo ~worktrees ~ledger_path ~backstops ~executors ())
+     run_reader_after_landing ~prefix:"goat_gen_"
+       ~reader_globs:[ "notes.txt" ]
+       ~reader_script:
+         [ R.Yield; read_tool "notes.txt"; R.Reply {|{"msg":"r"}|} ]
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -1141,5 +1152,124 @@ let%expect_test "tool loads witness the real committed generation once the \
     {|
     reader witnessed file:notes.txt @ g1
     the reader retired (content matched, witness held): true
+    replay: coherent
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* C1 (wave 3) — self-witness: a read served from the node's OWN draft
+   is store-to-load forwarding of in-flight work, not an observation of
+   committed state, so it claims NOTHING in the observed witness. A
+   draft triple could never hold at the node's own retire (its landing
+   has not happened when the witness is judged), so pre-fix this
+   scenario poisoned the witness — the draft's content hash stamped at
+   the committed generation — and correct work Witness_moved through
+   three spurious reissues into a Reissue_loser squash. The committed
+   read that SEEDED the draft still gates retirement (F6 stays
+   red-capable: a sibling landing over notes.txt still rejects). *)
+
+let%expect_test "a read served from the node's own draft claims nothing: \
+                 edit a committed file, read the draft back, retire \
+                 cleanly on the first attempt" =
+  (match
+     run_reader_after_landing ~prefix:"goat_selfwit_"
+       ~reader_globs:[ "notes.txt" ]
+       ~reader_script:
+         [
+           R.Yield;
+           (* the committed read: witnesses (g1, v2) — this is the claim
+              that gates retirement *)
+           read_tool "notes.txt";
+           (* the node's own edit: notes.txt becomes a draft *)
+           write_tool "notes.txt" "v3\n";
+           (* the draft read-back: store-to-load forwarding, no claim *)
+           read_tool "notes.txt";
+           R.Reply {|{"msg":"r"}|};
+         ]
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      (match nodes_of_stmt events "read" with
+      | [ r_node ] ->
+          List.iter
+            (fun t -> Printf.printf "reader witnessed %s\n" t)
+            (file_load_triples events r_node);
+          check "the reader retired on the first attempt (no reissue)"
+            (match settlement_of settled r_node with
+            | Some Ledger.Settlement.Retired -> true
+            | _ -> false)
+      | attempts ->
+          Printf.printf "!! expected 1 read attempt, saw %d\n"
+            (List.length attempts));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    reader witnessed file:notes.txt @ g1
+    the reader retired on the first attempt (no reissue): true
+    replay: coherent
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* C2 (wave 3) — the glob listing's observation: which paths exist. For
+   a path whose committed state is Landed the listing witnesses the
+   committed (generation, content) pair straight from the lookup — never
+   a hash of the path string (the pre-fix poison, which could not hold
+   against any Landed comparison). A path that exists only in flight (a
+   draft, or absent from committed state) contributes no triple:
+   existence-of-uncommitted is not a witnessable claim in v0. *)
+
+let glob_load_triples events node =
+  List.concat_map
+    (fun (e : Ledger.Event.t) ->
+      match e.kind with
+      | Ledger.Event.Load { tool = "glob_list"; observed } when of_node node e
+        ->
+          List.map
+            (fun (a, g, _) ->
+              Format.asprintf "%a @@ %a" Ledger.Address.pp a
+                Ledger.Generation.pp g)
+            observed
+      | _ -> [])
+    events
+
+let%expect_test "glob_list over a committed file witnesses the committed \
+                 (generation, content) pair and retires cleanly; a \
+                 draft-only match contributes no triple" =
+  (match
+     run_reader_after_landing ~prefix:"goat_glob_"
+       ~reader_globs:[ "notes.txt" ]
+       ~reader_script:
+         [
+           R.Yield;
+           (* a draft-only file that the glob will also match *)
+           write_tool "scratch.txt" "wip\n";
+           R.Call_tool
+             {
+               name = "glob_list";
+               input = `Assoc [ ("pattern", `String "*.txt") ];
+             };
+           R.Reply {|{"msg":"g"}|};
+         ]
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      (match nodes_of_stmt events "read" with
+      | [ r_node ] ->
+          List.iter
+            (fun t -> Printf.printf "glob witnessed %s\n" t)
+            (glob_load_triples events r_node);
+          check "the glob-lister retired on the first attempt"
+            (match settlement_of settled r_node with
+            | Some Ledger.Settlement.Retired -> true
+            | _ -> false)
+      | attempts ->
+          Printf.printf "!! expected 1 read attempt, saw %d\n"
+            (List.length attempts));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    glob witnessed file:notes.txt @ g1
+    the glob-lister retired on the first attempt: true
     replay: coherent
     |}]
