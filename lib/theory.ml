@@ -89,12 +89,24 @@ module Pin = struct
 end
 
 module Executor = struct
+  (* An effect tool the template grants its nodes, priced at declaration:
+     an idempotence argument makes the tool grantable under speculation;
+     without one it exists only for hypothesis-free dispatches — the
+     grant's status index polices the rest (agent.mli Grant.Effect_tool,
+     falsifiers F12/F15). *)
+  module Effect = struct
+    type t =
+      | Idempotent of { tool : string; why : string }
+      | Non_idempotent of { tool : string }
+  end
+
   type t =
     | Agent_template of {
         name : string;
         pin : Pin.t;
         preamble : string;
         read_globs : string list;
+        effects : Effect.t list;
       }
     | Pure_fn of { name : string }
     | Shell_gate of { name : string; command : string list }
@@ -173,6 +185,9 @@ module Edge = struct
     reads : string;
     ref_fields : string list;
     read_globs : string list;
+    counts : string list;
+        (* The where-filter's counted relations: a count is a read, so
+           the filter joins the edge like a ref target (theory.mli). *)
   }
 end
 
@@ -653,8 +668,10 @@ let declare ~relations ~statements ~laws =
                 unjudgeable
                   (Printf.sprintf
                      "group_by field %s of %s is not a ref slot, so counts \
-                      cannot group per referent"
-                     group_by over)
+                      cannot group per referent — declare the field in %s's \
+                      payload schema as {\"type\": \"string\", \"format\": \
+                      \"ref:<referent relation>\"}"
+                     group_by over over)
             | None ->
                 unjudgeable
                   (Printf.sprintf "relation %s has no field %s" over group_by)))
@@ -720,6 +737,10 @@ let declare ~relations ~statements ~laws =
                 (match s.Spawn.by with
                 | Executor.Agent_template { read_globs; _ } -> read_globs
                 | Executor.Pure_fn _ | Executor.Shell_gate _ -> []);
+              counts =
+                (match s.Spawn.where with
+                | Some (Filter.Count { over; _ }) -> [ over ]
+                | None -> []);
             })
           statements
       in
@@ -797,6 +818,12 @@ module Meta = struct
                  U.to_string (U.member "value" p) ));
     }
 
+  let effect_of_json j =
+    let tool = U.to_string (U.member "tool" j) in
+    match U.member "idempotent_why" j with
+    | `Null -> Executor.Effect.Non_idempotent { tool }
+    | w -> Executor.Effect.Idempotent { tool; why = U.to_string w }
+
   let executor_of_json j =
     let name = U.to_string (U.member "name" j) in
     match U.to_string (U.member "kind" j) with
@@ -807,6 +834,10 @@ module Meta = struct
             pin = pin_of_json (U.member "pin" j);
             preamble = U.to_string (U.member "preamble" j);
             read_globs = U.to_list (U.member "read_globs" j) |> List.map U.to_string;
+            effects =
+              (match U.member "effects" j with
+              | `Null -> []
+              | e -> U.to_list e |> List.map effect_of_json);
           }
     | "pure_fn" -> Executor.Pure_fn { name }
     | "shell_gate" ->
@@ -915,9 +946,16 @@ module Meta = struct
                p.Pin.options) );
       ]
 
+  let json_of_effect (e : Executor.Effect.t) : Yojson.Safe.t =
+    match e with
+    | Executor.Effect.Idempotent { tool; why } ->
+        `Assoc [ ("tool", `String tool); ("idempotent_why", `String why) ]
+    | Executor.Effect.Non_idempotent { tool } ->
+        `Assoc [ ("tool", `String tool); ("idempotent_why", `Null) ]
+
   let json_of_executor (e : Executor.t) : Yojson.Safe.t =
     match e with
-    | Executor.Agent_template { name; pin; preamble; read_globs } ->
+    | Executor.Agent_template { name; pin; preamble; read_globs; effects } ->
         `Assoc
           [
             ("kind", `String "agent_template");
@@ -925,6 +963,7 @@ module Meta = struct
             ("pin", json_of_pin pin);
             ("preamble", `String preamble);
             ("read_globs", `List (List.map (fun g -> `String g) read_globs));
+            ("effects", `List (List.map json_of_effect effects));
             ("command", `Null);
           ]
     | Executor.Pure_fn { name } ->
@@ -935,6 +974,7 @@ module Meta = struct
             ("pin", `Null);
             ("preamble", `Null);
             ("read_globs", `Null);
+            ("effects", `Null);
             ("command", `Null);
           ]
     | Executor.Shell_gate { name; command } ->
@@ -945,6 +985,7 @@ module Meta = struct
             ("pin", `Null);
             ("preamble", `Null);
             ("read_globs", `Null);
+            ("effects", `Null);
             ("command", `List (List.map (fun c -> `String c) command));
           ]
 
@@ -1092,7 +1133,7 @@ module Meta = struct
       "required": ["name", "schema_json", "generations"],
       "properties": {
         "name": { "type": "string", "description": "The relation's name; unique within the theory." },
-        "schema_json": { "type": "string", "description": "The payload's JSON Schema, as JSON text. Parsed into the LLM-safe subset at admission; escapes are admission errors." },
+        "schema_json": { "type": "string", "description": "The payload's JSON Schema, as JSON text. Parsed into the LLM-safe subset at admission; escapes are admission errors. A field that references another relation's tuples MUST be declared {\"type\": \"string\", \"format\": \"ref:<relation>\"} — only such ref slots satisfy filter link fields and count-law group_by fields. Do not declare an id field: the engine mints id on every relation." },
         "generations": { "anyOf": [ { "type": "integer" }, { "type": "null" } ], "description": "Generation bound for a feedback loop's stratum carrier: at most this many engine-minted generations of the relation along one derivation chain. Null for relations outside any loop." }
       }
     },
@@ -1136,14 +1177,28 @@ module Meta = struct
       "type": "object",
       "description": "What a spawn statement's by clause names. kind picks the case; fields that do not belong to the case are null.",
       "additionalProperties": false,
-      "required": ["kind", "name", "pin", "preamble", "read_globs", "command"],
+      "required": ["kind", "name", "pin", "preamble", "read_globs", "effects", "command"],
       "properties": {
         "kind": { "type": "string", "enum": ["agent_template", "pure_fn", "shell_gate"], "description": "Executor case." },
         "name": { "type": "string", "description": "Executor name; pure functions are bound by this name in the run config." },
         "pin": { "anyOf": [ { "$ref": "#/$defs/pin" }, { "type": "null" } ], "description": "Model pin; agent_template only, null otherwise." },
         "preamble": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "Role text stating stance and method, never shape; agent_template only, null otherwise." },
         "read_globs": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "File-glob half of the footprint grant; agent_template only, null otherwise." },
+        "effects": {
+          "anyOf": [ { "type": "array", "items": { "$ref": "#/$defs/effect" } }, { "type": "null" } ],
+          "description": "Effect tools the template's nodes may run (run_command is the available runtime); agent_template only, null otherwise. Grant run_command with an idempotent_why to agents that must build or test their own work."
+        },
         "command": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "Build/test command line; shell_gate only, null otherwise." }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "description": "One effect-tool grant, priced at declaration: a non-null idempotent_why makes the tool usable under speculation; a null why restricts it to hypothesis-free dispatches.",
+      "additionalProperties": false,
+      "required": ["tool", "idempotent_why"],
+      "properties": {
+        "tool": { "type": "string", "description": "Effect tool name; run_command is the available runtime." },
+        "idempotent_why": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "The recorded idempotence argument (e.g. re-runnable build/test in the node's own worktree), or null for a non-idempotent effect." }
       }
     },
     "window": {
@@ -1165,7 +1220,7 @@ module Meta = struct
       "required": ["over", "link", "where_equals", "cmp", "bound"],
       "properties": {
         "over": { "type": "string", "description": "The counted relation." },
-        "link": { "type": "string", "description": "The ref field of the counted relation pointing at the body tuple." },
+        "link": { "type": "string", "description": "The ref field of the counted relation pointing at the body tuple. Must be a ref slot: declared in the counted relation's schema_json with format \"ref:<body relation>\"." },
         "where_equals": {
           "type": "array",
           "description": "Extra value-field equalities on counted tuples.",
@@ -1214,7 +1269,7 @@ module Meta = struct
         "kind": { "type": "string", "enum": ["count", "disjoint_writes"], "description": "Law case." },
         "name": { "type": "string", "description": "Law name, quoted in verdicts." },
         "over": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "The counted relation; count only, null otherwise." },
-        "group_by": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "The ref field of the counted relation grouping counts per referent; count only, null otherwise." },
+        "group_by": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "The ref field of the counted relation grouping counts per referent; count only, null otherwise. Must be a ref slot: declared in the counted relation's schema_json with format \"ref:<referent relation>\"." },
         "bound": { "anyOf": [ { "$ref": "#/$defs/bound" }, { "type": "null" } ], "description": "The per-referent count bound; count only, null otherwise." }
       }
     },

@@ -151,6 +151,7 @@ let invocation ~worktree_root =
     {
       Agent.Grant.read_globs = [ "**" ];
       worktree_root;
+      committed_root = ".";
       snoop_mounts = [];
       shell_gates = [];
       effects = [];

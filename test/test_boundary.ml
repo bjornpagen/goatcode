@@ -90,6 +90,7 @@ let speculative_grant : Agent.Grant.speculative Agent.Grant.t =
   {
     Agent.Grant.read_globs = [ "src/**/*.ml" ];
     worktree_root = "/tmp/goat-test-worktree";
+    committed_root = ".";
     snoop_mounts = [];
     shell_gates = [];
     effects =
@@ -379,7 +380,7 @@ let digest_rel =
 
 let template name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = "You refute findings."; read_globs = [ "src/**" ] }
+    { name; pin; preamble = "You refute findings."; read_globs = [ "src/**" ]; effects = [] }
 
 let boundary_theory =
   match
@@ -822,6 +823,7 @@ let%expect_test "F12: every constructible speculative grant is free of \
                     {
                       Agent.Grant.read_globs;
                       worktree_root = "/tmp/goat-test-worktree";
+                      committed_root = ".";
                       snoop_mounts;
                       shell_gates;
                       effects;
@@ -851,6 +853,7 @@ let%expect_test "F12: the non-idempotent case exists only at the committed \
     {
       Agent.Grant.read_globs = [];
       worktree_root = "/tmp/goat-test-worktree";
+      committed_root = ".";
       snoop_mounts = [];
       shell_gates = [];
       effects =
@@ -892,6 +895,7 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     {
       Agent.Grant.read_globs = [ "src/**/*.ml" ];
       worktree_root = worktree;
+      committed_root = ".";
       snoop_mounts = [];
       shell_gates = [];
       effects = [];
@@ -984,6 +988,7 @@ let%expect_test "F17: run_command names git -> typed in-band refusal, no \
     {
       Agent.Grant.read_globs = [];
       worktree_root = worktree;
+      committed_root = ".";
       snoop_mounts = [];
       shell_gates = [];
       effects =
@@ -1098,10 +1103,16 @@ let%expect_test "F17: run_command names git -> typed in-band refusal, no \
 let%expect_test "shell_gate: the gate run is an Effect event carrying the \
                  declared command line" =
   let e = env () in
+  (* The engine creates the store buffer before dispatch; the gate runs
+     inside it (cwd = the worktree), so the fixture honors the same
+     invariant. *)
+  (try Unix.mkdir "/tmp/goat-test-worktree" 0o755
+   with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
       worktree_root = "/tmp/goat-test-worktree";
+      committed_root = ".";
       snoop_mounts = [];
       shell_gates = [ [ "printf"; "gate-ok" ] ];
       effects = [];
@@ -1263,16 +1274,25 @@ let%expect_test "anthropic max_tokens truncation faults immediately with \
          (contains message "raise the pin option \"max_tokens\""));
   [%expect {| posts=1 Error Executor_error; guidance: true |}]
 
-(* M3 — the API-rendered schema is LOWERED in the provider encoders only:
-   a ref slot's nonstandard [format: "ref:<relation>"] is stripped and
-   folded into the description (the model still sees the target relation
-   in prose); [minItems]/[maxItems] stay. One supply, two renderings —
-   the prompt keeps the full schema and the codec still judges refs and
-   windows ([Contract.Codec.by_schema]); only the provider-enforced
-   subset moves. *)
-let%expect_test "provider encoders lower the API-rendered schema: ref \
-                 formats strip into descriptions, array windows stay" =
+(* M3 (revised, live trace 2026-07-15) — the schema is a serialization
+   codec, never a provider decode constraint on the Anthropic lane:
+   Anthropic compiles a json_schema format into a grammar with a hard
+   size ceiling, and the meta-catalog schema blew it (HTTP 400 "compiled
+   grammar is too large"). Rather than branch on schema size, the
+   Anthropic body carries NO output_config.format at all — the prompt's
+   contract section is the model's schema supply and the codec boundary
+   parse plus the repair lane own conformance. The OpenAI lane keeps its
+   non-strict text.format as guidance, LOWERED: a ref slot's nonstandard
+   [format: "ref:<relation>"] is stripped and folded into the
+   description (the model still sees the target relation in prose);
+   [minItems]/[maxItems] stay. One supply, two renderings — the prompt
+   keeps the full schema and the codec still judges refs and windows
+   ([Contract.Codec.by_schema]). *)
+let%expect_test "anthropic sends no structured-output format; openai \
+                 lowers it: ref formats strip into descriptions, array \
+                 windows stay; the prompt keeps the full schema" =
   putenv "ANTHROPIC_API_KEY" "test-key-never-used-on-a-wire";
+  putenv "OPENAI_API_KEY" "test-key-never-used-on-a-wire";
   let ref_schema_json : Yojson.Safe.t =
     `Assoc
       [
@@ -1334,16 +1354,73 @@ let%expect_test "provider encoders lower the API-rendered schema: ref \
    with
   | Ok _ -> ()
   | Error f -> Printf.printf "unexpected fault: %s\n" f.Ledger.Fault.message);
+  (* The Anthropic body carries no format node at all: the schema is not
+     a decode constraint on this lane, so no schema — of any size — can
+     reach the provider's grammar compiler. *)
+  (let j = Yojson.Safe.from_string !captured in
+   match j with
+   | `Assoc fields -> (
+       match List.assoc_opt "output_config" fields with
+       | Some (`Assoc oc) ->
+           Printf.printf "anthropic output_config carries a format: %b\n"
+             (List.mem_assoc "format" oc)
+       | _ -> print_endline "anthropic body carries no output_config")
+   | _ -> print_endline "anthropic body unparseable");
+  (* The OpenAI lane still sends the (non-strict) text.format, lowered:
+     capture its body through the same rigged transport. *)
+  let openai_settled =
+    Yojson.Safe.to_string
+      (`Assoc
+        [
+          ("status", `String "completed");
+          ( "output",
+            `List
+              [
+                `Assoc
+                  [
+                    ("type", `String "message");
+                    ( "content",
+                      `List
+                        [
+                          `Assoc
+                            [
+                              ("type", `String "output_text");
+                              ("text", `String {|{"verdict": "done"}|});
+                            ];
+                        ] );
+                  ];
+              ] );
+          ( "usage",
+            `Assoc [ ("input_tokens", `Int 3); ("output_tokens", `Int 2) ]
+          );
+        ])
+  in
+  let openai_captured = ref "" in
+  let openai_post (r : Http.Request.t) =
+    openai_captured := r.Http.Request.body;
+    Ok (200, openai_settled)
+  in
+  (match
+     Agent.invoke
+       ~executor:
+         (Agent.agent ~stop:[]
+            ~provider:(Agent.Provider.openai ~post:openai_post ()))
+       ?fallback:None ~codec:verdict_codec ~registry:e.registry ~invocation
+       ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
+       ~on_yield:(fun () -> [])
+   with
+  | Ok _ -> ()
+  | Error f -> Printf.printf "unexpected fault: %s\n" f.Ledger.Fault.message);
   (* Scope the checks to the structured-output format: the request body
      also carries the PROMPT, whose contract section rightly still shows
      the full schema (one supply, two renderings). *)
   let format_schema =
-    let j = Yojson.Safe.from_string !captured in
+    let j = Yojson.Safe.from_string !openai_captured in
     match j with
     | `Assoc fields -> (
-        match List.assoc_opt "output_config" fields with
-        | Some (`Assoc oc) -> (
-            match List.assoc_opt "format" oc with
+        match List.assoc_opt "text" fields with
+        | Some (`Assoc t) -> (
+            match List.assoc_opt "format" t with
             | Some (`Assoc f) ->
                 Yojson.Safe.to_string
                   (Option.value (List.assoc_opt "schema" f) ~default:`Null)
@@ -1351,11 +1428,11 @@ let%expect_test "provider encoders lower the API-rendered schema: ref \
         | _ -> "")
     | _ -> ""
   in
-  Printf.printf "format schema carries ref format: %b\n"
+  Printf.printf "openai format schema carries ref format: %b\n"
     (contains format_schema "ref:finding");
-  Printf.printf "format schema documents the ref in prose: %b\n"
+  Printf.printf "openai format schema documents the ref in prose: %b\n"
     (contains format_schema "wire id of a finding tuple");
-  Printf.printf "format schema keeps the window: %b\n"
+  Printf.printf "openai format schema keeps the window: %b\n"
     (contains format_schema "minItems");
   (* The prompt's contract section carries the SAME un-lowered schema
      value: one supply, two renderings. *)
@@ -1370,9 +1447,10 @@ let%expect_test "provider encoders lower the API-rendered schema: ref \
        (Agent.Prompt.parts invocation.Agent.Invocation.prompt));
   [%expect
     {|
-    format schema carries ref format: false
-    format schema documents the ref in prose: true
-    format schema keeps the window: true
+    anthropic output_config carries a format: false
+    openai format schema carries ref format: false
+    openai format schema documents the ref in prose: true
+    openai format schema keeps the window: true
     prompt keeps the full schema: true
     |}]
 
@@ -1394,10 +1472,14 @@ let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
   Out_channel.with_open_bin (Filename.concat lock_dir "holder") (fun oc ->
       Out_channel.output_string oc "crashed-run pid=4194304");
   let e = env () in
+  (* Same invariant as the gate-event test: the buffer exists at dispatch. *)
+  (try Unix.mkdir "/tmp/goat-test-worktree" 0o755
+   with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
       worktree_root = "/tmp/goat-test-worktree";
+      committed_root = ".";
       snoop_mounts = [];
       shell_gates = [ [ "printf"; "gate-after-stale" ] ];
       effects = [];

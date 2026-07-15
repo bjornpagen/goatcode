@@ -49,6 +49,11 @@ module Committed : sig
 
   val open_ : repo:string -> branch:string -> t
 
+  val root : t -> string
+  (** The repo directory the committed branch stays checked out in — the
+      read root an agent's in-glob load falls through to when its own
+      worktree misses ({!Agent.Grant.t} [committed_root]). *)
+
   val generation : t -> Ledger.Address.t -> Ledger.Generation.t option
   (** The committed generation of an address — the engine's read-time
       lookup (a read of an address with no committed generation is a

@@ -75,7 +75,22 @@ module Worktree = struct
      (docs/architecture/30-channels.md § event taxonomy). *)
   type t = { root : string; path : string }
 
+  (* One coordinate system, fixed here at the boundary: [root] absolutizes
+     before any git command sees it. [git -C root worktree add path]
+     resolves a relative [path] against ROOT, not this process's cwd — so
+     a relative root doubled up: the real worktree landed at
+     root/root/node while the engine read and wrote root/node, a bare
+     directory inside the repo whose git view was the enclosing checkout.
+     Net delta: empty; retire commits: empty; the deliverable never
+     landed while the run reported success (live trace 2026-07-15). An
+     absolute path means the same place to this process, to
+     [git -C root], and to [git -C path] — the divergent reading is
+     unwritable, not guarded. *)
   let create ~root ~node =
+    let root =
+      if Filename.is_relative root then Filename.concat (Sys.getcwd ()) root
+      else root
+    in
     let path = Filename.concat root (Id.to_string node) in
     if not (Sys.file_exists path) then begin
       mkdirs root;
@@ -121,10 +136,17 @@ module Worktree = struct
     else s
 
   (* The coalesced store buffer, as git sees it: twelve edits to one file
-     show once; an edit that restored the original shows not at all. *)
+     show once; an edit that restored the original shows not at all.
+     [--untracked-files=all] is load-bearing: porcelain's default
+     collapses untracked files under a new directory into one "?? dir/"
+     line, and a directory entry reads as no content — the whole delta
+     silently vanishes for any file born in a fresh directory (live
+     trace 2026-07-15: docs/haiku.md never landed). Per-file listing
+     makes the address list total over the buffer's files. *)
   let changed_paths t =
     sh_lines
-      (Printf.sprintf "git -C %s status --porcelain" (Filename.quote t.path))
+      (Printf.sprintf "git -C %s status --porcelain --untracked-files=all"
+         (Filename.quote t.path))
     |> List.filter_map (fun line ->
            if String.length line < 4 then None
            else
@@ -255,6 +277,7 @@ module Committed = struct
 
   let write_log t = t.write_log
   let abs_path t rel = Filename.concat t.repo rel
+  let root t = t.repo
   let set_tuples t ts = t.tuple_set <- ts
 
   (* Advance an address's generation (law 2 already judged by the caller:

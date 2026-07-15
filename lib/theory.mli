@@ -146,6 +146,19 @@ end
     so the theory never invokes an LLM to do a compiler's job
     (docs/architecture/60-agents.md). *)
 module Executor : sig
+  (** An effect tool the template grants its nodes, priced at
+      declaration: [Idempotent] carries the recorded idempotence
+      argument (a re-runnable build/test command, a content-keyed cache
+      write) and is grantable under either speculation status;
+      [Non_idempotent] reaches only hypothesis-free dispatches — the
+      grant's status index polices the rest
+      (docs/architecture/60-agents.md § tool grants; {!Agent.Grant}). *)
+  module Effect : sig
+    type t =
+      | Idempotent of { tool : string; why : string }
+      | Non_idempotent of { tool : string }
+  end
+
   type t =
     | Agent_template of {
         name : string;
@@ -158,6 +171,12 @@ module Executor : sig
         read_globs : string list;
             (** The file-glob half of the footprint grant; ref-slot reads
                 are derived from the contract. *)
+        effects : Effect.t list;
+            (** Effect tools the template's nodes may run ([run_command]
+                is the one v0 runtime): declarations here become grant
+                entries at dispatch — idempotent ones under either
+                speculation status, non-idempotent ones only when the
+                node carries no hypotheses. *)
       }
     | Pure_fn of { name : string }
         (** Host OCaml, for mechanical transforms; bound by name at run. *)
@@ -306,6 +325,13 @@ module Edge : sig
     ref_fields : string list;
         (** Ref slots of [reads] the consumer dereferences. *)
     read_globs : string list;  (** The executor's file-glob grant. *)
+    counts : string list;
+        (** Relations the statement's where-filter counts over. A count
+            is a read — the firing consumes the counted tuples — so the
+            filter's relation joins the edge exactly like a ref target:
+            it widens the delivery filter (counted landings reach the
+            consumer as drift notes) and the footprint-escape judgment
+            (a counted-tuple read is declared, not an escape). *)
   }
 end
 

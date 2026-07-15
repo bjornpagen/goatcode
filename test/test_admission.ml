@@ -45,7 +45,7 @@ let rigged_pin =
 
 let agent name =
   Theory.Executor.Agent_template
-    { name; pin = rigged_pin; preamble = "rigged " ^ name; read_globs = [] }
+    { name; pin = rigged_pin; preamble = "rigged " ^ name; read_globs = []; effects = [] }
 
 let bind executor script =
   {

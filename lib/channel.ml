@@ -154,7 +154,11 @@ let compile_footprint theory (edge : Theory.Edge.t) =
   Ledger.Footprint.of_list
     (file_grants
     @ relation_addrs edge.reads
-    @ List.concat_map relation_addrs ref_targets)
+    @ List.concat_map relation_addrs ref_targets
+    (* A count is a read: the filter's relation subscribes exactly like
+       a ref target — counted landings deliver, counted-tuple reads are
+       declared (theory.mli [Edge.counts]). *)
+    @ List.concat_map relation_addrs edge.counts)
 
 (* ------------------------------------------------------------------ *)
 (* Opening. *)

@@ -76,7 +76,7 @@ let anthropic_pin =
 
 let template ?(pin = rigged_pin) name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = name ^ ": a test template"; read_globs = [] }
+    { name; pin; preamble = name ^ ": a test template"; read_globs = []; effects = [] }
 
 let binding ~by ~runtime =
   {
@@ -630,6 +630,7 @@ let%expect_test "FM4: a breaking-broad note at a yield discontinues the \
         pin = anthropic_pin;
         preamble = "watcher: a test template";
         read_globs = [ "shared.txt" ];
+        effects = [];
       }
   in
   let theory =

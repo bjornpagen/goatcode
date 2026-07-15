@@ -83,6 +83,17 @@ module Grant : sig
   type 'status t = {
     read_globs : string list;  (** Readable paths, from the template. *)
     worktree_root : string;  (** The one writable root: the store buffer. *)
+    committed_root : string;
+        (** The committed checkout an in-glob read falls through to when
+            the worktree misses — the run's repo directory, where the
+            committed branch stays checked out. Every read root is an
+            explicit grant coordinate: the harness process cwd is
+            operator state no footprint declares, and resolving
+            repo-relative paths against it both missed files that were
+            committed all along and could serve the operator's own
+            files to an agent (live trace 2026-07-15: an integrator
+            polled three times for a module committed 40s earlier).
+            Direct callers outside any engine pass ["."]. *)
     snoop_mounts : string list;
         (** Read-only mounts of upstream store buffers this node may snoop
             (docs/architecture/30-channels.md § store-to-load
@@ -155,8 +166,11 @@ module Invocation : sig
   type 'status t = {
     prompt : Prompt.t;
     schema : Contract.Wire_schema.t;
-        (** Handed to the model API as the structured-output format; the
-            decode itself stays freeform on the primary lane. *)
+        (** The head contract, one supply: rendered into the prompt as
+            reference text, and on the OpenAI lane also handed to the API
+            as the (non-strict) structured-output format. The decode
+            itself stays freeform on the primary lane — the codec
+            boundary parse owns conformance. *)
     grant : 'status Grant.t;
     pin : Theory.Pin.t;
     committed : Ledger.Address.t -> Witness.Committed_state.t;
@@ -237,7 +251,12 @@ module Provider : sig
     messages : Message.t list;
     tools : Tool_decl.t list;
     schema : Contract.Wire_schema.t;
-        (** The head contract, sent as the structured-output format. *)
+        (** The head contract. The OpenAI lane sends it as the non-strict
+            [text.format]; the Anthropic lane sends no format (the
+            provider compiles a format into a grammar with a hard size
+            ceiling — the schema is a serialization codec, not a decode
+            constraint, so it rides the prompt and the codec judges the
+            reply). *)
   }
 
   type t = { turn : request -> (reply, Ledger.Fault.t) result }
@@ -261,9 +280,12 @@ module Provider : sig
       [ANTHROPIC_API_KEY] from the environment at turn time; an unset key
       is an executor fault, never a crash. Fable-5 rules are encoded here:
       no [thinking] parameter, no sampling knobs, [output_config] carries
-      effort and the json_schema format (lowered to the provider's
-      documented subset: ref formats fold into descriptions; the prompt
-      keeps the full schema). Transient transport failures (HTTP
+      effort and deliberately NO json_schema format: the provider
+      compiles a format into a grammar with a hard size ceiling that
+      real contract schemas exceed (live trace 2026-07-15), so the
+      schema reaches the model as prompt reference text only and the
+      codec boundary parse plus the repair lane own conformance — the
+      freeform-with-reference posture. Transient transport failures (HTTP
       429/5xx, curl timeouts) retry bounded inside the lane with backoff
       — transport, not work: no ledger event, no repair budget; an
       exhausted retry faults with the attempt count named.
@@ -410,8 +432,12 @@ val pure_fn : (Yojson.Safe.t -> (Yojson.Safe.t, string) result) -> Executor.t
     Mechanical transforms that never deserve tokens. *)
 
 val shell_gate : Executor.t
-(** Runs the command line declared on the {!Theory.Executor.Shell_gate};
-    exit status and captured output become the head tuple. A non-zero
+(** Runs the command line declared on the {!Theory.Executor.Shell_gate},
+    with the node's store buffer as its working directory — the worktree
+    is the checkout the gate's operands landed on, so the command judges
+    exactly that tree and its written artifacts ride the net delta; the
+    harness process cwd is ambient state no footprint declares. Exit
+    status and captured output become the head tuple. A non-zero
     exit is data (a failing test run is a tuple, not a fault). The gate
     is an effect against shared machine state: it runs behind the
     mkdir-atomic, holder-named machine lock and appends

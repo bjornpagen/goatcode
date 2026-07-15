@@ -62,7 +62,7 @@ let pin =
 
 let template name =
   Theory.Executor.Agent_template
-    { name; pin; preamble = name ^ ": a rigged test template"; read_globs = [] }
+    { name; pin; preamble = name ^ ": a rigged test template"; read_globs = []; effects = [] }
 
 let binding ?(budget = 0) ~by runtime =
   {

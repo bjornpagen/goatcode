@@ -107,11 +107,11 @@ let pin =
 
 let worker =
   Theory.Executor.Agent_template
-    { name = "worker"; pin; preamble = "produce the result tuple"; read_globs = [] }
+    { name = "worker"; pin; preamble = "produce the result tuple"; read_globs = []; effects = [] }
 
 let summarizer =
   Theory.Executor.Agent_template
-    { name = "summarizer"; pin; preamble = "summarize the result"; read_globs = [] }
+    { name = "summarizer"; pin; preamble = "summarize the result"; read_globs = []; effects = [] }
 
 let pipeline_theory () =
   match

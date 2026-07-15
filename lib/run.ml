@@ -58,19 +58,26 @@ let directory_exists path = Sys.file_exists path && Sys.is_directory path
    a missing parent directory. [committed_branch] is not a filesystem
    path; a bad branch surfaces from [Retire.Committed.open_], the layer
    that owns git. *)
+(* Two kinds of configured paths, distinguished here so [Missing_path] can
+   only ever name an operator-owned one: [repo] is the operator's act
+   (goat never creates a repository — the same posture as the git ban),
+   while [worktree_root] and the ledger's parent are goat-owned scratch,
+   made to exist rather than guarded against not existing. *)
+let rec ensure_dir dir =
+  if dir = "." || dir = "/" || directory_exists dir then ()
+  else begin
+    ensure_dir (Filename.dirname dir);
+    try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  end
+
 let parse_paths (config : config) =
-  let required =
-    [
-      ("repo", config.repo);
-      ("worktree_root", config.worktree_root);
-      ("ledger_path", Filename.dirname config.ledger_path);
-    ]
-  in
-  match
-    List.find_opt (fun (_, path) -> not (directory_exists path)) required
-  with
-  | Some (field, path) -> Error (Missing_path { field; path })
-  | None -> Ok ()
+  if not (directory_exists config.repo) then
+    Error (Missing_path { field = "repo"; path = config.repo })
+  else begin
+    ensure_dir config.worktree_root;
+    ensure_dir (Filename.dirname config.ledger_path);
+    Ok ()
+  end
 
 let binding_for (config : config) executor =
   List.find_opt

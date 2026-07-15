@@ -724,7 +724,13 @@ let plan_bootstrap ~spec ~pin =
   let theory_rel = Theory.Relation.v ~name:"theory" (Theory.Meta.contract ()) in
   let by =
     Theory.Executor.Agent_template
-      { name = "planner"; pin; preamble = planner_preamble; read_globs = [] }
+      {
+        name = "planner";
+        pin;
+        preamble = planner_preamble;
+        read_globs = [];
+        effects = [];
+      }
   in
   let statement =
     (* One theory per spec is a firing count, not a tuple array: [1 nodes]

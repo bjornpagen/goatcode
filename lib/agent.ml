@@ -68,6 +68,9 @@ module Grant = struct
   type 'status t = {
     read_globs : string list;
     worktree_root : string;
+    committed_root : string;
+        (* The committed checkout in-glob reads fall through to — never
+           the harness process cwd (agent.mli owns the ruling). *)
     snoop_mounts : string list;
     shell_gates : string list list;
     effects : 'status Effect_tool.t list;
@@ -396,18 +399,26 @@ module Provider = struct
   (* {3 Schema lowering for the API-rendered format}
 
      One supply, two renderings: the SAME admitted [Wire_schema] is shown
-     in the prompt (full: ref formats, array windows) and sent as each
-     provider's structured-output format. But a ref slot renders as
-     [{"type":"string","format":"ref:<relation>"}], and "ref:*" is not a
-     format either provider's json_schema subset documents — so the
-     provider encoders lower the API rendering ONLY: a "ref:<relation>"
+     in the prompt (full: ref formats, array windows) and — on the OpenAI
+     lane only — sent as the provider's structured-output format. But a
+     ref slot renders as [{"type":"string","format":"ref:<relation>"}],
+     and "ref:*" is not a format the json_schema subset documents — so
+     the OpenAI encoder lowers the API rendering ONLY: a "ref:<relation>"
      format is stripped and folded into the description, so the model
      still sees the target relation in prose. [minItems]/[maxItems] stay:
-     Anthropic documents array bounds as supported, and the OpenAI format
-     rides [strict: false] where the schema is guidance, not a validated
-     grammar — live smoke (Phase C) is the verifier for both wire facts.
-     The decoder still judges refs and windows fully at the codec
-     ([Contract.Codec.by_schema]), so nothing semantic moves. *)
+     the OpenAI format rides [strict: false] where the schema is
+     guidance, not a validated grammar. The Anthropic lane sends no
+     format at all — the schema is a serialization codec, never a decode
+     constraint: Anthropic compiles a json_schema format into a grammar
+     with a hard size ceiling, and the meta-catalog schema (any real
+     contract, eventually) blows it (live trace, 2026-07-15: HTTP 400
+     "compiled grammar is too large"). Rather than branch on schema size,
+     the case is made unexpressible: the prompt carries the full schema
+     as reference text and the codec boundary parse plus the repair lane
+     are the correctness backstop — the same freeform-with-reference
+     posture the primary lane already commits to (60-agents.md § the
+     primary lane). The decoder judges refs and windows fully at the
+     codec ([Contract.Codec.by_schema]), so nothing semantic moves. *)
   let rec lower_api_schema (j : Yojson.Safe.t) : Yojson.Safe.t =
     match j with
     | `List items -> `List (List.map lower_api_schema items)
@@ -455,8 +466,18 @@ module Provider = struct
   let usage_of j =
     match jmem "usage" j with
     | Some u ->
-        { Ledger.Usage.tokens_in = jint "input_tokens" u;
-          tokens_out = jint "output_tokens" u }
+        {
+          (* Fuel is context processed: uncached input plus cache writes
+             plus cache reads sum to the turn's full prompt (the three
+             price differently — cache reads ~0.1x — but the ledger's
+             usage type carries volume, not price; a priced account is
+             recorded future work). *)
+          Ledger.Usage.tokens_in =
+            jint "input_tokens" u
+            + jint "cache_creation_input_tokens" u
+            + jint "cache_read_input_tokens" u;
+          tokens_out = jint "output_tokens" u;
+        }
     | None -> Ledger.Usage.zero
 
   (* Classify decoded text + calls into the outcome sum: the one place the
@@ -476,7 +497,10 @@ module Provider = struct
        a 400), and no sampling knobs are ever sent (temperature/top_p/top_k
        are 400s) — the pin's [sampling] list is deliberately ignored here;
      - [output_config] carries [effort] (pin option "effort", default
-       "high") and the structured-output [format];
+       "high") and NO [format]: the format compiles into a grammar with a
+       hard size ceiling on the provider side, so the schema rides the
+       prompt as reference text and the codec owns conformance (see the
+       schema-lowering note above);
      - [stop_reason: "refusal"] is a typed outcome checked BEFORE content
        (an HTTP 200 whose content may be empty or partial);
      - parallel [tool_use] blocks are all answered in ONE user message of
@@ -537,6 +561,45 @@ module Provider = struct
                  ])
          msgs)
 
+  (* Prompt caching, the standard two-breakpoint multi-turn shape (of the
+     four the API allows): one on the system block — the render order is
+     tools -> system -> messages, so it caches the tool table and system
+     prompt together — and one MOVING breakpoint on the last content
+     block of the last message, so each tool-loop turn reads the previous
+     turn's cache and pays full price only for the turn's new suffix.
+     Pre-fix the stateless resend billed the whole history at full price
+     every turn: a nine-turn integrator paid 43.8k input tokens of which
+     ~85% was the same bytes re-read (live trace 2026-07-15). Prompts
+     below the model's minimum cacheable prefix silently don't cache —
+     harmless. *)
+  let cache_breakpoint = ("cache_control", `Assoc [ ("type", `String "ephemeral") ])
+
+  let rec map_last f = function
+    | [] -> []
+    | [ x ] -> [ f x ]
+    | x :: rest -> x :: map_last f rest
+
+  let with_moving_breakpoint (msgs : Yojson.Safe.t) =
+    let mark_block = function
+      | `Assoc fields -> `Assoc (fields @ [ cache_breakpoint ])
+      | other -> other
+    in
+    let mark_msg = function
+      | `Assoc fields ->
+          `Assoc
+            (List.map
+               (fun (k, v) ->
+                 match (k, v) with
+                 | "content", `List blocks ->
+                     (k, `List (map_last mark_block blocks))
+                 | _ -> (k, v))
+               fields)
+      | other -> other
+    in
+    match msgs with
+    | `List (_ :: _ as items) -> `List (map_last mark_msg items)
+    | other -> other
+
   let anthropic_body (req : request) =
     let options = req.pin.Theory.Pin.options in
     `Assoc
@@ -545,10 +608,23 @@ module Provider = struct
            [
              ("model", `String req.pin.Theory.Pin.model);
              ("max_tokens", `Int (opt_int options "max_tokens" ~default:16000));
-             ("messages", anthropic_messages req.messages);
+             ( "messages",
+               with_moving_breakpoint (anthropic_messages req.messages) );
            ];
            (if req.system = "" then []
-            else [ ("system", `String req.system) ]);
+            else
+              [
+                ( "system",
+                  `List
+                    [
+                      `Assoc
+                        [
+                          ("type", `String "text");
+                          ("text", `String req.system);
+                          cache_breakpoint;
+                        ];
+                    ] );
+              ]);
            (match req.tools with
            | [] -> []
            | ts ->
@@ -570,14 +646,6 @@ module Provider = struct
                `Assoc
                  [
                    ("effort", `String (opt_str options "effort" ~default:"high"));
-                   ( "format",
-                     `Assoc
-                       [
-                         ("type", `String "json_schema");
-                         ( "schema",
-                           lower_api_schema
-                             (Contract.Wire_schema.to_json req.schema) );
-                       ] );
                  ] );
            ];
          ])
@@ -1153,6 +1221,7 @@ module Source = struct
   let resolve (grant : _ Grant.t) (path : Relpath.t) =
     let rel = Relpath.to_string path in
     let draft = Filename.concat grant.Grant.worktree_root rel in
+    let committed_disk = Filename.concat grant.Grant.committed_root rel in
     let in_globs =
       List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
     in
@@ -1166,8 +1235,8 @@ module Source = struct
               ~changes:(buffer_changes grant.Grant.worktree_root)
               rel;
         }
-    else if in_globs && Sys.file_exists rel then
-      Ok { rel; disk = rel; place = Committed }
+    else if in_globs && Sys.file_exists committed_disk then
+      Ok { rel; disk = committed_disk; place = Committed }
     else
       match
         List.find_map
@@ -1219,15 +1288,22 @@ let readable_matches (grant : _ Grant.t) pattern =
       (walk grant.Grant.worktree_root)
   in
   let committed =
+    (* The committed walk starts in the grant's committed checkout —
+       never the harness process cwd (Source.resolve owns the same
+       ruling); rels stay repo-relative, disks absolute under the
+       root. *)
     let prefix = static_prefix pattern in
-    let base = if prefix = "" then "." else prefix in
+    let base =
+      if prefix = "" then grant.Grant.committed_root
+      else Filename.concat grant.Grant.committed_root prefix
+    in
     match Sys.is_directory base with
     | exception Sys_error _ -> []
     | true ->
         walk base
         |> List.map (fun rel ->
                if prefix = "" then rel else prefix ^ "/" ^ rel)
-    | false -> if Sys.file_exists base then [ base ] else []
+    | false -> if Sys.file_exists base then [ prefix ] else []
   in
   let acc =
     List.fold_left
@@ -1235,7 +1311,10 @@ let readable_matches (grant : _ Grant.t) pattern =
         if
           glob_matches pattern rel
           && List.exists (fun g -> glob_matches g rel) grant.Grant.read_globs
-        then add acc rel rel Source.Committed
+        then
+          add acc rel
+            (Filename.concat grant.Grant.committed_root rel)
+            Source.Committed
         else acc)
       acc committed
   in
@@ -2208,8 +2287,19 @@ let shell_gate =
             Fun.protect
               ~finally:(fun () -> remove_quietly out_file)
               (fun () ->
+                (* The gate runs IN the node's store buffer: its worktree
+                   is the checkout the gate's body operands landed on, so
+                   the command sees exactly the committed tree it was
+                   spawned to judge — and any artifact it writes rides
+                   the buffer's net delta like every other store. The
+                   harness process cwd is ambient machine state no
+                   footprint declares (live trace 2026-07-15: a test
+                   gate resolved its test file against the operator's
+                   shell cwd and reported a spurious red). *)
                 let command =
-                  Printf.sprintf "%s > %s 2>&1"
+                  Printf.sprintf "cd %s && %s > %s 2>&1"
+                    (Filename.quote
+                       invocation.Invocation.grant.Grant.worktree_root)
                     (String.concat " " (List.map Filename.quote gate))
                     (Filename.quote out_file)
                 in

@@ -521,10 +521,31 @@ let explain (settled : Run.settled) ~(node : Ledger.node Id.t) : story option =
   | Some (fired_at, prov) ->
       let counters =
         (* The counters the scheduler consulted to fire this node: every
-           decision recorded against it up to the firing. *)
+           decision recorded against it up to and INCLUDING the firing's
+           own Queued decision — the queue admission is the same
+           scheduling action as the Fired event, appended one tick
+           later, and it is where a count-gated firing records its
+           where-filter evidence. *)
+        let queued_at =
+          List.find_map
+            (fun (e : Ledger.Event.t) ->
+              if mine e then
+                match e.kind with
+                | Ledger.Event.Decision
+                    { action = Ledger.Decision.Queued _; _ } ->
+                    Some e.at
+                | _ -> None
+              else None)
+            events
+        in
+        let bound =
+          match queued_at with
+          | Some q when Ledger.Timestamp.compare fired_at q < 0 -> q
+          | _ -> fired_at
+        in
         List.concat_map
           (fun (e : Ledger.Event.t) ->
-            if mine e && Ledger.Timestamp.compare e.at fired_at <= 0 then
+            if mine e && Ledger.Timestamp.compare e.at bound <= 0 then
               match e.kind with
               | Ledger.Event.Decision { counters; _ } -> counters
               | _ -> []

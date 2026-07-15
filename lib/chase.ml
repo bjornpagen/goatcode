@@ -385,7 +385,24 @@ let settle_fault t (inst : instance) worktree fault =
    arm (an operand missing from every buffer, guessed from its contract)
    is the recorded shape for when dispatch overlaps firing. *)
 
-let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
+(* Hypothesis-taking is a capability of the EXECUTOR CLASS, not a policy
+   knob: a hypothesis needs a carrier. An agent binds one (the payload
+   rides its prompt with the drift contract, and its loads can be served
+   from snoop mounts); a pure function binds one (the operand JSON is its
+   entire input). A shell gate binds nothing — it is a fixed command
+   line whose real inputs are the committed files its worktree checked
+   out, so a pre-landing dispatch runs against a tree its operands never
+   reached, and a clean tuple discharge later hides the divergence (live
+   trace 2026-07-15: a test gate fired on a store-buffer hypothesis,
+   ran before the implementation retired, and reported a spurious red
+   that stood). For a gate the missing-operand read parks — the same
+   posture as speculation-off, arrived at by capability, not switch. *)
+let binds_hypotheses (by : Theory.Executor.t) =
+  match by with
+  | Theory.Executor.Agent_template _ | Theory.Executor.Pure_fn _ -> true
+  | Theory.Executor.Shell_gate _ -> false
+
+let read_operand t ~consumer ~shape ~by (entry : tuple_entry) : Read.outcome =
   let address = addr_of entry in
   match Retire.Committed.generation t.committed_state address with
   | Some generation ->
@@ -395,7 +412,8 @@ let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
         entry.confidence *. Speculate.Backstops.link_confidence
       in
       let hypothesizable =
-        (not (speculation_off t shape))
+        binds_hypotheses by
+        && (not (speculation_off t shape))
         && confidence >= t.backstops.confidence_floor
       in
       match entry.producer with
@@ -447,7 +465,10 @@ let policy_read t fid address =
       with
       | None -> None
       | Some e -> (
-          match read_operand t ~consumer:inst.node ~shape:inst.shape e with
+          match
+            read_operand t ~consumer:inst.node ~shape:inst.shape
+              ~by:inst.spawn.Theory.Spawn.by e
+          with
           | Read.Witnessed { generation; content } ->
               Some (Fiber.Operand.Witnessed { generation; content })
           | Read.Hypothesis h -> Some (Fiber.Operand.Hypothesis h)
@@ -802,20 +823,42 @@ let invoke_lane :
 
 (* The footprint grant, from the template's declarations. The status
    phantom is chosen at the call site: hypothesis-free dispatches carry the
-   committed index, hypothesis-carrying ones the speculative index.
+   committed index, hypothesis-carrying ones the speculative index — and
+   the effect list is built PER INDEX from the template's declarations
+   ([idempotent_effects] constructs at either index; non-idempotent
+   declarations exist only in [committed_effects], so a speculative grant
+   carrying one is unconstructible, F12/F15). [snoop_mounts] is empty and
+   gets no wiring: it dies in the flat-org migration
+   (docs/architecture/91-flat-org.md § grants and sensing — everything
+   in-grant is snoopable and the resolver consults the frontier, not a
+   mount table); in-engine snooping already rides the body-match feed,
+   not a mount list. *)
+let template_effects (by : Theory.Executor.t) =
+  match by with
+  | Theory.Executor.Agent_template { effects; _ } -> effects
+  | Theory.Executor.Pure_fn _ | Theory.Executor.Shell_gate _ -> []
 
-   The v0 grant surface, recorded honestly (docs/architecture/60-agents.md
-   § tool grants): [effects] is empty because no template surface declares
-   effect tools yet — [run_command] is unreachable through a theory, so
-   F12's runtime half is held by the grant's type index plus the
-   direct-drive falsifiers; effect grants await the template-declaration
-   surface. [snoop_mounts] is empty and gets no wiring: it dies in the
-   flat-org migration (docs/architecture/91-flat-org.md § grants and
-   sensing — everything in-grant is snoopable and the resolver consults
-   the frontier, not a mount table); in-engine snooping already rides the
-   body-match feed, not a mount list. *)
-let grant_of (type s) (inst : instance) (worktree : Retire.Worktree.t) :
-    s Agent.Grant.t =
+let idempotent_effects by : _ Agent.Grant.Effect_tool.t list =
+  List.filter_map
+    (function
+      | Theory.Executor.Effect.Idempotent { tool; why } ->
+          Some
+            (Agent.Grant.Effect_tool.idempotent ~name:tool
+               (Agent.Grant.Idempotence.declare ~tool ~why))
+      | Theory.Executor.Effect.Non_idempotent _ -> None)
+    (template_effects by)
+
+let committed_effects by :
+    Agent.Grant.committed Agent.Grant.Effect_tool.t list =
+  idempotent_effects by
+  @ List.filter_map
+      (function
+        | Theory.Executor.Effect.Non_idempotent { tool } ->
+            Some (Agent.Grant.Effect_tool.non_idempotent ~name:tool)
+        | Theory.Executor.Effect.Idempotent _ -> None)
+      (template_effects by)
+let grant_of (type s) t (inst : instance) (worktree : Retire.Worktree.t)
+    ~(effects : s Agent.Grant.Effect_tool.t list) : s Agent.Grant.t =
   let read_globs, shell_gates =
     match inst.spawn.Theory.Spawn.by with
     | Theory.Executor.Agent_template { read_globs; _ } -> (read_globs, [])
@@ -825,9 +868,10 @@ let grant_of (type s) (inst : instance) (worktree : Retire.Worktree.t) :
   {
     Agent.Grant.read_globs;
     worktree_root = Retire.Worktree.path worktree;
+    committed_root = Retire.Committed.root t.committed_state;
     snoop_mounts = [];
     shell_gates;
-    effects = [];
+    effects;
   }
 
 (* {2 Ports and dispatch} *)
@@ -1041,12 +1085,14 @@ let node_body t (inst : instance) (owned : Retire.Worktree.t option ref) () =
           | [] ->
               invoke_lane t inst ~hyps ~on_yield
                 ~grant:
-                  (grant_of inst worktree
+                  (grant_of t inst worktree
+                     ~effects:(committed_effects inst.spawn.Theory.Spawn.by)
                     : Agent.Grant.committed Agent.Grant.t)
           | _ :: _ ->
               invoke_lane t inst ~hyps ~on_yield
                 ~grant:
-                  (grant_of inst worktree
+                  (grant_of t inst worktree
+                     ~effects:(idempotent_effects inst.spawn.Theory.Spawn.by)
                     : Agent.Grant.speculative Agent.Grant.t)
         in
         owned := None;
@@ -1146,10 +1192,26 @@ let cmp_holds (cmp : Theory.Filter.cmp) n bound =
 
 (* The v0 [where] grammar: a count over one relation linked one hop away.
    A readiness filter for the scheduler; the final law judgment still runs
-   (docs/architecture/50-commit.md § final-state judgment). *)
-let filter_satisfied t (spawn : Theory.Spawn.t) (body : tuple_entry) =
+   (docs/architecture/50-commit.md § final-state judgment).
+
+   [Some counted] carries the EVIDENCE — the tuples that crossed the
+   bound — because the firing consumes them: the count is read against
+   the body-match feed, which includes parsed-but-unretired store
+   buffers, so a count-gated firing can launch inside a producer's
+   parse-to-retire window. Pre-fix that dependence was invisible — the
+   firing recorded only its body operand, constructed no hypotheses, and
+   a drifting counted producer would never squash it (live trace
+   2026-07-15: an integrator fired 130ms before its third producer
+   retired, read a pre-landing tree, and nothing in the ledger knew).
+   Counted tuples flow into the instance's consumed set, where the
+   EXISTING operand machinery makes the dependence real in every layer:
+   witnessed reads for committed ones, store-buffer hypotheses for
+   in-flight ones (discharge, squash-on-drift, overlap accounting), and
+   parking for executors that cannot bind a hypothesis. *)
+let filter_satisfied t (spawn : Theory.Spawn.t) (body : tuple_entry) :
+    tuple_entry list option =
   match spawn.Theory.Spawn.where with
-  | None -> true
+  | None -> Some []
   | Some (Theory.Filter.Count { over; link; where_equals; cmp; bound }) ->
       let counted (e : tuple_entry) =
         String.equal e.relation over
@@ -1167,7 +1229,9 @@ let filter_satisfied t (spawn : Theory.Spawn.t) (body : tuple_entry) =
                  where_equals
         | _ -> false
       in
-      cmp_holds cmp (List.length (List.filter counted t.tuples)) bound
+      let matched = List.filter counted t.tuples in
+      if cmp_holds cmp (List.length matched) bound then Some matched
+      else None
 
 (* The generation-stratum bound: a statement minting into a bounded head
    refuses the firing that would exceed the bound — the loop's terminal
@@ -1194,8 +1258,20 @@ let find_fireable t =
             String.equal entry.relation spawn.Theory.Spawn.for_
             && (not (List.mem (stmt, entry.id) t.fired))
             && within_stratum_bound t spawn entry
-            && filter_satisfied t spawn entry
-          then Some (sid, spawn, entry)
+          then
+            match filter_satisfied t spawn entry with
+            | Some counted ->
+                (* A self-counting body never consumes itself twice. *)
+                let counted =
+                  List.filter
+                    (fun (e : tuple_entry) ->
+                      not
+                        (String.equal e.relation entry.relation
+                        && String.equal e.id entry.id))
+                    counted
+                in
+                Some (sid, spawn, entry, counted)
+            | None -> None
           else None)
         t.tuples)
     (Theory.statements t.theory)
@@ -1207,20 +1283,32 @@ let executor_binding_for t (spawn : Theory.Spawn.t) =
 (* One firing = one node ([n nodes] windows fire [n]); head mint slots fill
    with fresh existentials — the rename
    (docs/architecture/10-theory.md § statement grammar). *)
-let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
+let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry)
+    ~(counted : tuple_entry list) =
   let stmt = Theory.Statement.to_string sid in
   let key = (stmt, entry.id) in
   t.fired <- key :: t.fired;
   let head_rel, window = spawn.Theory.Spawn.exists in
+  let consumed_entries = entry :: counted in
   let provenance =
     {
       Ledger.Provenance.statement = sid;
-      consumed = [ (entry.relation, entry.id) ];
+      consumed =
+        List.map
+          (fun (e : tuple_entry) -> (e.relation, e.id))
+          consumed_entries;
       (* Downstream firings inherit the consumed chain's hypotheses: the
          squash walk and the retirement discharge check both read them
          from here (docs/architecture/40-scheduling.md § read-time
-         binding). *)
-      hypotheses = entry.carried;
+         binding). Counted tuples are consumed, so their chains inherit
+         too — deduplicated, since counted siblings can share ancestry. *)
+      hypotheses =
+        List.fold_left
+          (fun acc h ->
+            if List.exists (Id.equal h) acc then acc else acc @ [ h ])
+          []
+          (List.concat_map (fun (e : tuple_entry) -> e.carried)
+             consumed_entries);
     }
   in
   match executor_binding_for t spawn with
@@ -1277,7 +1365,7 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
             binding;
             fired_key = key;
             provenance;
-            consumed = [ entry ];
+            consumed = consumed_entries;
             minted;
             minted_ids;
             shape;
@@ -1286,15 +1374,20 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
           }
         in
         decide t ~node (Ledger.Decision.Queued { port = binding.port })
-          ~reason:"instance fired" ~counters:[];
+          ~reason:"instance fired"
+          ~counters:
+            (match spawn.Theory.Spawn.where with
+            | Some (Theory.Filter.Count { over; _ }) ->
+                [ ("counted:" ^ over, float_of_int (List.length counted)) ]
+            | None -> []);
         t.queue <- t.queue @ [ inst ]
       done
 
 let try_fire t =
   match find_fireable t with
   | None -> false
-  | Some (sid, spawn, entry) ->
-      fire t sid spawn entry;
+  | Some (sid, spawn, entry, counted) ->
+      fire t sid spawn entry ~counted;
       true
 
 (* {2 Retirement and its rejections} *)
