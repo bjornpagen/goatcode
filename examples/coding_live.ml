@@ -171,7 +171,15 @@ let implementer =
 
 let gate =
   Theory.Executor.Shell_gate
-    { name = "test_gate"; command = [ "python3"; "test_fizzbuzz.py" ] }
+    {
+      name = "test_gate";
+      command = [ "python3"; "test_fizzbuzz.py" ];
+      (* The declared build-artifact resource the gate's effect lock
+         scopes to (30-scheduling.md § gates on the shared tree): the
+         interpreter's bytecode cache is the one artifact this test run
+         touches. *)
+      resource = "pycache";
+    }
 
 let statements =
   [

@@ -372,24 +372,22 @@ let settle_fault t (inst : instance) fault =
    arm (an operand missing from every buffer, guessed from its contract)
    is the recorded shape for when dispatch overlaps firing. *)
 
-(* Hypothesis-taking is a capability of the EXECUTOR CLASS, not a policy
-   knob: a hypothesis needs a carrier. An agent binds one (the payload
-   rides its prompt with the drift contract, and its snooped tool reads
-   are tracked at the resolver); a pure function binds one (the operand
-   JSON is its entire input). A shell gate binds nothing — it is a fixed
-   command line whose real inputs are the tree files its operands landed
-   on, so a pre-landing dispatch runs against a tree its operands never
-   reached, and a clean tuple discharge later hides the divergence (live
-   trace 2026-07-15: a test gate fired on a store-buffer hypothesis,
-   ran before the implementation retired, and reported a spurious red
-   that stood). For a gate the missing-operand read parks — the same
-   posture as speculation-off, arrived at by capability, not switch. *)
-let binds_hypotheses (by : Theory.Executor.t) =
-  match by with
-  | Theory.Executor.Agent_template _ | Theory.Executor.Pure_fn _ -> true
-  | Theory.Executor.Shell_gate _ -> false
-
-let read_operand t ~consumer ~shape ~by (entry : tuple_entry) : Read.outcome =
+(* Hypothesis-taking is universal across executor classes: every carrier
+   binds one. An agent's payload rides its prompt with the drift contract
+   and its snooped tool reads are tracked at the resolver; a pure
+   function's operand JSON is its entire input; a shell gate runs
+   OPTIMISTICALLY — no quiesce point — because its real inputs are tree
+   files whose in-flight state its dispatch-time frontier snapshot turns
+   into store-buffer hypotheses on exactly the writers it may have read
+   ([gate_snapshot] in [node_body]), so a pre-landing dispatch is honest
+   speculation, never a hidden divergence. The pre-flat-org gate parked
+   here instead (a live trace 2026-07-15 caught a gate judging a tree its
+   operands never reached — under per-node isolation the draft was NOT in
+   the gate's tree); with one shared tree the draft is exactly what the
+   gate sees, and the snapshot is what makes seeing it discharge-or-drift
+   (docs/architecture/30-scheduling.md § gates on the shared tree;
+   falsifier FL6). *)
+let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
   let address = addr_of entry in
   match Retire.Committed.generation t.committed_state address with
   | Some generation ->
@@ -399,8 +397,7 @@ let read_operand t ~consumer ~shape ~by (entry : tuple_entry) : Read.outcome =
         entry.confidence *. Speculate.Backstops.link_confidence
       in
       let hypothesizable =
-        binds_hypotheses by
-        && (not (speculation_off t shape))
+        (not (speculation_off t shape))
         && confidence >= t.backstops.confidence_floor
       in
       match entry.producer with
@@ -452,10 +449,7 @@ let policy_read t fid address =
       with
       | None -> None
       | Some e -> (
-          match
-            read_operand t ~consumer:inst.node ~shape:inst.shape
-              ~by:inst.spawn.Theory.Spawn.by e
-          with
+          match read_operand t ~consumer:inst.node ~shape:inst.shape e with
           | Read.Witnessed { generation; content } ->
               Some (Fiber.Operand.Witnessed { generation; content })
           | Read.Hypothesis h -> Some (Fiber.Operand.Hypothesis h)
@@ -633,6 +627,14 @@ let footprint_escapes t (inst : instance) =
       List.fold_left
         (fun escapes (e : Ledger.Event.t) ->
           match (e.Ledger.Event.node, e.Ledger.Event.kind) with
+          (* The gate snapshot never escapes: v0 charges a gate with its
+             WHOLE grant — the one tree its command ranges over — so an
+             in-flight top the snapshot witnessed is in-footprint by
+             construction, and there is no finer declaration for the
+             author to grow (30-scheduling.md § gates on the shared
+             tree). *)
+          | Some _, Ledger.Event.Load { tool = "chase.gate-snapshot"; _ } ->
+              escapes
           | Some n, Ledger.Event.Load { tool; observed }
             when Id.equal n inst.node ->
               List.fold_left
@@ -851,6 +853,14 @@ let invoke_lane :
                     };
                 ]
               end);
+          (* The gate's effect-lock scope, threaded from the declaration
+             (30-scheduling.md § gates on the shared tree: the lock
+             serializes gates per build-artifact resource). *)
+          gate_resource =
+            (match inst.spawn.Theory.Spawn.by with
+            | Theory.Executor.Shell_gate { resource; _ } -> Some resource
+            | Theory.Executor.Agent_template _ | Theory.Executor.Pure_fn _ ->
+                None);
         }
       in
       let parse text =
@@ -1099,20 +1109,97 @@ let node_body t (inst : instance) () =
                 : Ledger.Event.t)
         | _ -> ())
       outcomes;
+    (* Gate honesty on the shared tree (30-scheduling.md § gates on the
+       shared tree; migration row 6; falsifier FL6): a gate run observes
+       the whole tree, neighbors' in-flight edits included, so gate
+       dispatch snapshots the frontier over the grant — every address
+       whose top is [In_flight] yields a [Store_buffer] hypothesis on
+       exactly that writer plus a witness triple at the uncommitted
+       coordinate. v0's footprint grain is the gate's whole grant,
+       conservative: the gate is charged with having read every in-flight
+       address it COULD see (its command line ranges over the one tree it
+       runs in; the file-grain tracing upgrade is the recorded OPEN
+       item). The verdict is thereby speculative evidence until every
+       observed writer lands as observed: the hypotheses ride the verdict
+       tuple's provenance like any head's, and the refresher
+       discharges-or-drifts each one at its producer's landing — no
+       quiesce point, and an identical landing retires the verdict for
+       free (the gate-shaped F7). *)
+    let gate_snapshot =
+      match inst.spawn.Theory.Spawn.by with
+      | Theory.Executor.Agent_template _ | Theory.Executor.Pure_fn _ -> []
+      | Theory.Executor.Shell_gate _ ->
+          let frontier =
+            Retire.Frontier.of_ledger t.ledger ~committed:t.committed_state
+          in
+          List.filter_map
+            (fun (address, (d : Retire.Frontier.in_flight)) ->
+              (* A node's own draft claims nothing (the self-witness
+                 ruling); gates hold no store tools, so this arm is the
+                 rule stated, not a path taken. *)
+              if Id.equal d.Retire.Frontier.writer inst.node then None
+              else begin
+                let h =
+                  {
+                    Speculate.Hypothesis.id = Id.mint t.hyp_minter;
+                    consumer = inst.node;
+                    address;
+                    source =
+                      Speculate.Hypothesis.Store_buffer
+                        {
+                          producer = d.Retire.Frontier.writer;
+                          snapshot = d.Retire.Frontier.content;
+                        };
+                    content = d.Retire.Frontier.content;
+                    confidence = Speculate.Backstops.link_confidence;
+                  }
+                in
+                ignore
+                  (Ledger.append t.ledger ~node:inst.node
+                     (Ledger.Event.Hypothesis_taken
+                        {
+                          hypothesis = h.Speculate.Hypothesis.id;
+                          address;
+                          source = source_label h.Speculate.Hypothesis.source;
+                          content = h.Speculate.Hypothesis.content;
+                          confidence = h.Speculate.Hypothesis.confidence;
+                        })
+                    : Ledger.Event.t);
+                (* The observed read, at the producer's uncommitted
+                   coordinate — what retires the verdict for free when
+                   the landing is exactly the snapshot. *)
+                ignore
+                  (Ledger.append t.ledger ~node:inst.node
+                     (Ledger.Event.Load
+                        {
+                          tool = "chase.gate-snapshot";
+                          observed =
+                            [
+                              ( address,
+                                Ledger.Generation.zero,
+                                h.Speculate.Hypothesis.content );
+                            ];
+                        })
+                    : Ledger.Event.t);
+                t.undischarged <- (h, `Null) :: t.undischarged;
+                Some (h, `Null)
+              end)
+            (Retire.Frontier.in_flight_tops frontier)
+    in
     (* The executor's yield suspension IS the fiber's [Yield]
        instruction: delivery rides the handler (the closure mounted at
        spawn), and a stop-cleanly disposition discontinues instead of
        returning — the fiber cannot run further, by construction. *)
     let on_yield () = Fiber.yield () in
     let result =
-      match hyps with
-      | [] ->
+      match (hyps, gate_snapshot) with
+      | [], [] ->
           invoke_lane t inst ~hyps ~on_yield
             ~grant:
               (grant_of inst
                  ~effects:(committed_effects inst.spawn.Theory.Spawn.by)
                 : Agent.Grant.committed Agent.Grant.t)
-      | _ :: _ ->
+      | _, _ ->
           invoke_lane t inst ~hyps ~on_yield
             ~grant:
               (grant_of inst
@@ -1123,7 +1210,8 @@ let node_body t (inst : instance) () =
     | Ok (heads, late_minted) ->
         feed_heads t inst
           ~own_hyps:
-            (List.map (fun (h, (e : tuple_entry)) -> (h, e.payload)) hyp_pairs)
+            (List.map (fun (h, (e : tuple_entry)) -> (h, e.payload)) hyp_pairs
+            @ gate_snapshot)
           heads;
         t.retire_queue <- t.retire_queue @ [ { inst; heads; late_minted } ]
     | Error fault -> settle_fault t inst fault

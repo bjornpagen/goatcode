@@ -188,7 +188,18 @@ module Executor : sig
       }
     | Pure_fn of { name : string }
         (** Host OCaml, for mechanical transforms; bound by name at run. *)
-    | Shell_gate of { name : string; command : string list }
+    | Shell_gate of {
+        name : string;
+        command : string list;
+        resource : string;
+            (** The declared build-artifact resource the gate's effect
+                lock scopes to (the [_build] dir, a package cache) —
+                declared on the gate the way every effect footprint is
+                declared; gates on distinct resources overlap, and
+                source-tree reads take no lock
+                (docs/architecture/30-scheduling.md § gates on the
+                shared tree). *)
+      }
         (** A build/test command whose exit status and output become
             tuples. *)
 

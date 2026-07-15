@@ -1114,7 +1114,7 @@ let%expect_test "F17: a git shell gate is rejected at admission; a build \
           errors
   in
   let gate name command =
-    Theory.Executor.Shell_gate { name; command }
+    Theory.Executor.Shell_gate { name; command; resource = "_build" }
   in
   print_declare
     ~statements:

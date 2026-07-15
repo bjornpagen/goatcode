@@ -82,19 +82,22 @@ end
 module Frontier : sig
   type t
 
+  type in_flight = {
+    writer : Ledger.node Id.t;
+    content : Ledger.Content_hash.t;
+    base : Ledger.Content_hash.t option;
+        (** The writer's read point — the same base coordinate the
+            disjoint law judges (docs/architecture/30-scheduling.md
+            § retirement order and the landing). *)
+  }
+  (** One live in-flight top: the writer and its uncommitted content. *)
+
   (** The live top of one address. [In_flight] tops carry the writer —
       the read resolver turns a read of one into a [Store_buffer]
       hypothesis on exactly that node. *)
   type top =
     | Committed of Witness.Committed_state.t
-    | In_flight of {
-        writer : Ledger.node Id.t;
-        content : Ledger.Content_hash.t;
-        base : Ledger.Content_hash.t option;
-            (** The writer's read point — the same base coordinate the
-                disjoint law judges (docs/architecture/30-scheduling.md
-                § retirement order and the landing). *)
-      }
+    | In_flight of in_flight
 
   val of_ledger : Ledger.t -> committed:Committed.t -> t
   (** Derive the frontier. The in-flight half is a snapshot of the
@@ -106,6 +109,13 @@ module Frontier : sig
       (docs/architecture/30-scheduling.md § one ref). *)
 
   val top : t -> Ledger.Address.t -> top
+
+  val in_flight_tops : t -> (Ledger.Address.t * in_flight) list
+  (** Every address whose live top is in flight, in derivation order —
+      the gate snapshot's universe: at gate dispatch each one becomes a
+      [Store_buffer] hypothesis on its writer plus a witness triple at
+      the uncommitted coordinate (docs/architecture/30-scheduling.md
+      § gates on the shared tree; falsifier FL6). *)
 
   val materialize : t -> repo:string -> unit
   (** Converge the tree to the frontier: write each address's live top,

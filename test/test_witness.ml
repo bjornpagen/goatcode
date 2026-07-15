@@ -192,6 +192,7 @@ let invocation () =
     repo = ".";
     frontier = (fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent);
     snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
+    gate_resource = None;
   }
 
 (* Run one lying reply through the primary lane and return the parsed

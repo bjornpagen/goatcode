@@ -279,13 +279,15 @@ module Frontier = struct
      store event is dead have no live coordinate and are garbage nothing
      can witness into committed state. *)
 
+  type in_flight = {
+    writer : Ledger.node Id.t;
+    content : Ledger.Content_hash.t;
+    base : Ledger.Content_hash.t option;
+  }
+
   type top =
     | Committed of Witness.Committed_state.t
-    | In_flight of {
-        writer : Ledger.node Id.t;
-        content : Ledger.Content_hash.t;
-        base : Ledger.Content_hash.t option;
-      }
+    | In_flight of in_flight
 
   (* An in-flight top keeps its blob oid so [materialize] can pull the
      draft's bytes from the object database without re-scanning events. *)
@@ -433,6 +435,15 @@ module Frontier = struct
     | Some (_, d) ->
         In_flight { writer = d.writer; content = d.content; base = d.base }
     | None -> Committed (committed_state t address)
+
+  (* The gate snapshot's universe (30-scheduling.md § gates on the shared
+     tree): every live in-flight top, in derivation order — deterministic,
+     so the snapshot's hypothesis mints replay stably. *)
+  let in_flight_tops t =
+    List.map
+      (fun (address, (d : draft)) ->
+        (address, { writer = d.writer; content = d.content; base = d.base }))
+      t.drafts
 
   (* Converge the tree to the frontier: write each address's live top,
      delete files whose top is Absent or Deleted. Checkout semantics —

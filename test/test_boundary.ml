@@ -19,7 +19,13 @@
      admission lane (a declared git gate) is in test_admission.ml
      (60-agents.md § the git ban).
    - shell_gate eventing: a gate run is an Effect event behind the
-     machine lock, carrying the declared command line.
+     effect lock, carrying the declared command line.
+   - FL6, the lock-scope arm (50-api.md § the flat-org roster;
+     30-scheduling.md § gates on the shared tree; migration row 6): the
+     effect lock is scoped per declared build-artifact resource — a live
+     holder on a neighboring resource never blocks a gate on its own
+     (the hypothesis-discharge arms A/B run the engine in
+     test_delivery.ml).
    - FL7 — torn-read impossibility (50-api.md § the flat-org roster;
      20-medium.md § event taxonomy): a subprocess outside the domain
      reads a stored path in a tight loop while stores land through the
@@ -113,7 +119,7 @@ let speculative_grant : Agent.Grant.speculative Agent.Grant.t =
    witness at generation zero, and no snoop is ever tracked (agent.mli
    § Invocation). [repo] defaults to the process-transparent "." for
    tool-free lanes; tool-driving tests pass their fixture repo. *)
-let invocation ?(repo = ".")
+let invocation ?(repo = ".") ?gate_resource
     ?(frontier =
       fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent) grant
     =
@@ -127,6 +133,7 @@ let invocation ?(repo = ".")
     repo;
     frontier;
     snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
+    gate_resource;
   }
 
 type env = {
@@ -1148,7 +1155,9 @@ let%expect_test "shell_gate: the gate run is an Effect event carrying the \
                  declared command line" =
   let e = env () in
   (* The gate runs in the shared tree (cwd = the invocation's repo,
-     migration row 4); "." is a fine tree for a printf gate. *)
+     migration row 4); "." is a fine tree for a printf gate. The
+     invocation's [gate_resource] is the declared build-artifact resource
+     its effect lock scopes to (migration row 6). *)
   let grant : Agent.Grant.committed Agent.Grant.t =
     {
       Agent.Grant.read_globs = [];
@@ -1158,8 +1167,9 @@ let%expect_test "shell_gate: the gate run is an Effect event carrying the \
     }
   in
   (match
-     Agent.shell_gate.Agent.Executor.run (invocation grant) ~ledger:e.ledger
-       ~node:e.node
+     Agent.shell_gate.Agent.Executor.run
+       (invocation ~gate_resource:"_build" grant)
+       ~ledger:e.ledger ~node:e.node
        ~on_yield:(fun () -> [])
    with
   | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
@@ -1384,6 +1394,7 @@ let%expect_test "anthropic sends no structured-output format; openai \
       frontier =
         (fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent);
       snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
+      gate_resource = None;
     }
   in
   (match
@@ -1506,8 +1517,12 @@ let%expect_test "anthropic sends no structured-output format; openai \
 
 let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
                  and the gate runs; the lock is released after" =
+  (* The lock is scoped per declared build-artifact resource (migration
+     row 6): the crashed run's residue sits at THIS resource's path. *)
   let lock_dir =
-    Filename.concat (Filename.get_temp_dir_name ()) "goatcode-effect.lock"
+    Filename.concat
+      (Filename.get_temp_dir_name ())
+      "goatcode-effect-stale-scope.lock"
   in
   (* A crashed run's residue: the pid is far outside any live range. *)
   Unix.mkdir lock_dir 0o755;
@@ -1523,8 +1538,9 @@ let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
     }
   in
   (match
-     Agent.shell_gate.Agent.Executor.run (invocation grant) ~ledger:e.ledger
-       ~node:e.node
+     Agent.shell_gate.Agent.Executor.run
+       (invocation ~gate_resource:"stale-scope" grant)
+       ~ledger:e.ledger ~node:e.node
        ~on_yield:(fun () -> [])
    with
   | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
@@ -1537,6 +1553,64 @@ let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
     goatcode: effect lock holder is not running (crashed-run pid=4194304); removing the stale lock
     head tuple: {"exit_status":0,"output":"gate-after-stale"}
     lock released: true
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* FL6, the lock-scope arm (migration row 6, README.md § design of
+   record vs shipped engine; 30-scheduling.md § gates on the shared
+   tree — the hypothesis-discharge arms A and B run the engine in
+   test_delivery.ml): the effect lock serializes gates PER DECLARED
+   BUILD-ARTIFACT RESOURCE. A LIVE holder on a neighboring resource
+   never blocks a gate on its own — pre-row-6 the one machine-wide lock
+   would spin the whole 30s budget here and fail with a spurious "effect
+   lock busy" (the regression is loud: this test would hang, then
+   diff). The neighbor's lock is neither waited on nor broken — the live
+   pid is not stale evidence, and the scopes never meet. Same-resource
+   queueing keeps its coverage above (the staleness falsifier holds the
+   gate's OWN resource). *)
+
+let%expect_test "FL6 lock scope: a live holder on a neighboring build \
+                 resource never blocks a gate on its own" =
+  let neighbor =
+    Filename.concat
+      (Filename.get_temp_dir_name ())
+      "goatcode-effect-neighbor-cache.lock"
+  in
+  Unix.mkdir neighbor 0o755;
+  Out_channel.with_open_bin (Filename.concat neighbor "holder") (fun oc ->
+      Out_channel.output_string oc
+        (Printf.sprintf "live-neighbor pid=%d" (Unix.getpid ())));
+  Fun.protect
+    ~finally:(fun () ->
+      (try Sys.remove (Filename.concat neighbor "holder")
+       with Sys_error _ -> ());
+      try Unix.rmdir neighbor with Unix.Unix_error (_, _, _) -> ())
+    (fun () ->
+      let e = env () in
+      let grant : Agent.Grant.committed Agent.Grant.t =
+        {
+          Agent.Grant.read_globs = [];
+          write_globs = [];
+          shell_gates = [ [ "printf"; "gate-overlaps" ] ];
+          effects = [];
+        }
+      in
+      (match
+         Agent.shell_gate.Agent.Executor.run
+           (invocation ~gate_resource:"own-build" grant)
+           ~ledger:e.ledger ~node:e.node
+           ~on_yield:(fun () -> [])
+       with
+      | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
+          Printf.printf "head tuple: %s\n" t
+      | Ok _ -> print_endline "refusal outcome"
+      | Error f -> Printf.printf "fault: %s\n" f.Ledger.Fault.message);
+      Printf.printf "neighbor's live lock untouched: %b\n"
+        (Sys.file_exists (Filename.concat neighbor "holder")));
+  [%expect
+    {|
+    head tuple: {"exit_status":0,"output":"gate-overlaps"}
+    neighbor's live lock untouched: true
     |}]
 
 (* ------------------------------------------------------------------ *)

@@ -110,7 +110,7 @@ module Executor = struct
         effects : Effect.t list;
       }
     | Pure_fn of { name : string }
-    | Shell_gate of { name : string; command : string list }
+    | Shell_gate of { name : string; command : string list; resource : string }
 
   type id = string
 
@@ -847,7 +847,11 @@ module Meta = struct
     | "pure_fn" -> Executor.Pure_fn { name }
     | "shell_gate" ->
         Executor.Shell_gate
-          { name; command = U.to_list (U.member "command" j) |> List.map U.to_string }
+          {
+            name;
+            command = U.to_list (U.member "command" j) |> List.map U.to_string;
+            resource = U.to_string (U.member "resource" j);
+          }
     | k -> typ_err ("unknown executor kind: " ^ k) j
 
   let window_of_json j =
@@ -972,6 +976,7 @@ module Meta = struct
             ("write_globs", `List (List.map (fun g -> `String g) write_globs));
             ("effects", `List (List.map json_of_effect effects));
             ("command", `Null);
+            ("resource", `Null);
           ]
     | Executor.Pure_fn { name } ->
         `Assoc
@@ -984,8 +989,9 @@ module Meta = struct
             ("write_globs", `Null);
             ("effects", `Null);
             ("command", `Null);
+            ("resource", `Null);
           ]
-    | Executor.Shell_gate { name; command } ->
+    | Executor.Shell_gate { name; command; resource } ->
         `Assoc
           [
             ("kind", `String "shell_gate");
@@ -996,6 +1002,7 @@ module Meta = struct
             ("write_globs", `Null);
             ("effects", `Null);
             ("command", `List (List.map (fun c -> `String c) command));
+            ("resource", `String resource);
           ]
 
   let json_of_window (w : Window.t) : Yojson.Safe.t =
@@ -1186,7 +1193,7 @@ module Meta = struct
       "type": "object",
       "description": "What a spawn statement's by clause names. kind picks the case; fields that do not belong to the case are null.",
       "additionalProperties": false,
-      "required": ["kind", "name", "pin", "preamble", "read_globs", "write_globs", "effects", "command"],
+      "required": ["kind", "name", "pin", "preamble", "read_globs", "write_globs", "effects", "command", "resource"],
       "properties": {
         "kind": { "type": "string", "enum": ["agent_template", "pure_fn", "shell_gate"], "description": "Executor case." },
         "name": { "type": "string", "description": "Executor name; pure functions are bound by this name in the run config." },
@@ -1198,7 +1205,8 @@ module Meta = struct
           "anyOf": [ { "type": "array", "items": { "$ref": "#/$defs/effect" } }, { "type": "null" } ],
           "description": "Effect tools the template's nodes may run (run_command is the available runtime); agent_template only, null otherwise. Grant run_command with an idempotent_why to agents that must build or test their own work."
         },
-        "command": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "Build/test command line; shell_gate only, null otherwise." }
+        "command": { "anyOf": [ { "type": "array", "items": { "type": "string" } }, { "type": "null" } ], "description": "Build/test command line; shell_gate only, null otherwise." },
+        "resource": { "anyOf": [ { "type": "string" }, { "type": "null" } ], "description": "Declared build-artifact resource the gate's effect lock scopes to (e.g. the _build dir); shell_gate only, null otherwise." }
       }
     },
     "effect": {

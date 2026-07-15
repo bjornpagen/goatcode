@@ -214,6 +214,14 @@ module Invocation : sig
             falsifier FL2). The chase supplies the registering closure;
             direct callers outside any engine supply
             [fun ~address:_ ~producer:_ ~content:_ -> []]. *)
+    gate_resource : string option;
+        (** The declared build-artifact resource a shell-gate run's
+            effect lock scopes to — [Some] exactly for gate dispatches,
+            threaded from the {!Theory.Executor.Shell_gate} declaration
+            (docs/architecture/30-scheduling.md § gates on the shared
+            tree: the lock serializes gates per build-artifact resource;
+            source-tree reads take no lock). Non-gate executors carry
+            [None] and never consult it. *)
   }
 end
 
@@ -470,16 +478,23 @@ val shell_gate : Executor.t
 (** Runs the command line declared on the {!Theory.Executor.Shell_gate},
     with the invocation's shared tree ([repo]) as its working directory —
     the one tree its operands landed on, so the command judges exactly
-    that tree. Its judgment is its head tuple; a file the gate
+    that tree, neighbors' in-flight edits included: gate honesty is the
+    dispatch-time frontier snapshot the chase takes over the grant (every
+    [In_flight] top a store-buffer hypothesis plus a witness triple at
+    the uncommitted coordinate), so the verdict is speculative evidence
+    until every observed writer lands as observed
+    (docs/architecture/30-scheduling.md § gates on the shared tree;
+    falsifier FL6). Its judgment is its head tuple; a file the gate
     writes into the tree is not an evented store and never lands at
     retire, because the landing is built from Store events alone
     (docs/architecture/README.md § design of record vs shipped engine,
-    row 2; migration row 6 re-scopes gates to a frontier snapshot). The
-    harness process cwd is ambient state no footprint declares. Exit
-    status and captured output become the head tuple. A non-zero
-    exit is data (a failing test run is a tuple, not a fault). The gate
-    is an effect against shared machine state: it runs behind the
-    mkdir-atomic, holder-named machine lock and appends
+    row 2). The harness process cwd is ambient state no footprint
+    declares. Exit status and captured output become the head tuple. A
+    non-zero exit is data (a failing test run is a tuple, not a fault).
+    The gate is an effect against shared machine state: it runs behind
+    the mkdir-atomic, holder-named effect lock scoped to the invocation's
+    declared build-artifact resource ([gate_resource] — gates on distinct
+    resources overlap; source-tree reads take no lock) and appends
     [Ledger.Event.Effect] (tool ["shell_gate"], the declared command line
     as the resource) — the same discipline as [run_command], so a gate
     run is never an unobserved effect lane. Idempotence is the

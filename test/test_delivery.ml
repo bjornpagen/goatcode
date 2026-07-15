@@ -24,6 +24,14 @@
      [Reissue_loser] (never [Operator_abort]), reissues against the
      winner's landing, and senses the move as a typed drift note at its
      yield; committed content stays single-writer coherent.
+   - FL6 (same roster; 30-scheduling.md § gates on the shared tree;
+     migration row 6): a gate runs while a producer's draft is in flight
+     — gate dispatch snapshots the frontier into store-buffer hypotheses
+     plus witness triples at the uncommitted coordinate. Arm A: the
+     producer lands identically and the verdict retires free (the
+     gate-shaped F7, zero reconcile). Arm B: the observed writer dies
+     and the stale verdict is squashed per the table — no law consults
+     it at final state (it never becomes a committed tuple).
    - F6, the end-to-end half: an observed [read_file] tool load gates
      retirement through the real machinery (the claim/hide directions
      drive Retire.step directly in test_witness.ml).
@@ -1459,5 +1467,350 @@ let%expect_test "glob_list over a committed file witnesses the committed \
     {|
     glob witnessed file:notes.txt @ g1
     the glob-lister retired on the first attempt: true
+    replay: coherent
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* FL6 — gate-hypothesis discharge (50-api.md § the flat-org roster;
+   30-scheduling.md § gates on the shared tree; migration row 6,
+   README.md § design of record vs shipped engine). A build/test gate
+   observes the ONE shared tree — neighbors' in-flight edits included —
+   so gate dispatch snapshots the frontier over the grant: every address
+   whose top is in flight becomes a store-buffer hypothesis on exactly
+   that writer plus a witness triple at the uncommitted coordinate
+   (the [chase.gate-snapshot] load at generation zero). The verdict is
+   speculative evidence until every observed writer lands as observed;
+   no quiesce point exists.
+
+   Arm A is the gate-shaped F7: the producer lands exactly the draft the
+   gate observed, the snapshot hypothesis discharges silently, and the
+   verdict retires with zero reconcile events — an optimistic gate's
+   common case is free. Arm B kills the observed writer instead: the
+   gate's verdict is provenance-dead and squashes per the table, so no
+   law consults the stale verdict at final state (final-state judgment
+   consumes committed tuples only, and the stale verdict never becomes
+   one). Arms A and B are each other's sensitivity control. *)
+
+(* The gate's head: exactly the payload Agent.shell_gate emits. *)
+let gate_head_schema : Yojson.Safe.t =
+  `Assoc
+    [
+      ("type", `String "object");
+      ( "description",
+        `String "One gate run: exit status and captured output." );
+      ( "properties",
+        `Assoc
+          [
+            ( "exit_status",
+              `Assoc
+                [
+                  ("type", `String "integer");
+                  ("description", `String "The gate command's exit status.");
+                ] );
+            ( "output",
+              `Assoc
+                [
+                  ("type", `String "string");
+                  ("description", `String "Captured stdout and stderr.");
+                ] );
+          ] );
+      ("required", `List [ `String "exit_status"; `String "output" ]);
+      ("additionalProperties", `Bool false);
+    ]
+
+let gate_relation name =
+  Theory.Relation.v ~name
+    (Contract.v ~name ~schema:gate_head_schema
+       ~codec:(Contract.Codec.v ~of_json:Fun.id ~to_json:Fun.id))
+
+let gate_binding ~by =
+  {
+    Chase.executor = Theory.Executor.id by;
+    runtime = Agent.shell_gate;
+    fallback = None;
+    repair_budget = Agent.Repair_budget.v 1;
+    port = "main";
+  }
+
+(* The gate node's frontier-snapshot observations: the file-shaped
+   store-buffer hypotheses gate dispatch took, with their sources. *)
+let snapshot_hypotheses events node =
+  List.filter_map
+    (fun (e : Ledger.Event.t) ->
+      match e.kind with
+      | Ledger.Event.Hypothesis_taken
+          { hypothesis; address = Ledger.Address.File p; source; _ }
+        when of_node node e ->
+          Some (hypothesis, p, source)
+      | _ -> None)
+    events
+
+let snapshot_load_triples events node =
+  List.concat_map
+    (fun (e : Ledger.Event.t) ->
+      match e.kind with
+      | Ledger.Event.Load { tool = "chase.gate-snapshot"; observed }
+        when of_node node e ->
+          List.map
+            (fun (a, g, _) ->
+              Format.asprintf "%a @@ %a" Ledger.Address.pp a
+                Ledger.Generation.pp g)
+            observed
+      | _ -> [])
+    events
+
+let%expect_test "FL6 arm A: a gate over an in-flight draft takes the \
+                 snapshot hypothesis and its verdict retires free on the \
+                 identical landing" =
+  let task = json_relation "task" in
+  let impl = json_relation "impl" in
+  let verdict = gate_relation "verdict" in
+  let producer = template "gate-producer" in
+  let gate =
+    Theory.Executor.Shell_gate
+      {
+        name = "check";
+        command = [ "cat"; "impl.txt" ];
+        resource = "_build";
+      }
+  in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed impl;
+          Theory.Relation.Packed verdict;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"produce" ~for_:"task"
+            ~exists:("impl", Theory.Window.nodes 1)
+            ~by:producer ();
+          Theory.Spawn.v ~name:"gate_check" ~for_:"impl"
+            ~exists:("verdict", Theory.Window.nodes 1)
+            ~by:gate ();
+        ]
+  in
+  let repo, ledger_path = sandbox "goat_fl6_a_" in
+  let executors =
+    [
+      binding ~by:producer
+        ~script:
+          [ write_tool "impl.txt" "draft-one"; R.Reply {|{"msg":"built"}|} ];
+      gate_binding ~by:gate;
+    ]
+  in
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:(config ~repo ~ledger_path ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      let p_node =
+        match node_of_stmt events "produce" with
+        | Some n -> n
+        | None -> failwith "produce never fired"
+      in
+      (match nodes_of_stmt events "gate_check" with
+      | [ g_node ] ->
+          (match snapshot_hypotheses events g_node with
+          | [ (h, path, source) ] ->
+              check "the snapshot hypothesis is on exactly the writer"
+                (String.equal path "impl.txt"
+                && String.equal source
+                     ("store-buffer:" ^ Id.to_string p_node));
+              check
+                "the snapshot entered the observed witness at the \
+                 uncommitted coordinate (chase.gate-snapshot @ g0)"
+                (List.exists
+                   (String.equal "file:impl.txt @ g0")
+                   (snapshot_load_triples events g_node));
+              let indexed = List.mapi (fun i e -> (i, e)) events in
+              let index_of pred =
+                List.find_map
+                  (fun (i, e) -> if pred e then Some i else None)
+                  indexed
+              in
+              let discharge =
+                index_of (fun (e : Ledger.Event.t) ->
+                    match e.kind with
+                    | Ledger.Event.Hypothesis_discharged { hypothesis } ->
+                        Id.equal hypothesis h
+                    | _ -> false)
+              in
+              let retired n =
+                index_of (fun (e : Ledger.Event.t) ->
+                    match e.kind with
+                    | Ledger.Event.Settled Ledger.Settlement.Retired ->
+                        of_node n e
+                    | _ -> false)
+              in
+              (match (discharge, retired p_node, retired g_node) with
+              | Some d, Some p, Some g ->
+                  check
+                    "the hypothesis gated the verdict: producer landed, \
+                     then the silent discharge, then the verdict retired"
+                    (p < d && d < g)
+              | _, _, _ -> print_endline "!! trace is missing an index")
+          | hs ->
+              Printf.printf "!! expected 1 snapshot hypothesis, saw %d\n"
+                (List.length hs));
+          check "one gate attempt, retired, zero reconcile"
+            ((match settlement_of settled g_node with
+             | Some Ledger.Settlement.Retired -> true
+             | _ -> false)
+            && List.is_empty (drift_notes events g_node)
+            && not
+                 (List.exists
+                    (fun d ->
+                      String.equal d "serialize-reissue"
+                      || String.equal d "flush-subtree")
+                    (decisions events g_node)));
+          check
+            "the admissible verdict judged the observed draft (the gate \
+             read the in-flight bytes it hypothesized on)"
+            (List.exists
+               (fun (tu : Retire.Committed.tuple) ->
+                 String.equal tu.Retire.Committed.relation "verdict"
+                 &&
+                 match tu.Retire.Committed.payload with
+                 | `Assoc fields -> (
+                     match List.assoc_opt "output" fields with
+                     | Some (`String out) -> String.equal out "draft-one"
+                     | _ -> false)
+                 | _ -> false)
+               settled.Run.tuples)
+      | attempts ->
+          Printf.printf "!! expected 1 gate attempt, saw %d\n"
+            (List.length attempts));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    the snapshot hypothesis is on exactly the writer: true
+    the snapshot entered the observed witness at the uncommitted coordinate (chase.gate-snapshot @ g0): true
+    the hypothesis gated the verdict: producer landed, then the silent discharge, then the verdict retired: true
+    one gate attempt, retired, zero reconcile: true
+    the admissible verdict judged the observed draft (the gate read the in-flight bytes it hypothesized on): true
+    replay: coherent
+    |}]
+
+let%expect_test "FL6 arm B: the observed writer dies and the stale gate \
+                 verdict squashes per the table; no law consults it at \
+                 final state" =
+  let task = json_relation "task" in
+  let amid = json_relation "amid" in
+  let bmid = json_relation "bmid" in
+  let verdict = gate_relation "verdict" in
+  let first = template "gate-winner" in
+  let second = template "gate-loser" in
+  let gate =
+    Theory.Executor.Shell_gate
+      {
+        name = "check";
+        command = [ "cat"; "draft.txt" ];
+        resource = "_build";
+      }
+  in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed amid;
+          Theory.Relation.Packed bmid;
+          Theory.Relation.Packed verdict;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"win" ~for_:"task"
+            ~exists:("amid", Theory.Window.nodes 1)
+            ~by:first ();
+          Theory.Spawn.v ~name:"lose" ~for_:"task"
+            ~exists:("bmid", Theory.Window.nodes 1)
+            ~by:second ();
+          Theory.Spawn.v ~name:"gate_check" ~for_:"amid"
+            ~exists:("verdict", Theory.Window.nodes 1)
+            ~by:gate ();
+        ]
+  in
+  (* One committed base for both writers: the disjoint law's coordinate
+     (FL5's conviction is the injected death). *)
+  let repo, ledger_path =
+    sandbox ~files:[ ("clash.txt", "base\n") ] "goat_fl6_b_"
+  in
+  let executors =
+    [
+      binding ~by:first
+        ~script:[ write_tool "clash.txt" "winner"; R.Reply {|{"msg":"a"}|} ];
+      binding ~by:second
+        ~script:
+          [
+            write_tool "clash.txt" "loser";
+            write_tool "draft.txt" "dead-draft";
+            R.Reply {|{"msg":"b1"}|};
+            R.Reply {|{"msg":"b2"}|};
+          ];
+      gate_binding ~by:gate;
+    ]
+  in
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:(config ~repo ~ledger_path ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      (match (nodes_of_stmt events "lose", nodes_of_stmt events "gate_check") with
+      | [ loser; reissued ], [ g_node ] ->
+          check
+            "the gate's snapshot hypothesized on the doomed writer's \
+             in-flight draft"
+            (List.exists
+               (fun (_, path, source) ->
+                 String.equal path "draft.txt"
+                 && String.equal source
+                      ("store-buffer:" ^ Id.to_string loser))
+               (snapshot_hypotheses events g_node));
+          Printf.printf "doomed writer settled: %s\n"
+            (match settlement_of settled loser with
+            | Some sett -> settlement_str sett
+            | None -> "unsettled");
+          Printf.printf "stale gate verdict settled: %s\n"
+            (match settlement_of settled g_node with
+            | Some sett -> settlement_str sett
+            | None -> "unsettled");
+          Printf.printf "reissued writer settled: %s\n"
+            (match settlement_of settled reissued with
+            | Some sett -> settlement_str sett
+            | None -> "unsettled");
+          check
+            "no law consults the stale verdict at final state (it never \
+             became a committed tuple)"
+            (not
+               (List.exists
+                  (fun (tu : Retire.Committed.tuple) ->
+                    String.equal tu.Retire.Committed.relation "verdict")
+                  settled.Run.tuples));
+          check "committed content is single-writer coherent"
+            (String.equal
+               (In_channel.with_open_bin
+                  (Filename.concat repo "clash.txt")
+                  In_channel.input_all)
+               "winner")
+      | lose_attempts, gate_attempts ->
+          Printf.printf "!! expected 2 lose and 1 gate, saw %d and %d\n"
+            (List.length lose_attempts)
+            (List.length gate_attempts));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    the gate's snapshot hypothesized on the doomed writer's in-flight draft: true
+    doomed writer settled: squashed(reissue-loser)
+    stale gate verdict settled: squashed(upstream-squash)
+    reissued writer settled: retired
+    no law consults the stale verdict at final state (it never became a committed tuple): true
+    committed content is single-writer coherent: true
     replay: coherent
     |}]

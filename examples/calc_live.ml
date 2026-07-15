@@ -233,6 +233,9 @@ let gate =
           "python3 test_tokenizer.py && python3 test_evaluator.py && \
            python3 test_printer.py && python3 test_calc.py";
         ];
+      (* The declared build-artifact resource the gate's effect lock
+         scopes to (30-scheduling.md § gates on the shared tree). *)
+      resource = "pycache";
     }
 
 let statements =

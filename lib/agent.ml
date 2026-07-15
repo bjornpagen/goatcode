@@ -279,6 +279,10 @@ module Invocation = struct
       Ledger.Event.kind list;
         (* The tracked-hypothesis mint for reads served from another
            node's in-flight store (agent.mli; falsifier FL2). *)
+    gate_resource : string option;
+        (* The declared build-artifact resource a shell-gate run's effect
+           lock scopes to — [Some] exactly for gate dispatches (agent.mli;
+           30-scheduling.md § gates on the shared tree). *)
   }
 end
 
@@ -1284,10 +1288,17 @@ let replace_first ~needle ~replacement hay =
 
 let contains ~needle hay = count_occurrences ~needle hay > 0
 
-(* The mkdir-atomic, holder-named machine lock every effect runs behind:
-   shared machine state is outside every granted write surface, so
-   effects serialize machine-wide (docs/architecture/20-medium.md § event
-   taxonomy; migration row 6 re-scopes this to per-resource locks).
+(* The mkdir-atomic, holder-named effect lock, scoped PER DECLARED
+   RESOURCE: shared machine state is outside every granted write surface,
+   so effects serialize per the build-artifact resource their declaration
+   names — gates on distinct resources overlap, gates on one resource
+   queue, and source-tree reads take no lock (they are witnessed, and
+   witnesses conflict-detect better than locks serialize)
+   (docs/architecture/20-medium.md § event taxonomy;
+   docs/architecture/30-scheduling.md § gates on the shared tree). The
+   free-form [run_command]'s declarable footprint is the whole machine —
+   nothing finer is honest for an arbitrary command line — so its lock
+   key is ["machine"].
 
    The holder file carries the holder's NAME and PID: a crashed run
    cannot release its lock, so a lock whose recorded pid no longer runs
@@ -1295,8 +1306,22 @@ let contains ~needle hay = count_occurrences ~needle hay > 0
    spin into a spurious busy error. An unreadable or pid-less holder
    file stays conservative (treated as live: only positive evidence of
    death breaks a lock). *)
-let effect_lock_dir =
-  Filename.concat (Filename.get_temp_dir_name ()) "goatcode-effect.lock"
+let effect_lock_dir ~resource =
+  (* The resource string keys a filesystem path: anything the filesystem
+     would misread flattens to '-' (one lock per distinct declared name is
+     the contract; the sanitized key preserves it for the declarations the
+     census holds — "_build", "opam-cache", "machine"). *)
+  let sanitized =
+    String.map
+      (fun c ->
+        match c with
+        | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '.' | '_' | '-' -> c
+        | _ -> '-')
+      resource
+  in
+  Filename.concat
+    (Filename.get_temp_dir_name ())
+    ("goatcode-effect-" ^ sanitized ^ ".lock")
 
 let holder_pid contents =
   let marker = " pid=" in
@@ -1315,7 +1340,8 @@ let pid_alive pid =
   | exception Unix.Unix_error (Unix.EPERM, _, _) -> true
   | exception Unix.Unix_error (_, _, _) -> false
 
-let with_effect_lock ~holder f =
+let with_effect_lock ~resource ~holder f =
+  let effect_lock_dir = effect_lock_dir ~resource in
   let holder_file = Filename.concat effect_lock_dir "holder" in
   let rec acquire budget =
     match Unix.mkdir effect_lock_dir 0o755 with
@@ -1922,7 +1948,10 @@ let run_command_tool ~idempotent (view : Source.view) : Tool.t =
               in
               (status, read_file_bytes out_file))
         in
-        match with_effect_lock ~holder:(Id.to_string view.Source.me) run with
+        match
+          with_effect_lock ~resource:"machine"
+            ~holder:(Id.to_string view.Source.me) run
+        with
         | Error m -> Error (Tool.Errored ("run_command: " ^ m))
         | Ok (status, output) ->
             Ok
@@ -2243,12 +2272,14 @@ let pure_fn f =
    output become the head tuple. A non-zero exit is data (a failing test
    run is a tuple, not a fault). The gate is an effect against shared
    machine state, under the same discipline as [run_command]: it executes
-   behind the mkdir-atomic, holder-named machine lock and appends the
-   [Effect] event with the declared command line as the resource — an
-   unobserved, un-locked effect lane is not writable here. Idempotence is
-   the declaration's: a gate is a build/test command the engine may
-   freely reissue, which is why gates are grantable under either
-   speculation index (docs/architecture/30-channels.md § event
+   behind the mkdir-atomic, holder-named effect lock scoped to the
+   invocation's declared build-artifact resource (gates on distinct
+   resources overlap; 30-scheduling.md § gates on the shared tree) and
+   appends the [Effect] event with the declared command line as the
+   resource — an unobserved, un-locked effect lane is not writable here.
+   Idempotence is the declaration's: a gate is a build/test command the
+   engine may freely reissue, which is why gates are grantable under
+   either speculation index (docs/architecture/30-channels.md § event
    taxonomy). *)
 let shell_gate =
   let run :
@@ -2262,12 +2293,20 @@ let shell_gate =
     if stop_requested (on_yield ()) then
       Ok { Executor.outcome = Executor.Text ""; usage = Ledger.Usage.zero }
     else
-      match invocation.Invocation.grant.Grant.shell_gates with
-      | [] | [] :: _ ->
+      match
+        ( invocation.Invocation.grant.Grant.shell_gates,
+          invocation.Invocation.gate_resource )
+      with
+      | ([] | [] :: _), _ ->
           Error
             (fault Ledger.Fault.Executor_error
                "shell_gate: grant declares no gate command line")
-      | gate :: _ -> (
+      | _, None ->
+          Error
+            (fault Ledger.Fault.Executor_error
+               "shell_gate: invocation declares no build-artifact resource \
+                for the effect lock")
+      | gate :: _, Some resource -> (
           let out_file = Filename.temp_file "goat-gate-" ".txt" in
           let run_gate () =
             Fun.protect
@@ -2275,17 +2314,19 @@ let shell_gate =
               (fun () ->
                 (* The gate runs IN the shared tree: the one tree its
                    body operands landed on, so the command sees exactly
-                   the state it was spawned to judge. The gate's judgment
-                   is its head tuple; a file it writes into the tree is
-                   not an evented store, and the landing is built from
-                   Store events alone (README.md § design of record vs
-                   shipped engine, row 2) — so gate tree-writes never
-                   land at retire (migration row 6 re-scopes gates to a
-                   frontier snapshot). The harness process cwd is
-                   ambient machine state no footprint declares (live
-                   trace 2026-07-15: a test gate resolved its test file
-                   against the operator's shell cwd and reported a
-                   spurious red). *)
+                   the state it was spawned to judge — neighbors'
+                   in-flight edits included, which is why gate dispatch
+                   snapshotted the frontier into hypotheses before this
+                   command ran (30-scheduling.md § gates on the shared
+                   tree; falsifier FL6). The gate's judgment is its head
+                   tuple; a file it writes into the tree is not an
+                   evented store, and the landing is built from Store
+                   events alone (README.md § design of record vs shipped
+                   engine, row 2) — so gate tree-writes never land at
+                   retire. The harness process cwd is ambient machine
+                   state no footprint declares (live trace 2026-07-15: a
+                   test gate resolved its test file against the
+                   operator's shell cwd and reported a spurious red). *)
                 let command =
                   Printf.sprintf "cd %s && %s > %s 2>&1"
                     (Filename.quote invocation.Invocation.repo)
@@ -2295,7 +2336,9 @@ let shell_gate =
                 let status = Sys.command command in
                 (status, read_file_bytes out_file))
           in
-          match with_effect_lock ~holder:(Id.to_string node) run_gate with
+          match
+            with_effect_lock ~resource ~holder:(Id.to_string node) run_gate
+          with
           | Error m ->
               Error (fault Ledger.Fault.Executor_error ("shell_gate: " ^ m))
           | Ok (status, output) ->
