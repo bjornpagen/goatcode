@@ -99,18 +99,34 @@ module Content_hash : sig
 end
 
 (** A reference to an out-of-line payload (a store's net delta, a large
-    artifact). Payloads live in the worktree or blob store, never inline in
+    artifact). Payloads live in git's object database, never inline in
     events or invalidations; consumers pull through the ref if and when
     they decide it matters (docs/architecture/30-channels.md § invalidate,
-    don't update; the exact blob scheme is OPEN there). *)
+    don't update; docs/architecture/20-medium.md § event taxonomy — the
+    blob store is git's object database). *)
 module Delta_ref : sig
   type t
 
-  val v : string -> t
-  (** Mint a locator. v0 carries the locator as an opaque string (a
-      worktree-relative path or blob key); the exact blob scheme is OPEN
-      (docs/architecture/30-channels.md § OPEN items). Minters: the agent
-      layer's store tools and the commit layer's net-delta extraction. *)
+  val blob : string -> t option
+  (** Parse a git object id exactly as [git hash-object] prints it (40 or
+      64 lowercase hex digits) into a content-addressed ref — the one
+      constructor a file store's delta has, so a store event can only name
+      a blob that was hashed first (parse, don't validate). Minters: the
+      agent layer's store tools and the commit layer's net-delta
+      extraction. Readers of the oid: the retire step's landing,
+      [Frontier.materialize], and consumers pulling deltas through
+      invalidations (docs/architecture/20-medium.md § event taxonomy). *)
+
+  val locator : string -> t
+  (** A typed non-blob coordinate for movements with no bytes in the
+      object store: payloads that live in committed structures (tuple and
+      contract addresses — "relation/id", a contract name) and file
+      deletions, which have no content to address. A file store's delta
+      is never a locator — it is content-addressed through {!blob}. *)
+
+  val oid : t -> string option
+  (** The blob's object id when the ref is content-addressed ([None] for
+      coordinate locators) — the hex [git cat-file] accepts. *)
 
   val to_string : t -> string
   val pp : Format.formatter -> t -> unit

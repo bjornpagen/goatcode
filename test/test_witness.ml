@@ -720,8 +720,12 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
           }));
   write_file (Retire.Worktree.path wt_p // "gen.ml") "final\n";
   (* The store buffer's net delta is real data: address paired with the
-     locator consumers pull through (30-channels.md § invalidate, don't
-     update). *)
+     ref consumers pull through (30-channels.md § invalidate, don't
+     update). The ref is the landed content's blob oid — migration row 1
+     (README.md § design of record vs shipped engine) moved deltas from
+     path locators to content addresses in git's object database
+     (20-medium.md § event taxonomy), so the expected ref below is
+     [git hash-object] of "final\n". *)
   List.iter
     (fun (a, d) ->
       Printf.printf "net delta: %s -> %s\n"
@@ -770,10 +774,10 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
   sh (Printf.sprintf "rm -rf %s %s" (Filename.quote repo) (Filename.quote scratch));
   [%expect
     {|
-    net delta: file:gen.ml -> gen.ml
+    net delta: file:gen.ml -> 8ff82333fa5f2870433063e24f7218e7702a078d
     producer retire: ok
     gen.ml committed generation: g0
-    drifted retire: rejected (Witness_moved file:gen.ml witnessed g0 current g0 delta gen.ml)
+    drifted retire: rejected (Witness_moved file:gen.ml witnessed g0 current g0 delta 8ff82333fa5f2870433063e24f7218e7702a078d)
     exact retire: ok (free commit)
     |}]
 

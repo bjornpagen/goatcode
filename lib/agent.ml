@@ -1581,6 +1581,73 @@ let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
                   }));
   }
 
+(* The store path's git boundary: hash [file]'s bytes into the object
+   database at [repo] as a loose blob ([git hash-object -w]) and parse the
+   printed oid. Shelling out to git is the engine's commit-substrate idiom
+   (retire.ml owns the same boundary), and the git ban binds workers,
+   never the harness (docs/architecture/60-agents.md § the git ban): this
+   subprocess is the harness writing its own blob store. *)
+let blob_into_object_store ~repo file =
+  let ic =
+    Unix.open_process_in
+      (Printf.sprintf "git -C %s hash-object -w -- %s 2>/dev/null"
+         (Filename.quote repo) (Filename.quote file))
+  in
+  let line = In_channel.input_line ic in
+  match (Unix.close_process_in ic, line) with
+  | Unix.WEXITED 0, Some printed -> Ledger.Delta_ref.blob printed
+  | _, _ -> None
+
+(* Every file store lands through this one site, three obligations,
+   ordered (docs/architecture/20-medium.md § event taxonomy): blob first —
+   the full content into the object database at the committed root, so
+   the oid exists before any event names it; rename second — the bytes
+   move from a same-directory temporary into place by rename(2), atomic
+   on POSIX, so the readers the domain does not schedule (gate
+   subprocesses, external tools, the operator's own editor) can never
+   observe an interleaving (falsifier FL7); Store event third — returned
+   as data for the tool loop to append. A store whose blob cannot land is
+   a typed tool error, not a write: no event may name an oid the object
+   store does not hold. *)
+let store_file ~tool (grant : _ Grant.t) rel content :
+    (Ledger.Event.kind, Tool.failure) result =
+  let errored m = Error (Tool.Errored (tool ^ ": " ^ m)) in
+  let target = Filename.concat grant.Grant.worktree_root rel in
+  match
+    mkdirs (Filename.dirname target);
+    Filename.temp_file ~temp_dir:(Filename.dirname target) ".goat-store" ".tmp"
+  with
+  | exception Sys_error m -> errored m
+  | tmp -> (
+      match
+        write_file_bytes tmp content;
+        (* the temporary is born 0600; the landed file keeps the store's
+           usual read bits (best effort — permissions are not the law
+           here, atomicity is) *)
+        try Unix.chmod tmp 0o644 with Unix.Unix_error _ -> ()
+      with
+      | exception Sys_error m ->
+          remove_quietly tmp;
+          errored m
+      | () -> (
+          match
+            blob_into_object_store ~repo:grant.Grant.committed_root tmp
+          with
+          | None ->
+              remove_quietly tmp;
+              errored
+                ("the object store refused the content (no repository at "
+                ^ grant.Grant.committed_root ^ ")")
+          | Some delta -> (
+              match Sys.rename tmp target with
+              | exception Sys_error m ->
+                  remove_quietly tmp;
+                  errored m
+              | () ->
+                  Ok
+                    (Ledger.Event.Store
+                       { tool; address = Ledger.Address.File rel; delta }))))
+
 let write_file_tool (grant : _ Grant.t) : Tool.t =
   {
     decl =
@@ -1599,28 +1666,14 @@ let write_file_tool (grant : _ Grant.t) : Tool.t =
         in
         let* content = str_arg "content" input in
         let rel = Relpath.to_string path in
-        let target = Filename.concat grant.Grant.worktree_root rel in
-        match
-          mkdirs (Filename.dirname target);
-          write_file_bytes target content
-        with
-        | exception Sys_error m -> Error (Tool.Errored ("write_file: " ^ m))
-        | () ->
-            Ok
-              {
-                Tool.payload =
-                  Printf.sprintf "wrote %d bytes to %s"
-                    (String.length content) rel;
-                events =
-                  [
-                    Ledger.Event.Store
-                      {
-                        tool = "write_file";
-                        address = Ledger.Address.File rel;
-                        delta = Ledger.Delta_ref.v rel;
-                      };
-                  ];
-              });
+        let* store_event = store_file ~tool:"write_file" grant rel content in
+        Ok
+          {
+            Tool.payload =
+              Printf.sprintf "wrote %d bytes to %s" (String.length content)
+                rel;
+            events = [ store_event ];
+          });
   }
 
 let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
@@ -1683,36 +1736,20 @@ let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
                             "str_replace_edit: old_str occurs %d times in %s; \
                              it must occur exactly once"
                             n rel))
-                | _ -> (
+                | _ ->
                     let edited =
                       Option.get
                         (replace_first ~needle:old_str ~replacement:new_str
                            bytes)
                     in
-                    let target =
-                      Filename.concat grant.Grant.worktree_root rel
+                    let* store_event =
+                      store_file ~tool:"str_replace_edit" grant rel edited
                     in
-                    match
-                      mkdirs (Filename.dirname target);
-                      write_file_bytes target edited
-                    with
-                    | exception Sys_error m ->
-                        Error (Tool.Errored ("str_replace_edit: " ^ m))
-                    | () ->
-                        Ok
-                          {
-                            Tool.payload = "edited " ^ rel;
-                            events =
-                              [
-                                read_event;
-                                Ledger.Event.Store
-                                  {
-                                    tool = "str_replace_edit";
-                                    address = Ledger.Address.File rel;
-                                    delta = Ledger.Delta_ref.v rel;
-                                  };
-                              ];
-                          }))));
+                    Ok
+                      {
+                        Tool.payload = "edited " ^ rel;
+                        events = [ read_event; store_event ];
+                      })));
   }
 
 let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =

@@ -86,7 +86,7 @@ step):
 
 1. **Blobs into git's object store** — store tools write content-addressed
    blobs at store time; `Delta_ref` carries the oid; tmp+rename lands in
-   the same change. Lands FL7.
+   the same change. Lands FL7. — LANDED (this commit)
 2. **Retire from the ledger, not the tree** — the retire step builds the
    pathspec-limited commit from store-event oids; net-delta consumers move
    to the event stream.

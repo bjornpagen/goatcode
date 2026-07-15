@@ -113,14 +113,25 @@ module Content_hash = struct
 end
 
 module Delta_ref = struct
-  (* An opaque locator for an out-of-line payload.  The exact blob scheme is
-     OPEN (30-channels.md § OPEN items); v0 carries the locator as a string
-     (a worktree-relative path or blob key). *)
-  type t = string
+  (* A reference to an out-of-line payload. File stores are
+     content-addressed: [Blob] carries the oid of a loose object in git's
+     object database, proven hex-shaped at construction (20-medium.md
+     § event taxonomy — the blob store is git's object database).
+     [Locator] is the typed non-blob case: coordinates of payloads that
+     live in committed structures (tuple/contract addresses) or byte-less
+     movements (file deletions). *)
+  type t = Blob of string | Locator of string
 
-  let v s = s
-  let to_string r = r
-  let pp ppf r = Format.pp_print_string ppf r
+  let hex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+
+  let blob s =
+    let n = String.length s in
+    if (n = 40 || n = 64) && String.for_all hex s then Some (Blob s) else None
+
+  let locator s = Locator s
+  let oid = function Blob s -> Some s | Locator _ -> None
+  let to_string = function Blob s | Locator s -> s
+  let pp ppf r = Format.pp_print_string ppf (to_string r)
 end
 
 module Footprint = struct

@@ -20,9 +20,18 @@
      (60-agents.md § the git ban).
    - shell_gate eventing: a gate run is an Effect event behind the
      machine lock, carrying the declared command line.
+   - FL7 — torn-read impossibility (50-api.md § the flat-org roster;
+     20-medium.md § event taxonomy): a subprocess outside the domain
+     reads a stored path in a tight loop while stores land through the
+     tool path; every observed read is whole former-or-latter content —
+     tmp+rename's contract — and every Store event carries the blob oid
+     the object store already holds (migration ledger row 1).
 
    Rigged executors only; no live model call, no live provider lane, no
-   network, no sleeps. *)
+   network, no sleeps (two carved exceptions: the transport-backoff
+   falsifiers, whose backoff IS the behavior under test, and FL7's
+   bounded polls around a real concurrent reader, whose concurrency IS
+   the behavior under test). *)
 
 open Goatcode
 
@@ -885,6 +894,21 @@ let%expect_test "F12: the non-idempotent case exists only at the committed \
 let%expect_test "tool loop: stores and loads are evented with footprints; \
                  out-of-grant actions refuse in-band" =
   let e = env () in
+  (* A real repository for the committed root: the store path writes each
+     store's content into its object database at store time (migration
+     row 1; 20-medium.md § event taxonomy — the blob store is git's
+     object database), so the Store event below carries the blob oid of
+     "let x = 1\n", not a path locator. *)
+  let repo =
+    let d = Filename.temp_file "goat-repo-" "" in
+    Sys.remove d;
+    Unix.mkdir d 0o755;
+    ignore
+      (Sys.command
+         (Printf.sprintf "git -C %s init -q >/dev/null 2>&1"
+            (Filename.quote d)));
+    d
+  in
   let worktree =
     let d = Filename.temp_file "goat-wt-" "" in
     Sys.remove d;
@@ -895,7 +919,7 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     {
       Agent.Grant.read_globs = [ "src/**/*.ml" ];
       worktree_root = worktree;
-      committed_root = ".";
+      committed_root = repo;
       snoop_mounts = [];
       shell_gates = [];
       effects = [];
@@ -962,7 +986,7 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
   [%expect {|
     Ok "done"
     draft landed in worktree: true
-    Store write_file at file:src/gen.ml (delta src/gen.ml)
+    Store write_file at file:src/gen.ml (delta 0547b3d0eee9716f43dd8da30daecbb59e562ae0)
     Load read_file observing []
     |}]
 
@@ -1500,4 +1524,206 @@ let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
     goatcode: effect lock holder is not running (crashed-run pid=4194304); removing the stale lock
     head tuple: {"exit_status":0,"output":"gate-after-stale"}
     lock released: true
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* FL7 — torn-read impossibility (50-api.md § the flat-org roster;
+   20-medium.md § event taxonomy — torn reads are unrepresentable at the
+   file grain). The store path's three obligations, exercised from both
+   sides of the domain boundary:
+
+   - outside it, a subprocess the domain does not schedule reads the
+     target in a tight loop while stores land through the tool path;
+     rename(2) is atomic, so every observed read is a whole former or a
+     whole latter content, never an interleaving;
+   - inside it, every Store event carries a content-addressed blob oid
+     (Delta_ref.oid) that the object database already holds — blob first,
+     so [git cat-file] materializes the exact stored bytes from the
+     event's oid alone — and the store tools leave no temporary behind.
+
+   The reader is a plain shell loop rather than a shell_gate: FL7's law
+   binds readers the domain does NOT schedule (the gate lane's eventing
+   is falsified above); a raw subprocess is the strongest form of
+   "outside". Sensitivity control: the same classifier, fed a spliced
+   former/latter content, reports torn — the instrument can see the
+   failure tmp+rename forbids. *)
+
+let%expect_test "FL7: torn-read impossibility — an out-of-domain reader \
+                 sees whole former-or-latter content only, and store \
+                 events carry blob oids the object store holds" =
+  let e = env () in
+  let fresh_dir prefix =
+    let d = Filename.temp_file prefix "" in
+    Sys.remove d;
+    Unix.mkdir d 0o755;
+    d
+  in
+  let repo = fresh_dir "goat-fl7-repo-" in
+  ignore
+    (Sys.command
+       (Printf.sprintf "git -C %s init -q >/dev/null 2>&1"
+          (Filename.quote repo)));
+  let buffer = fresh_dir "goat-fl7-buffer-" in
+  let obs_dir = fresh_dir "goat-fl7-obs-" in
+  let scratch = fresh_dir "goat-fl7-scratch-" in
+  let stop = Filename.concat scratch "stop" in
+  let reader_done = Filename.concat scratch "reader-done" in
+  let target = Filename.concat buffer "doc.bin" in
+  let grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [];
+      worktree_root = buffer;
+      committed_root = repo;
+      snoop_mounts = [];
+      shell_gates = [];
+      effects = [];
+    }
+  in
+  (* Two whole contents, big enough that a non-atomic replacement would be
+     observable mid-write. *)
+  let former =
+    String.concat ""
+      (List.init 8000 (fun i -> Printf.sprintf "former line %06d\n" i))
+  in
+  let latter =
+    String.concat ""
+      (List.init 8000 (fun i -> Printf.sprintf "LATTER LINE %06d\n" i))
+  in
+  let store content =
+    Agent.Rigged.Call_tool
+      {
+        name = "write_file";
+        input =
+          `Assoc
+            [ ("path", `String "doc.bin"); ("content", `String content) ];
+      }
+  in
+  let invoke script =
+    Agent.invoke
+      ~executor:(Agent.Rigged.executor ~script)
+      ?fallback:None ~codec:verdict_codec ~registry:e.registry
+      ~invocation:(invocation grant)
+      ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
+      ~on_yield:(fun () -> [])
+  in
+  let wait_for pred =
+    (* bounded poll: 4000 x 5ms = 20s ceiling, normally milliseconds *)
+    let rec go n = pred () || (n > 0 && (Unix.sleepf 0.005; go (n - 1))) in
+    go 4000
+  in
+  (* Seed the former content through the tool path, so the reader always
+     finds a whole file. *)
+  show_result (invoke [ store former; Agent.Rigged.Reply "{\"verdict\": \"done\"}" ]);
+  (* The out-of-domain reader: a tight cat loop, one observation per file,
+     stopped by marker (never killed, so no observation is truncated by
+     the harness itself). *)
+  ignore
+    (Sys.command
+       (Printf.sprintf
+          "(i=0; while [ ! -f %s ] && [ \"$i\" -lt 20000 ]; do i=$((i+1)); \
+           cat %s > %s/r$i 2>/dev/null; done; : > %s) >/dev/null 2>&1 &"
+          (Filename.quote stop) (Filename.quote target)
+          (Filename.quote obs_dir) (Filename.quote reader_done)));
+  let observing () = Array.length (Sys.readdir obs_dir) > 0 in
+  Printf.printf "reader observing before stores: %b\n" (wait_for observing);
+  (* Fourteen whole stores land through the tool path (the seed above,
+     then thirteen alternating latter/former) while the reader loops. *)
+  show_result
+    (invoke
+       (List.concat_map
+          (fun _ -> [ store latter; store former ])
+          [ 1; 2; 3; 4; 5; 6 ]
+       @ [ store latter; Agent.Rigged.Reply "{\"verdict\": \"done\"}" ]));
+  ignore (Sys.command (Printf.sprintf ": > %s" (Filename.quote stop)));
+  Printf.printf "reader stopped cleanly: %b\n"
+    (wait_for (fun () -> Sys.file_exists reader_done));
+  (* Every observation classifies whole; the spliced control classifies
+     torn (the instrument sees what rename forbids). *)
+  let classify bytes =
+    if String.equal bytes former then `Former
+    else if String.equal bytes latter then `Latter
+    else `Torn
+  in
+  let observations =
+    Sys.readdir obs_dir |> Array.to_list
+    |> List.map (fun f ->
+           In_channel.with_open_bin (Filename.concat obs_dir f)
+             In_channel.input_all)
+  in
+  let torn =
+    List.length (List.filter (fun o -> classify o = `Torn) observations)
+  in
+  Printf.printf "observations classified whole: %b (torn: %d)\n"
+    (observations <> [] && torn = 0)
+    torn;
+  let spliced =
+    String.sub former 0 (String.length former / 2)
+    ^ String.sub latter (String.length latter / 2)
+        (String.length latter - (String.length latter / 2))
+  in
+  Printf.printf "control: a spliced observation classifies torn: %b\n"
+    (classify spliced = `Torn);
+  (* The inside half: 14 Store events, each delta a blob oid, each oid
+     materializing the exact stored bytes from the object database alone
+     (blob first — the oid existed before the event named it). *)
+  let deltas =
+    List.filter_map
+      (fun (ev : Ledger.Event.t) ->
+        match ev.kind with
+        | Ledger.Event.Store { delta; _ } -> Some delta
+        | _ -> None)
+      (Ledger.Replay.events e.ledger)
+  in
+  let cat_file oid =
+    let out = Filename.temp_file "goat-fl7-cat" ".out" in
+    let ok =
+      Sys.command
+        (Printf.sprintf "git -C %s cat-file -p %s > %s 2>/dev/null"
+           (Filename.quote repo) (Filename.quote oid) (Filename.quote out))
+      = 0
+    in
+    let bytes =
+      if ok then Some (In_channel.with_open_bin out In_channel.input_all)
+      else None
+    in
+    (try Sys.remove out with Sys_error _ -> ());
+    bytes
+  in
+  let materialized =
+    List.map
+      (fun d ->
+        match Ledger.Delta_ref.oid d with
+        | None -> `No_oid
+        | Some oid -> (
+            match cat_file oid with
+            | None -> `Blob_missing
+            | Some bytes -> classify bytes))
+      deltas
+  in
+  Printf.printf "store events: %d, every delta a blob oid: %b\n"
+    (List.length deltas)
+    (not (List.mem `No_oid materialized));
+  Printf.printf "every event oid materializes whole stored bytes: %b\n"
+    (List.for_all (fun m -> m = `Former || m = `Latter) materialized);
+  Printf.printf "both contents live in the object store: %b\n"
+    (List.mem `Former materialized && List.mem `Latter materialized);
+  Printf.printf "tmp litter in the buffer after stores: %d\n"
+    (Array.length (Sys.readdir buffer) - 1);
+  ignore
+    (Sys.command
+       (Printf.sprintf "rm -rf %s %s %s %s" (Filename.quote repo)
+          (Filename.quote buffer) (Filename.quote obs_dir)
+          (Filename.quote scratch)));
+  [%expect
+    {|
+    Ok "done"
+    reader observing before stores: true
+    Ok "done"
+    reader stopped cleanly: true
+    observations classified whole: true (torn: 0)
+    control: a spliced observation classifies torn: true
+    store events: 14, every delta a blob oid: true
+    every event oid materializes whole stored bytes: true
+    both contents live in the object store: true
+    tmp litter in the buffer after stores: 0
     |}]

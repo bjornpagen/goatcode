@@ -1463,16 +1463,37 @@ let publish_heads t (c : completed) =
               ()))
     c.heads
 
-(* v0 delta locators mirror the store tools' scheme: the address's own
-   worktree-relative locator (docs/architecture/30-channels.md § OPEN
-   items — the blob ref scheme). *)
-let delta_locator (address : Ledger.Address.t) =
+(* An invalidation's delta ref carries the payload's content address
+   where one exists: a moved file's ref is the retiring node's own store
+   event's blob oid — the exact bytes a consumer pulls through the ref
+   (docs/architecture/20-medium.md § event taxonomy: readers of the oid
+   include consumers pulling deltas through invalidations). Tuple and
+   contract addresses have no blob; their refs stay typed coordinate
+   locators. A file the node moved outside the evented store path (a gate
+   artifact riding the net delta) has no store event to name and keeps the
+   path-shaped locator until migration row 2 derives every delta from the
+   event stream. *)
+let delta_locator t ~node (address : Ledger.Address.t) =
   match address with
-  | Ledger.Address.File path -> Ledger.Delta_ref.v path
+  | Ledger.Address.File path -> (
+      let stored =
+        List.fold_left
+          (fun acc (e : Ledger.Event.t) ->
+            match (e.Ledger.Event.kind, e.Ledger.Event.node) with
+            | Ledger.Event.Store { address = a; delta; _ }, Some n
+              when Id.equal n node && Ledger.Address.equal a address ->
+                Some delta
+            | _ -> acc)
+          None
+          (Ledger.Replay.events t.ledger)
+      in
+      match stored with
+      | Some delta -> delta
+      | None -> Ledger.Delta_ref.locator path)
   | Ledger.Address.Tuple { relation; id } ->
-      Ledger.Delta_ref.v (relation ^ "/" ^ id)
+      Ledger.Delta_ref.locator (relation ^ "/" ^ id)
   | Ledger.Address.Contract name | Ledger.Address.Resource name ->
-      Ledger.Delta_ref.v name
+      Ledger.Delta_ref.locator name
 
 let fan_invalidations t ~node =
   List.iter
@@ -1485,7 +1506,7 @@ let fan_invalidations t ~node =
               Channel.Invalidation.address;
               new_generation;
               producer = node;
-              delta_ref = delta_locator address;
+              delta_ref = delta_locator t ~node address;
             }
           in
           (* Every channel fans; the edge footprints decide delivery — a

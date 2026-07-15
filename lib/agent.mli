@@ -371,7 +371,13 @@ val agent : stop:Stop.t list -> provider:Provider.t -> Executor.t
     The tool surface is a table of tool values derived from the grant at
     invocation start — the table {e is} the capability set: [read_file],
     [glob_list], [grep] (loads), [write_file], [str_replace_edit] (stores,
-    landing only in the worktree), and [run_command] {e only when} the
+    landing only in the worktree; every store is one site, three
+    obligations, ordered — the full content into git's object database
+    first, so the Store event's {!Ledger.Delta_ref} names an oid the
+    store already holds, tmp+rename at the target second, so a reader
+    the domain does not schedule can never observe an interleaving, the
+    Store event third — docs/architecture/20-medium.md § event taxonomy;
+    falsifier FL7), and [run_command] {e only when} the
     grant's effects carry a tool of that name (which the status index
     already polices — F12/F15; it runs behind the mkdir-atomic,
     holder-named machine lock). An ungranted tool has no table entry to

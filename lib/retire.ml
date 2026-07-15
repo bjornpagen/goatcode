@@ -154,13 +154,47 @@ module Worktree = struct
                (unquote
                   (after_arrow (String.sub line 3 (String.length line - 3)))))
 
-  (* v0 blob scheme (30-channels.md § OPEN items): the locator is the
-     worktree-relative path — the same locator the agent layer's store
-     tools mint, so a ref names the address's payload wherever the buffer
-     lives. *)
+  (* One changed path's content address: the landed bytes go into the
+     object database as a loose blob ([git hash-object -w] — a real
+     worktree shares the enclosing repository's store, so this is the
+     same odb the agent layer's store tools write) and the ref carries
+     the oid (20-medium.md § event taxonomy — the blob store is git's
+     object database). Bare-mode buffers (no enclosing repository,
+     [create]'s designed degrade) fall back to compute-only hashing: the
+     oid is still the content address; only durability degrades, exactly
+     as the buffer itself already has. *)
+  let blob_oid t rel =
+    let file = Filename.concat t.path rel in
+    let parse = function
+      | [ printed ] -> Ledger.Delta_ref.blob printed
+      | _ -> None
+    in
+    match
+      parse
+        (sh_lines
+           (Printf.sprintf "git -C %s hash-object -w -- %s"
+              (Filename.quote t.path) (Filename.quote file)))
+    with
+    | Some d -> Some d
+    | None ->
+        parse
+          (sh_lines
+             (Printf.sprintf "git hash-object -- %s" (Filename.quote file)))
+
+  (* The coalesced net delta in content addresses: each changed path pairs
+     with its landed blob's oid. A deletion has no bytes to address — its
+     ref stays the path-shaped coordinate locator until migration row 2
+     derives deletions from the event stream (README.md § design of record
+     vs shipped engine). *)
   let net_delta t =
     List.map
-      (fun rel -> (Ledger.Address.File rel, Ledger.Delta_ref.v rel))
+      (fun rel ->
+        let delta =
+          match blob_oid t rel with
+          | Some d -> d
+          | None -> Ledger.Delta_ref.locator rel
+        in
+        (Ledger.Address.File rel, delta))
       (changed_paths t)
 
   (* Squash's entire filesystem action. *)
