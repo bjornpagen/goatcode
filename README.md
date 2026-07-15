@@ -72,12 +72,17 @@ time, before any node runs, if one is missing):
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Copy the documented config and point its paths somewhere real
-([examples/run.toml](examples/run.toml) documents every key):
+Copy the documented config — it is self-contained: everything it touches
+lives under `./.goat/`, never the repository you happen to stand in
+([examples/run.toml](examples/run.toml) documents every key) — and create
+the demo repository it commits into (goat never runs git for you; the
+harness only writes the committed branch):
 
 ```
 cp examples/run.toml run.toml
-mkdir -p /tmp/goat-worktrees
+mkdir -p .goat/demo-repo
+git -C .goat/demo-repo init -q
+git -C .goat/demo-repo commit --allow-empty -m "goat demo root"
 ```
 
 Plan a toy spec — the planner emits a theory through the meta-catalog and
@@ -101,9 +106,9 @@ surface is a recorded OPEN item in `docs/architecture/70-api.md`). Then
 read the planning turn back — these are offline ledger readers:
 
 ```
-./_build/default/bin/main.exe report /tmp/goat-ledger.bin.plan    # wall clock, parallelism, speculation account
-./_build/default/bin/main.exe explain /tmp/goat-ledger.bin.plan node#0
-./_build/default/bin/main.exe replay /tmp/goat-ledger.bin.plan    # ledger-coherence audit
+./_build/default/bin/main.exe report .goat/ledger.bin.plan    # wall clock, parallelism, speculation account
+./_build/default/bin/main.exe explain .goat/ledger.bin.plan node#0
+./_build/default/bin/main.exe replay .goat/ledger.bin.plan    # ledger-coherence audit
 ```
 
 ## Toolchain

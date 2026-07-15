@@ -80,8 +80,15 @@ module Worktree = struct
     if not (Sys.file_exists path) then begin
       mkdirs root;
       (* A detached worktree so the committed branch keeps its single
-         writer; if [root] is not inside a repository the buffer is a bare
-         directory (the delta machinery then sees no changes). *)
+         writer; if [root] is not inside a repository (or the repository
+         has no commit to detach from) the buffer degrades to a bare
+         directory — the delta machinery then sees no changes, so file
+         work can never land. Bare mode is a DESIGNED engine mode (the
+         unit suites run whole engines on it, and several falsifiers
+         assert a silent stderr), so this layer stays quiet; the
+         operator-facing loudness lives at the CLI, which probes the
+         config's worktree_root against its repo at bind time and warns
+         on stderr before any node runs (bin/main.ml, wave-3 M6). *)
       if
         not
           (sh_ok

@@ -12,21 +12,41 @@
 # items).
 
 # --- Required paths --------------------------------------------------
+#
+# Self-contained by design: everything this example touches lives under
+# ./.goat/ — never the repository the operator happens to stand in (a
+# `repo = "."` would commit a goat-committed branch into it, and a
+# worktree_root outside any repository silently degrades store buffers
+# to bare directories; both burned a wave-3 finding).
+#
+# One-time setup — goat never runs git for you (workers are banned from
+# git, and the harness only ever writes the committed branch; creating
+# your repo is your act):
+#
+#   mkdir -p .goat/demo-repo
+#   git -C .goat/demo-repo init -q
+#   git -C .goat/demo-repo commit --allow-empty -m "goat demo root"
 
 # The git repository holding the committed branch. Retirement is the only
 # writer of committed state, and git is its storage engine: retirements
 # are commits, store buffers are worktrees (50-commit.md).
-repo = "."
+repo = ".goat/demo-repo"
 
 # The branch retirements commit to. Created on first run if absent.
 committed_branch = "goat-committed"
 
-# Where node store buffers (git worktrees) are created. Must exist.
-worktree_root = "/tmp/goat-worktrees"
+# Where node store buffers are created. Lives INSIDE the repo above: a
+# store buffer is a detached git worktree of the committed tree, so its
+# root must sit inside the repository it buffers (an outside root has no
+# repository to check out — the degradation is a loud stderr warning and
+# a bare directory whose work can never land).
+worktree_root = ".goat/demo-repo/.goat-worktrees"
 
 # The append-only event ledger. Created on run open; read back by
-# `goat report`, `goat explain`, `goat replay`.
-ledger_path = "/tmp/goat-ledger.bin"
+# `goat report`, `goat explain`, `goat replay`. One run per ledger: an
+# existing file at this path is refused (choose a fresh path — never
+# truncated).
+ledger_path = ".goat/ledger.bin"
 
 # --- Scheduling ------------------------------------------------------
 
