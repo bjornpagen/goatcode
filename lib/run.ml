@@ -229,41 +229,6 @@ type divergence = {
   replayed : string;
 }
 
-(* Wire renderings of drift classes and routes are produced by the
-   engine's ledger writes; replay compares them normalized (lowercase
-   alphanumerics, prefix match) so evidence suffixes on a class rendering
-   never manufacture a divergence. *)
-let normalize s =
-  let buf = Buffer.create (String.length s) in
-  String.iter
-    (fun c ->
-      match c with
-      | 'a' .. 'z' | '0' .. '9' -> Buffer.add_char buf c
-      | 'A' .. 'Z' -> Buffer.add_char buf (Char.lowercase_ascii c)
-      | _ -> ())
-    s;
-  Buffer.contents buf
-
-let drift_tag_of_recorded cls =
-  let n = normalize cls in
-  List.find_map
-    (fun (prefix, tag) ->
-      if String.starts_with ~prefix n then Some tag else None)
-    [
-      ("schemaidentical", Speculate.Drift.Schema_identical_t);
-      ("additive", Speculate.Drift.Additive_t);
-      ("breakingnarrow", Speculate.Drift.Breaking_narrow_t);
-      ("breakingbroad", Speculate.Drift.Breaking_broad_t);
-      ("producersquashed", Speculate.Drift.Producer_squashed_t);
-    ]
-
-let route_rendering (route : Speculate.Drift.Route.t) =
-  match route with
-  | Speculate.Drift.Route.Discharge_silently -> "discharge_silently"
-  | Speculate.Drift.Route.Reconcile_note -> "reconcile_note"
-  | Speculate.Drift.Route.Reconcile_delta -> "reconcile_delta"
-  | Speculate.Drift.Route.Flush_subtree -> "flush_subtree"
-
 let tuple_key (relation, id) = relation ^ "/" ^ id
 
 let replay ledger =
@@ -361,46 +326,33 @@ let replay ledger =
                        retire before it does"))
         consumed)
     retired_at;
-  (* Drift routing: the policy table, re-applied. *)
+  (* Drift routing: the policy table, re-applied. Events carry the typed
+     class and route, so the comparison is structural — no wire string is
+     ever re-parsed here. *)
   List.iter
     (fun (event : Ledger.Event.t) ->
       match event.kind with
       | Ledger.Event.Drift_note { address; cls; route } -> (
-          match drift_tag_of_recorded cls with
+          match List.assoc_opt cls Speculate.Drift.table with
           | None ->
               diverge ~at:event.at
                 ~recorded:
                   (Printf.sprintf "drift at %s recorded class %S"
                      (Ledger.Address.to_string address)
-                     cls)
+                     (Ledger.Drift.cls_to_string cls))
                 ~replayed:
-                  "a drift class outside the routing table's domain \
-                   (Speculate.Drift)"
-          | Some tag -> (
-              match List.assoc_opt tag Speculate.Drift.table with
-              | None ->
-                  diverge ~at:event.at
-                    ~recorded:
-                      (Printf.sprintf "drift at %s recorded class %S"
-                         (Ledger.Address.to_string address)
-                         cls)
-                    ~replayed:"the routing policy table has no route for \
-                               this class"
-              | Some expected ->
-                  let want = route_rendering expected in
-                  if
-                    not
-                      (String.starts_with ~prefix:(normalize want)
-                         (normalize route))
-                  then
-                    diverge ~at:event.at
-                      ~recorded:
-                        (Printf.sprintf "drift at %s (class %S) routed %S"
-                           (Ledger.Address.to_string address)
-                           cls route)
-                      ~replayed:
-                        (Printf.sprintf
-                           "the routing table routes this class to %S" want)))
+                  "the routing policy table has no route for this class"
+          | Some expected ->
+              if route <> expected then
+                diverge ~at:event.at
+                  ~recorded:
+                    (Printf.sprintf "drift at %s (class %S) routed %S"
+                       (Ledger.Address.to_string address)
+                       (Ledger.Drift.cls_to_string cls)
+                       (Ledger.Drift.route_to_string route))
+                  ~replayed:
+                    (Printf.sprintf "the routing table routes this class to %S"
+                       (Ledger.Drift.route_to_string expected)))
       | _ -> ())
     events;
   match

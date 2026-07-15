@@ -818,7 +818,7 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
   | Retire.Undischarged hyps -> (
       match hyps with
       | [] ->
-          abandon t c ~action:"flush-subtree"
+          abandon t c ~action:Ledger.Decision.Flush_subtree
             ~reason:"undischarged-hypotheses signal carried no hypotheses"
             ~count:0 ~refire:false;
           true
@@ -831,7 +831,7 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
             (Ledger.append t.ledger ~node:c.inst.node
                (Ledger.Event.Decision
                   {
-                    action = "flush-subtree";
+                    action = Ledger.Decision.Flush_subtree;
                     reason =
                       "undischarged hypothesis has no remaining producer";
                     counters =
@@ -868,13 +868,13 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
                  Ledger.Address.to_string m.address)
                moves)
       in
-      reissue_or_stop t c ~action:"serialize-reissue" ~reason
+      reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue ~reason
   | Retire.Conflict conflict ->
       let reason =
         "write-set conflict with sibling "
         ^ Id.to_string conflict.Retire.Conflict.sibling
       in
-      reissue_or_stop t c ~action:"serialize-reissue" ~reason
+      reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue ~reason
 
 let try_retire t =
   match t.retire_queue with
@@ -933,7 +933,7 @@ let resolve_parked t =
         (Ledger.append t.ledger ~node:inst.node
            (Ledger.Event.Decision
               {
-                action = "abort-suspended";
+                action = Ledger.Decision.Abort_suspended;
                 reason = "suspended read has no remaining producer";
                 counters = [];
               })

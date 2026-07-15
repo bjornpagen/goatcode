@@ -340,6 +340,20 @@ B11. **Telemetry/predictor event starvation.** No code appends the lifecycle
      executor ids ("fn:agent:refuter") so per-shape counters never match
      Pin_bump strings. Emit the events; fix the id reconstruction.
      (ledger.ml:380, report.ml:54/329.)
+     READER HALF LANDED (event-log agent, 2026-07-14): the Decision action
+     vocabulary is a sum (`Ledger.Decision`: Queued/Admitted carrying the
+     port, Dispatched, Suspended, Resumed, Serialize_reissue,
+     Flush_subtree, Abort_suspended, Ceiling_bound), `Drift_note` carries
+     typed `Ledger.Drift.cls`/`route` (Speculate.Drift's tag/Route now ARE
+     these types), and `Pin_bump`/`Switch_thrown` carry typed
+     `Theory.Statement.id`/`Executor.id` — the shapes_of double-prefix is
+     unrepresentable and the string-normalizing replay parser is deleted.
+     Readers (Telemetry.timing, Predictor_history, Report, Run.replay's
+     drift audit) verified against hand-built streams in
+     `test/test_report.ml`. REMAINING for the chase phase: EMIT the
+     lifecycle constructors (Queued/Admitted/Dispatched/Suspended/Resumed),
+     Ceiling_bound at the binding admission, and each shape's initial
+     `Pin_bump` at run open.
 
 B12. **`Tuple_cell` Obj.t erasure is unsound through the public API
      (MAJOR).** Channel lookup is keyed by relation NAME only; `Relation.v`

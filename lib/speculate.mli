@@ -92,35 +92,19 @@ module Drift : sig
             producer's statement itself re-fired. *)
     | Producer_squashed
 
-  (** Constructor tags, for the routing table's domain. *)
-  type tag =
-    | Schema_identical_t
-    | Additive_t
-    | Breaking_narrow_t
-    | Breaking_broad_t
-    | Producer_squashed_t
+  val tag : cls -> Ledger.Drift.cls
+  (** The class without its evidence — the compact typed form ledger
+      events carry ({!Ledger.Drift}): the routing table's domain, and what
+      [Drift_note] records. *)
 
-  val tag : cls -> tag
-
-  (** What the scheduler does about a drift class. Reconcile is the middle
-      mode silicon lacks — "here is what changed, patch your work" — and it
-      is where the design earns its keep
-      (docs/architecture/00-product.md § the machine analogy). *)
-  module Route : sig
-    type t =
-      | Discharge_silently  (** No consumer event; free commit. *)
-      | Reconcile_note  (** Drift note at next yield; consumer no-ops. *)
-      | Reconcile_delta
-          (** Diagnostics + net delta; consumer patches its work. *)
-      | Flush_subtree  (** Squash the provenance-closed subtree. *)
-  end
-
-  val table : (tag * Route.t) list
+  val table : (Ledger.Drift.cls * Ledger.Drift.route) list
   (** The routing policy, as data, in one place, inspectable. {!route} is
       its total-match twin; falsifier F8 constructs each class and asserts
-      the route. *)
+      the route. Reconcile is the middle mode silicon lacks — "here is
+      what changed, patch your work" — and it is where the design earns
+      its keep (docs/architecture/00-product.md § the machine analogy). *)
 
-  val route : cls -> Route.t
+  val route : cls -> Ledger.Drift.route
 
   val classify :
     landing:

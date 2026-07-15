@@ -64,58 +64,36 @@ module Drift = struct
     | Breaking_broad of { diff : Contract.Diff.t; refired : bool }
     | Producer_squashed
 
-  type tag =
-    | Schema_identical_t
-    | Additive_t
-    | Breaking_narrow_t
-    | Breaking_broad_t
-    | Producer_squashed_t
-
+  (* The evidence drops here: [Ledger.Drift.cls] is the class as ledger
+     events carry it (payloads never ride inline in events). *)
   let tag = function
-    | Schema_identical -> Schema_identical_t
-    | Additive _ -> Additive_t
-    | Breaking_narrow _ -> Breaking_narrow_t
-    | Breaking_broad _ -> Breaking_broad_t
-    | Producer_squashed -> Producer_squashed_t
-
-  module Route = struct
-    type t =
-      | Discharge_silently
-      | Reconcile_note
-      | Reconcile_delta
-      | Flush_subtree
-  end
+    | Schema_identical -> Ledger.Drift.Schema_identical
+    | Additive _ -> Ledger.Drift.Additive
+    | Breaking_narrow _ -> Ledger.Drift.Breaking_narrow
+    | Breaking_broad _ -> Ledger.Drift.Breaking_broad
+    | Producer_squashed -> Ledger.Drift.Producer_squashed
 
   (* The routing policy, one total match (doc rule 8). [table] below is its
      rendering as inspectable data; deriving the table from the match keeps
      one supply, so the twins cannot drift apart. *)
   let route_of_tag = function
-    | Schema_identical_t -> Route.Discharge_silently
-    | Additive_t -> Route.Reconcile_note
-    | Breaking_narrow_t -> Route.Reconcile_delta
-    | Breaking_broad_t -> Route.Flush_subtree
-    | Producer_squashed_t -> Route.Flush_subtree
+    | Ledger.Drift.Schema_identical -> Ledger.Drift.Discharge_silently
+    | Ledger.Drift.Additive -> Ledger.Drift.Reconcile_note
+    | Ledger.Drift.Breaking_narrow -> Ledger.Drift.Reconcile_delta
+    | Ledger.Drift.Breaking_broad -> Ledger.Drift.Flush_subtree
+    | Ledger.Drift.Producer_squashed -> Ledger.Drift.Flush_subtree
 
   let all_tags =
     [
-      Schema_identical_t;
-      Additive_t;
-      Breaking_narrow_t;
-      Breaking_broad_t;
-      Producer_squashed_t;
+      Ledger.Drift.Schema_identical;
+      Ledger.Drift.Additive;
+      Ledger.Drift.Breaking_narrow;
+      Ledger.Drift.Breaking_broad;
+      Ledger.Drift.Producer_squashed;
     ]
 
   let table = List.map (fun t -> (t, route_of_tag t)) all_tags
   let route cls = route_of_tag (tag cls)
-
-  (* Wire renderings of the class tags, as recorded on
-     [Ledger.Event.Drift_note] events; [Churn.measure] reads them back. *)
-  let tag_wire = function
-    | Schema_identical_t -> "schema_identical"
-    | Additive_t -> "additive"
-    | Breaking_narrow_t -> "breaking_narrow"
-    | Breaking_broad_t -> "breaking_broad"
-    | Producer_squashed_t -> "producer_squashed"
 
   (* A consumed path is touched when it and a diff path lie on one
      root-to-leaf line: a change at a parent reshapes every read beneath
@@ -197,8 +175,7 @@ module Counters = struct
   let of_ledger ledger (shape : Shape.t) =
     let samples =
       Ledger.Predictor_history.samples ledger
-        ~statement:(Theory.Statement.to_string shape.Shape.statement)
-        ~executor:(Theory.Executor.id_to_string shape.Shape.executor)
+        ~statement:shape.Shape.statement ~executor:shape.Shape.executor
         ~pin:shape.Shape.pin
     in
     let n = List.length samples in
@@ -312,9 +289,11 @@ module Churn = struct
             | _ -> None)
           events
       in
-      let broad_wire = Drift.tag_wire Drift.Breaking_broad_t in
       let broad =
-        List.length (List.filter (String.equal broad_wire) classes)
+        List.length
+          (List.filter
+             (function Ledger.Drift.Breaking_broad -> true | _ -> false)
+             classes)
       in
       if 2 * broad <= List.length classes then None
       else

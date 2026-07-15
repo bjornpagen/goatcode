@@ -8,6 +8,6 @@ let%expect_test "v0 interfaces link" =
   let (_ : Goatcode.Theory.admitted option) = None in
   let (_ : Goatcode.Run.settled option) = None in
   let (_ : Goatcode.Ledger.Settlement.t option) = None in
-  let (_ : Goatcode.Speculate.Drift.Route.t option) = None in
+  let (_ : Goatcode.Ledger.Drift.route option) = None in
   print_string "ok";
   [%expect {| ok |}]

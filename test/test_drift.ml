@@ -61,17 +61,17 @@ let record ?(required = []) fields : Yojson.Safe.t =
 (* F8 — drift routing table.                                           *)
 
 let tag_name = function
-  | Speculate.Drift.Schema_identical_t -> "schema_identical"
-  | Speculate.Drift.Additive_t -> "additive"
-  | Speculate.Drift.Breaking_narrow_t -> "breaking_narrow"
-  | Speculate.Drift.Breaking_broad_t -> "breaking_broad"
-  | Speculate.Drift.Producer_squashed_t -> "producer_squashed"
+  | Ledger.Drift.Schema_identical -> "schema_identical"
+  | Ledger.Drift.Additive -> "additive"
+  | Ledger.Drift.Breaking_narrow -> "breaking_narrow"
+  | Ledger.Drift.Breaking_broad -> "breaking_broad"
+  | Ledger.Drift.Producer_squashed -> "producer_squashed"
 
 let route_name = function
-  | Speculate.Drift.Route.Discharge_silently -> "discharge_silently"
-  | Speculate.Drift.Route.Reconcile_note -> "reconcile_note"
-  | Speculate.Drift.Route.Reconcile_delta -> "reconcile_delta"
-  | Speculate.Drift.Route.Flush_subtree -> "flush_subtree"
+  | Ledger.Drift.Discharge_silently -> "discharge_silently"
+  | Ledger.Drift.Reconcile_note -> "reconcile_note"
+  | Ledger.Drift.Reconcile_delta -> "reconcile_delta"
+  | Ledger.Drift.Flush_subtree -> "flush_subtree"
 
 (* One deliberate construction: classify a landing against one consumer's
    observed reads, then assert (a) the parse produced the intended class,
@@ -118,11 +118,11 @@ let%expect_test "F8: the routing policy table is total, as data" =
     Speculate.Drift.table;
   let tags =
     [
-      Speculate.Drift.Schema_identical_t;
-      Speculate.Drift.Additive_t;
-      Speculate.Drift.Breaking_narrow_t;
-      Speculate.Drift.Breaking_broad_t;
-      Speculate.Drift.Producer_squashed_t;
+      Ledger.Drift.Schema_identical;
+      Ledger.Drift.Additive;
+      Ledger.Drift.Breaking_narrow;
+      Ledger.Drift.Breaking_broad;
+      Ledger.Drift.Producer_squashed;
     ]
   in
   List.iter
@@ -196,8 +196,8 @@ let%expect_test "F8: each drift class, constructed deliberately, routes per \
   let (_ : Speculate.Drift.cls) =
     case "identical landing" ~landing:(d base base)
       ~consumed:[ [ "summary" ] ]
-      ~expect_tag:Speculate.Drift.Schema_identical_t
-      ~expect_route:Speculate.Drift.Route.Discharge_silently
+      ~expect_tag:Ledger.Drift.Schema_identical
+      ~expect_route:Ledger.Drift.Discharge_silently
   in
   (* row 2: additive — new optional field / widened enum. The widened enum
      is on a path the consumer DID read: additions route as a note even on
@@ -205,22 +205,22 @@ let%expect_test "F8: each drift class, constructed deliberately, routes per \
   let (_ : Speculate.Drift.cls) =
     case "new optional field" ~landing:(d base s_add)
       ~consumed:[ [ "summary" ]; [ "severity" ] ]
-      ~expect_tag:Speculate.Drift.Additive_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_note
+      ~expect_tag:Ledger.Drift.Additive
+      ~expect_route:Ledger.Drift.Reconcile_note
   in
   let (_ : Speculate.Drift.cls) =
     case "widened enum on a read path" ~landing:(d base s_widen)
       ~consumed:[ [ "severity" ] ]
-      ~expect_tag:Speculate.Drift.Additive_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_note
+      ~expect_tag:Ledger.Drift.Additive
+      ~expect_route:Ledger.Drift.Reconcile_note
   in
   (* row 3: breaking-narrow — the diff touches a minority of the consumer's
      observed reads; the class carries exactly the touched paths. *)
   let narrow =
     case "retype touches 1 of 3 read paths" ~landing:(d base s_retype_sev)
       ~consumed:[ [ "summary" ]; [ "severity" ]; [ "evidence" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_narrow_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_delta
+      ~expect_tag:Ledger.Drift.Breaking_narrow
+      ~expect_route:Ledger.Drift.Reconcile_delta
   in
   (match narrow with
   | Speculate.Drift.Breaking_narrow { touched; _ } ->
@@ -231,22 +231,22 @@ let%expect_test "F8: each drift class, constructed deliberately, routes per \
   let (_ : Speculate.Drift.cls) =
     case "retype touches 1 of 2 read paths" ~landing:(d base s_retype_sev)
       ~consumed:[ [ "summary" ]; [ "severity" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_narrow_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_delta
+      ~expect_tag:Ledger.Drift.Breaking_narrow
+      ~expect_route:Ledger.Drift.Reconcile_delta
   in
   (* hierarchy: a diff at the parent reshapes a read of the child, and a
      diff at the child reshapes a read of the parent *)
   let (_ : Speculate.Drift.cls) =
     case "retype parent of a read path" ~landing:(d base s_retype_meta)
       ~consumed:[ [ "meta"; "level" ]; [ "summary" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_narrow_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_delta
+      ~expect_tag:Ledger.Drift.Breaking_narrow
+      ~expect_route:Ledger.Drift.Reconcile_delta
   in
   let (_ : Speculate.Drift.cls) =
     case "retype child of a read path" ~landing:(d base s_retype_meta_level)
       ~consumed:[ [ "meta" ]; [ "summary" ]; [ "evidence" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_narrow_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_delta
+      ~expect_tag:Ledger.Drift.Breaking_narrow
+      ~expect_route:Ledger.Drift.Reconcile_delta
   in
   (* row 4: breaking-broad — majority of consumed paths touched, or the
      producer's statement itself re-fired (broad even on an EMPTY diff:
@@ -254,21 +254,21 @@ let%expect_test "F8: each drift class, constructed deliberately, routes per \
   let (_ : Speculate.Drift.cls) =
     case "retype touches 1 of 1 read paths" ~landing:(d base s_retype_sev)
       ~consumed:[ [ "severity" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_broad_t
-      ~expect_route:Speculate.Drift.Route.Flush_subtree
+      ~expect_tag:Ledger.Drift.Breaking_broad
+      ~expect_route:Ledger.Drift.Flush_subtree
   in
   let (_ : Speculate.Drift.cls) =
     case "retype+removal touch 2 of 2 read paths" ~landing:(d base s_two)
       ~consumed:[ [ "severity" ]; [ "evidence" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_broad_t
-      ~expect_route:Speculate.Drift.Route.Flush_subtree
+      ~expect_tag:Ledger.Drift.Breaking_broad
+      ~expect_route:Ledger.Drift.Flush_subtree
   in
   let refired =
     case "producer re-fired, byte-identical diff"
       ~landing:(`Refired (Contract.Diff.between base base))
       ~consumed:[ [ "summary" ] ]
-      ~expect_tag:Speculate.Drift.Breaking_broad_t
-      ~expect_route:Speculate.Drift.Route.Flush_subtree
+      ~expect_tag:Ledger.Drift.Breaking_broad
+      ~expect_route:Ledger.Drift.Flush_subtree
   in
   (match refired with
   | Speculate.Drift.Breaking_broad { refired = true; _ } -> ()
@@ -279,8 +279,8 @@ let%expect_test "F8: each drift class, constructed deliberately, routes per \
   let (_ : Speculate.Drift.cls) =
     case "producer squashed" ~landing:`Producer_squashed
       ~consumed:[ [ "summary" ] ]
-      ~expect_tag:Speculate.Drift.Producer_squashed_t
-      ~expect_route:Speculate.Drift.Route.Flush_subtree
+      ~expect_tag:Ledger.Drift.Producer_squashed
+      ~expect_route:Ledger.Drift.Flush_subtree
   in
   (* the per-consumer refinement: breaking changes ONLY to paths this
      consumer's observed witness never read are additive from this
@@ -289,21 +289,21 @@ let%expect_test "F8: each drift class, constructed deliberately, routes per \
   let (_ : Speculate.Drift.cls) =
     case "per-consumer: retyped field never read" ~landing:(d base s_retype_sev)
       ~consumed:[ [ "summary" ] ]
-      ~expect_tag:Speculate.Drift.Additive_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_note
+      ~expect_tag:Ledger.Drift.Additive
+      ~expect_route:Ledger.Drift.Reconcile_note
   in
   let (_ : Speculate.Drift.cls) =
     case "per-consumer: removed field never read"
       ~landing:(d base s_drop_evidence)
       ~consumed:[ [ "summary" ]; [ "severity" ] ]
-      ~expect_tag:Speculate.Drift.Additive_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_note
+      ~expect_tag:Ledger.Drift.Additive
+      ~expect_route:Ledger.Drift.Reconcile_note
   in
   let (_ : Speculate.Drift.cls) =
     case "per-consumer: breaking diff, empty witness"
       ~landing:(d base s_retype_sev) ~consumed:[]
-      ~expect_tag:Speculate.Drift.Additive_t
-      ~expect_route:Speculate.Drift.Route.Reconcile_note
+      ~expect_tag:Ledger.Drift.Additive
+      ~expect_route:Ledger.Drift.Reconcile_note
   in
   [%expect
     {|
@@ -620,11 +620,7 @@ let churn_switch theory =
   (* the run records each shape's initial pin at open (Predictor_history) *)
   ev
     (Ledger.Event.Pin_bump
-       {
-         statement = Theory.Statement.to_string review_sid;
-         executor = Theory.Executor.id_to_string executor;
-         pin = pin_key;
-       });
+       { statement = review_sid; executor; pin = pin_key });
   ev ~node:n
     (Ledger.Event.Fired
        {
@@ -638,11 +634,19 @@ let churn_switch theory =
        });
   ev ~node:n
     (Ledger.Event.Decision
-       { action = "queued"; reason = "port model contended"; counters = [] });
+       {
+         action = Ledger.Decision.Queued { port = "model" };
+         reason = "port model contended";
+         counters = [];
+       });
   Unix.sleepf 0.002;
   ev ~node:n
     (Ledger.Event.Decision
-       { action = "admitted"; reason = "slot freed"; counters = [] });
+       {
+         action = Ledger.Decision.Admitted { port = "model" };
+         reason = "slot freed";
+         counters = [];
+       });
   ev ~node:n
     (Ledger.Event.Hypothesis_taken
        {
@@ -654,7 +658,11 @@ let churn_switch theory =
        });
   ev ~node:n
     (Ledger.Event.Drift_note
-       { address; cls = "breaking_broad"; route = "flush_subtree" });
+       {
+         address;
+         cls = Ledger.Drift.Breaking_broad;
+         route = Ledger.Drift.Flush_subtree;
+       });
   ev ~node:n
     (Ledger.Event.Agent_turn
        { usage = { Ledger.Usage.tokens_in = 800; tokens_out = 400 } });
