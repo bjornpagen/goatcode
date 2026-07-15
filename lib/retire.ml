@@ -125,15 +125,14 @@ module Worktree = struct
                (unquote
                   (after_arrow (String.sub line 3 (String.length line - 3)))))
 
-  let net_delta (_ : t) : (Ledger.Address.t * Ledger.Delta_ref.t) list =
-    (* The address half of the net delta is [changed_paths]; the
-       [Delta_ref.t] half is unconstructible through Ledger's current
-       interface (no public constructor exists), so no pairs can be
-       forwarded yet — recorded as a deviation for the repair phase. The
-       retire step reads the buffer's net content directly
-       ([changed_paths]), so commit semantics do not depend on this
-       surface. *)
-    []
+  (* v0 blob scheme (30-channels.md § OPEN items): the locator is the
+     worktree-relative path — the same locator the agent layer's store
+     tools mint, so a ref names the address's payload wherever the buffer
+     lives. *)
+  let net_delta t =
+    List.map
+      (fun rel -> (Ledger.Address.File rel, Ledger.Delta_ref.v rel))
+      (changed_paths t)
 
   (* Squash's entire filesystem action. *)
   let drop t =
@@ -160,6 +159,9 @@ module Committed = struct
 
   type entry = {
     gen : Ledger.Generation.t;
+    content : Ledger.Content_hash.t option;
+        (* [None] = the committed state is a deletion; the address keeps
+           its generation but no triple can hold against it *)
     last_delta : Ledger.Delta_ref.t option;
   }
 
@@ -169,10 +171,15 @@ module Committed = struct
     mutable entries : entry Address_map.t;
     mutable tuple_set : tuple list;
     mutable write_log :
-      (Ledger.node Id.t * Ledger.Address.t * Ledger.Generation.t) list;
-        (* every committed write with the generation it landed at: the
-           conflict judge's sibling write-sets and the [disjoint] law's
-           footprint index *)
+      (Ledger.node Id.t * Ledger.Address.t * Ledger.Content_hash.t option)
+      list;
+        (* every committed write in base coordinates — the content the
+           writer's witness proves it derived from ([None] = a blind
+           write): the conflict judge's sibling write-sets and the
+           [disjoint] law's footprint index. Two writes to one address
+           from one base are a clobber by construction; serialized
+           writers cannot collide because the later one witnessed the
+           earlier landing (50-commit.md § retirement order). *)
   }
 
   let open_ ~repo ~branch =
@@ -198,6 +205,16 @@ module Committed = struct
   let generation t address =
     Option.map (fun e -> e.gen) (Address_map.find_opt address t.entries)
 
+  (* The commit-point lookup [Witness.holds] judges against: absence is a
+     real case, never a sentinel generation. *)
+  let state t address =
+    match Address_map.find_opt address t.entries with
+    | None -> Witness.Committed_state.Absent
+    | Some { gen; content = Some content; _ } ->
+        Witness.Committed_state.Landed { generation = gen; content }
+    | Some { gen; content = None; _ } ->
+        Witness.Committed_state.Deleted { generation = gen }
+
   let tuples t = t.tuple_set
 
   (* -------- internal surface (hidden by retire.mli) -------- *)
@@ -213,8 +230,11 @@ module Committed = struct
   (* Advance an address's generation (law 2 already judged by the caller:
      only semantically-changed addresses reach here). A fresh address
      starts at [zero] — landing exactly what a snooper witnessed leaves
-     that witness holding (falsifier F7). *)
-  let advance t ~node ~address ~fresh ~delta =
+     that witness holding (falsifier F7); [content] is what makes the
+     landing distinguishable from the pre-commit state a snooper of a
+     DIFFERENT draft witnessed there. [base] is the writer's read point —
+     the disjoint law's coordinate. *)
+  let advance t ~node ~address ~fresh ~content ~base ~delta =
     let gen =
       match Address_map.find_opt address t.entries with
       | Some e -> Ledger.Generation.next e.gen
@@ -222,8 +242,9 @@ module Committed = struct
           if fresh then Ledger.Generation.zero
           else Ledger.Generation.next Ledger.Generation.zero
     in
-    t.entries <- Address_map.add address { gen; last_delta = delta } t.entries;
-    t.write_log <- t.write_log @ [ (node, address, gen) ];
+    t.entries <-
+      Address_map.add address { gen; content; last_delta = delta } t.entries;
+    t.write_log <- t.write_log @ [ (node, address, base) ];
     gen
 
   let stage t ~rel_path =
@@ -350,8 +371,9 @@ let undischarged_hypotheses ledger node =
   dedup ~eq:Id.equal carried
   |> List.filter (fun h -> not (List.exists (Id.equal h) discharged))
 
-(* The only in-API source of a [Delta_ref.t]: the store event that moved
-   the address (every tool call is an event, 30-channels.md § the ledger). *)
+(* The fallback source of a [Delta_ref.t] when committal recorded none for
+   the address (hand-laid ledgers, tuple addresses): the store event that
+   moved it (every tool call is an event, 30-channels.md § the ledger). *)
 let last_store_delta ledger address =
   List.fold_left
     (fun acc (e : E.t) ->
@@ -422,20 +444,27 @@ let dependency_order ledger ~candidates =
 let moves_of ~committed ~ledger stales =
   List.filter_map
     (fun (s : Witness.stale) ->
-      let delta =
-        match Committed.last_delta committed s.address with
-        | Some d -> Some d
-        | None -> last_store_delta ledger s.address
-      in
-      Option.map
-        (fun delta_ref ->
-          {
-            address = s.address;
-            witnessed = s.witnessed;
-            current = s.current;
-            delta_ref;
-          })
-        delta)
+      match s.current with
+      | Witness.Committed_state.Absent ->
+          (* nothing landed at the address: no generation to have moved to
+             and no delta for a consumer to pull *)
+          None
+      | Witness.Committed_state.Landed { generation; _ }
+      | Witness.Committed_state.Deleted { generation } ->
+          let delta =
+            match Committed.last_delta committed s.address with
+            | Some d -> Some d
+            | None -> last_store_delta ledger s.address
+          in
+          Option.map
+            (fun delta_ref ->
+              {
+                address = s.address;
+                witnessed = s.witnessed;
+                current = generation;
+                delta_ref;
+              })
+            delta)
     stales
 
 (* Write-set intersection against siblings' committed write-sets: the
@@ -452,7 +481,7 @@ let conflict_judgment ~committed ~ledger ~merges ~node ~witness =
   let witnessed = Witness.addresses witness in
   let sibling_writes =
     List.fold_left
-      (fun acc (n, address, _gen) ->
+      (fun acc (n, address, _base) ->
         if Id.equal n node then acc
         else
           let rec add = function
@@ -484,8 +513,10 @@ let conflict_judgment ~committed ~ledger ~merges ~node ~witness =
 
 (* Phase 3a: the worktree's net delta applies to the committed tree.
    Generations advance only on semantic change: a byte-identical landing
-   advances nothing and fires nothing — the free commit, falsifier F7. *)
-let apply_worktree ~committed ~ledger ~node ~worktree =
+   advances nothing and fires nothing — the free commit, falsifier F7.
+   Every advance records the landed content (what a later witness is
+   judged against) and the write's base (what the disjoint law judges). *)
+let apply_worktree ~committed ~ledger ~node ~worktree ~witness =
   let net = Worktree.net_delta worktree in
   let delta_for address =
     List.find_map
@@ -501,6 +532,7 @@ let apply_worktree ~committed ~ledger ~node ~worktree =
         let repo_file = Committed.abs_path committed rel_path in
         let repo_content = read_file_opt repo_file in
         let address = Ledger.Address.File rel_path in
+        let base = Witness.observed_content witness address in
         match (wt_content, repo_content) with
         | None, None -> None
         | Some landed, Some prior when String.equal landed prior ->
@@ -512,7 +544,8 @@ let apply_worktree ~committed ~ledger ~node ~worktree =
             let fresh = Option.is_none prior in
             let gen =
               Committed.advance committed ~node ~address ~fresh
-                ~delta:(delta_for address)
+                ~content:(Some (Ledger.Content_hash.of_string landed))
+                ~base ~delta:(delta_for address)
             in
             Some (address, gen, fresh)
         | None, Some _ ->
@@ -520,7 +553,7 @@ let apply_worktree ~committed ~ledger ~node ~worktree =
             Committed.stage committed ~rel_path;
             let gen =
               Committed.advance committed ~node ~address ~fresh:false
-                ~delta:(delta_for address)
+                ~content:None ~base ~delta:(delta_for address)
             in
             Some (address, gen, false))
       (Worktree.changed_paths worktree)
@@ -540,8 +573,11 @@ let apply_worktree ~committed ~ledger ~node ~worktree =
     ~message:("retire " ^ Id.to_string node)
 
 (* Phase 3b: head tuples insert. A payload identical to the committed one
-   is the tuple-shaped free commit: no generation advance, no event. *)
-let insert_heads ~committed ~ledger ~node ~heads =
+   is the tuple-shaped free commit: no generation advance, no event. The
+   recorded content is the payload's serialization hash — the same hash the
+   engine's operand reads observe, so a witness of the tuple compares
+   against exactly what landed. *)
+let insert_heads ~committed ~ledger ~node ~witness ~heads =
   List.iter
     (fun (h : head_tuple) ->
       let address = Ledger.Address.Tuple { relation = h.relation; id = h.id } in
@@ -557,7 +593,13 @@ let insert_heads ~committed ~ledger ~node ~heads =
       | _ ->
           let fresh = Option.is_none existing in
           let gen =
-            Committed.advance committed ~node ~address ~fresh ~delta:None
+            Committed.advance committed ~node ~address ~fresh
+              ~content:
+                (Some
+                   (Ledger.Content_hash.of_string
+                      (Yojson.Safe.to_string h.payload)))
+              ~base:(Witness.observed_content witness address)
+              ~delta:None
           in
           let tuple =
             {
@@ -609,7 +651,7 @@ let step ~committed ~ledger ~registry ~merges ~node ~worktree ~witness ~heads
   match undischarged_hypotheses ledger node with
   | _ :: _ as undischarged -> Error (Undischarged undischarged)
   | [] -> (
-      match Witness.holds witness ~committed:(Committed.generation committed) with
+      match Witness.holds witness ~committed:(Committed.state committed) with
       | Error stales -> Error (Witness_moved (moves_of ~committed ~ledger stales))
       | Ok () -> (
           (* (2) conflict judgment *)
@@ -617,8 +659,8 @@ let step ~committed ~ledger ~registry ~merges ~node ~worktree ~witness ~heads
           | Some conflict -> Error (Conflict conflict)
           | None ->
               (* (3) the merge *)
-              apply_worktree ~committed ~ledger ~node ~worktree;
-              insert_heads ~committed ~ledger ~node ~heads;
+              apply_worktree ~committed ~ledger ~node ~worktree ~witness;
+              insert_heads ~committed ~ledger ~node ~witness ~heads;
               bind_provisional ~registry ~ledger ~node ~heads;
               (* (4) ledger seal: timings are derived by Telemetry from
                  event timestamps; the settlement is the closing fact *)
@@ -842,18 +884,30 @@ let judge_count ~theory ~tuples ~name ~over ~group_by ~bound =
   }
 
 let judge_disjoint ~committed ~name =
-  (* No two nodes commit writes to the same path in one generation: judged
-     against the footprint index the retire steps recorded. *)
+  (* No two nodes commit writes to one address from one base: judged
+     against the footprint index the retire steps recorded, in base
+     coordinates. The base is the content the writer's witness proves it
+     derived from ([None] = a blind write), so the clobber — two writers
+     neither of whom saw the other's landing — is pair equality, while
+     serialized writers cannot collide: the later one's base IS the
+     earlier one's landing. This is the backstop behind the per-retire
+     conflict judgment, which sees only observed store footprints. *)
+  let base_equal a b =
+    match (a, b) with
+    | None, None -> true
+    | Some x, Some y -> Ledger.Content_hash.equal x y
+    | None, Some _ | Some _, None -> false
+  in
   let write_log = Committed.write_log committed in
   let offenders =
     List.filter_map
-      (fun (n, address, gen) ->
+      (fun (n, address, base) ->
         if
           List.exists
-            (fun (m, address', gen') ->
+            (fun (m, address', base') ->
               (not (Id.equal n m))
               && Ledger.Address.equal address address'
-              && Ledger.Generation.equal gen gen')
+              && base_equal base base')
             write_log
         then Some (Ledger.Address.to_string address)
         else None)

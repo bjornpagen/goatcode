@@ -237,6 +237,11 @@ B2. **No Store/Effect events (BLOCKING, mostly fixed by Phase A).** Verify
     live. `Ledger.Delta_ref` needs a public constructor
     (`retire.ml:450` finding). `Worktree.net_delta` currently returns `[]`
     — make it real.
+    STATUS: `net_delta` DONE (commit-layer pass, 2026-07-14): pairs
+    `changed_paths` with `Delta_ref.v` of the worktree-relative locator;
+    deltas now flow through `Committed.advance` into
+    `generation_moved.delta_ref`. The `pure_fn`/`shell_gate` eventing half
+    remains (B15).
 
 B3. **Channel delivery unwired (BLOCKING).** Engine never constructs an rx,
     never calls `Channel.invalidate`/`pull_invalidations`/`pull_tuples`;
@@ -276,6 +281,14 @@ B7. **Generation-zero / content-hash witness hole.** Fresh-address commits
     cleanly even when the producer lands different content. Fix: `holds`
     must compare content hash, or fresh commits must not land at g0.
     (retire.ml:222, witness.ml:84.)
+    STATUS: DONE (commit-layer pass, 2026-07-14): committed lookup is now
+    the sum `Witness.Committed_state` (Absent | Landed{gen; content} |
+    Deleted{gen}; absence a real case), `Retire.Committed` records landed
+    content, and `holds` judges the content hash (law 3 amended in
+    50-commit.md). Falsifiers in test_witness.ml ("law 3: ..."), file- and
+    tuple-shaped. NOTE for B1/B15: agent tool loads still record
+    `Generation.zero` in triples — harmless now (content is judged), but
+    the generation lookup threading is still owed.
 
 B8. **judge_disjoint is a tautology.** `Committed.advance` gives every write
     a fresh generation per address, so two distinct nodes can never share an
@@ -283,6 +296,13 @@ B8. **judge_disjoint is a tautology.** `Committed.advance` gives every write
     satisfied, even in the clobber scenario. Fix generation assignment so
     same-generation concurrent writes to one address are detectable.
     (retire.ml:448/844.)
+    STATUS: DONE (commit-layer pass, 2026-07-14): the write log is in base
+    coordinates — each committed write carries the content its writer's
+    witness proves it derived from (blind write = the absence case), so a
+    clobber is pair equality and serialized writers cannot collide. Law
+    statements sharpened in 50-commit.md § retirement order and
+    10-theory.md (`law disjoint`). Falsifier: test_disjoint.ml (blind
+    clobber violated; serialized rewrite satisfied).
 
 B9. **feedback-is-forward inadmissible.** `dep_edges` adds an unconditional
     mint edge from every body position to every head mint position, with no

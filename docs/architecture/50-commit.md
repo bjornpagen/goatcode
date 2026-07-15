@@ -59,11 +59,20 @@ Every committed address (file path, relation tuple-set, contract) carries a
    for free** — their witnesses still hold, no invalidation fires, no
    reconcile runs. Correct speculation costs zero.
 3. **Commit iff the witness holds.** A node retires only if every witnessed
-   (address, generation) is still the committed generation. A moved
-   generation is the typed signal `Generation_moved { address; witnessed;
-   current; delta_ref }` shipped to the scheduler — the engine performs no
-   retry, no merge heroics, no silent re-read (the scheduler's routing table
-   owns what happens next — `40-scheduling.md` § drift routing).
+   triple still describes the committed state — and the judged thing is the
+   artifact (law 1): the address's committed content is the content the
+   triple carries. Generation equality is that comparison's shadow under
+   law 2, never the check itself, because a fresh address's first landing
+   and a pre-commit read (a snooped draft, an uncommitted tuple) share the
+   first generation and only their content tells them apart. Absence is a
+   real case of the committed lookup, never a sentinel generation: a triple
+   witnessed at the primordial generation holds against never-committed
+   state, so a consumer that witnessed a differing draft is rejected the
+   moment the producer's landing exists at all. A moved witness is the
+   typed signal `Generation_moved { address; witnessed; current;
+   delta_ref }` shipped to the scheduler — the engine performs no retry, no
+   merge heroics, no silent re-read (the scheduler's routing table owns
+   what happens next — `40-scheduling.md` § drift routing).
 4. **Soundness, never freshness.** A held witness proves the node's outputs
    were derived from the state they claim — it does not prove no better
    input existed. Freshness is the scheduler's economics (reissue if the
@@ -85,7 +94,15 @@ step for one node:
    serialize (reissue loser against winner's state) or merge (only when a
    declared merge function exists for the address class — a dune-file
    appender, a lockfile regenerator; merge functions are registered per
-   address class at theory accept, never improvised).
+   address class at theory accept, never improvised). Every committed write
+   is recorded in **base coordinates**: the content the writer's witness
+   proves it derived from, a blind write's absent base a real case. The
+   final-state `Disjoint_writes` judgment is then pair equality over that
+   index — two committed writes to one address from one base are the
+   clobber by construction, and serialized writers cannot collide because
+   the later one's base is the earlier one's landing. The base index is
+   the law's backstop behind this per-retire judgment, which sees only
+   observed store footprints.
 3. **The merge**: the worktree's net delta applies to the committed tree;
    generations advance per law 2; head tuples insert; provisional ids bind.
 4. **Ledger seal**: the settlement event, with timings, closes the node.

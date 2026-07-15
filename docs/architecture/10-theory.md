@@ -89,7 +89,7 @@ per-event, never deferred-with-modes:
 ```
 law quorum:    for f in finding: count(v in verdict where v.finding = f.id) >= 3
 law verdicted: for f in finding: f retires confirmed iff count(refuted) < 2
-law disjoint:  no two nodes commit writes to the same path in one generation
+law disjoint:  no two nodes commit writes to one path from one base state
 ```
 
 Enforcement plan: each law compiles to a query over the final tuple set plus

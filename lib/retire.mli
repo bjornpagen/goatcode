@@ -33,7 +33,10 @@ module Worktree : sig
 
   val net_delta : t -> (Ledger.Address.t * Ledger.Delta_ref.t) list
   (** Stores coalesce here: twelve edits to one file forward as one delta;
-      an edit that restores the original cancels to nothing. *)
+      an edit that restores the original cancels to nothing. The ref is
+      the worktree-relative locator — the same locator the agent layer's
+      store tools mint (the v0 blob scheme;
+      docs/architecture/30-channels.md § OPEN items). *)
 
   val drop : t -> unit
   (** Squash's entire filesystem action ([git worktree remove]). *)
@@ -47,8 +50,16 @@ module Committed : sig
   val open_ : repo:string -> branch:string -> t
 
   val generation : t -> Ledger.Address.t -> Ledger.Generation.t option
-  (** The committed generation of an address — the function
-      {!Witness.holds} judges against. *)
+  (** The committed generation of an address — the engine's read-time
+      lookup (a read of an address with no committed generation is a
+      pre-commit read). *)
+
+  val state : t -> Ledger.Address.t -> Witness.Committed_state.t
+  (** The committed state of an address — the lookup {!Witness.holds}
+      judges against. Absence is a real case: a fresh address's first
+      landing is distinguishable from never-committed state, which is what
+      rejects a consumer that witnessed a differing pre-commit draft
+      (docs/architecture/50-commit.md § law 3). *)
 
   type tuple = {
     relation : string;
