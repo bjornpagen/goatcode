@@ -111,10 +111,10 @@ module Delta_ref : sig
   (** Parse a git object id exactly as [git hash-object] prints it (40 or
       64 lowercase hex digits) into a content-addressed ref — the one
       constructor a file store's delta has, so a store event can only name
-      a blob that was hashed first (parse, don't validate). Minters: the
-      agent layer's store tools and the commit layer's net-delta
-      extraction. Readers of the oid: the retire step's landing,
-      [Frontier.materialize], and consumers pulling deltas through
+      a blob that was hashed first (parse, don't validate). Minter: the
+      agent layer's store tools. Readers of the oid: the retire step's
+      landing (which builds the commit from these blobs, never from the
+      tree), [Frontier.materialize], and consumers pulling deltas through
       invalidations (docs/architecture/20-medium.md § event taxonomy). *)
 
   val locator : string -> t

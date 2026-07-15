@@ -1162,8 +1162,10 @@ let walk root =
    directory (no enclosing repository — Worktree.create's fallback),
    where every file was stored by this node, so everything is a draft. *)
 let buffer_changes root =
-  (* "XY path" or "XY old -> new": the change lives at the new path — the
-     same porcelain read Retire.Worktree coalesces net deltas from. *)
+  (* "XY path" or "XY old -> new": the change lives at the new path — a
+     porcelain read of the node's own draft surface; retire reads none of
+     this (the landing is built from Store events, README.md § design of
+     record vs shipped engine, row 2). *)
   let porcelain_path line =
     if String.length line < 4 then None
     else
@@ -2327,8 +2329,12 @@ let shell_gate =
                 (* The gate runs IN the node's store buffer: its worktree
                    is the checkout the gate's body operands landed on, so
                    the command sees exactly the committed tree it was
-                   spawned to judge — and any artifact it writes rides
-                   the buffer's net delta like every other store. The
+                   spawned to judge. The gate's judgment is its head
+                   tuple; a file it writes into the buffer is not an
+                   evented store, and the landing is built from Store
+                   events alone (README.md § design of record vs shipped
+                   engine, row 2) — so gate tree-writes never land at
+                   retire (migration step 6 re-scopes gates). The
                    harness process cwd is ambient machine state no
                    footprint declares (live trace 2026-07-15: a test
                    gate resolved its test file against the operator's

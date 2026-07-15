@@ -10,6 +10,7 @@
   test_squash
   test_witness
   test_disjoint
+  test_landing
   test_drift
   test_boundary
   test_heads

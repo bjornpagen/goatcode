@@ -58,19 +58,40 @@ let seed_repo repo ~file ~contents =
         seed"
        (Filename.quote repo))
 
-(* Guard against a vacuously-clean store buffer: the free commit must be a
-   REAL write against the node's snapshot, not an absent one. *)
-let buffer_dirty worktree =
-  let out = Filename.temp_file "goat_status" ".txt" in
-  let status =
-    Sys.command
-      (Printf.sprintf "git -C %s status --porcelain >%s 2>/dev/null"
-         (Filename.quote (Retire.Worktree.path worktree))
-         (Filename.quote out))
-  in
-  let dirty = status = 0 && String.trim (read_file out) <> "" in
+(* A file store, the way the engine's tool path lands one (migration row 2,
+   README.md § design of record vs shipped engine): the content into the
+   committed repository's object database as a loose blob, the Store event
+   carrying the oid — the retire step's landing reads exactly this, never
+   any tree. *)
+let store ~ledger ~repo ~node rel contents =
+  let tmp = Filename.temp_file "goat_store" ".tmp" in
+  write_file tmp contents;
+  let out = Filename.temp_file "goat_oid" ".txt" in
+  ignore
+    (Sys.command
+       (Printf.sprintf "git -C %s hash-object -w -- %s >%s 2>/dev/null"
+          (Filename.quote repo) (Filename.quote tmp) (Filename.quote out)));
+  let oid = String.trim (read_file out) in
+  (try Sys.remove tmp with Sys_error _ -> ());
   (try Sys.remove out with Sys_error _ -> ());
-  dirty
+  match Ledger.Delta_ref.blob oid with
+  | None -> failwith ("hash-object printed no oid for " ^ rel)
+  | Some delta ->
+      ignore
+        (Ledger.append ledger ~node
+           (Ledger.Event.Store
+              { tool = "write_file"; address = Ledger.Address.File rel; delta }))
+
+(* Guard against a vacuously-absent store: the free commit must be a REAL
+   store event in the node's ledger, not a missing one. *)
+let stored_addresses ledger node =
+  List.filter_map
+    (fun (e : Ledger.Event.t) ->
+      match (e.kind, e.node) with
+      | Ledger.Event.Store { address; _ }, Some n when Id.equal n node ->
+          Some address
+      | _ -> None)
+    (Ledger.Replay.events ledger)
 
 let count ledger pred =
   List.length
@@ -307,9 +328,6 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
   let hider = Id.mint node_minter in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
   let merges = Retire.Merge_registry.empty in
-  let buffers = repo // "buffers" in
-  let wt_up = Retire.Worktree.create ~root:buffers ~node:upstream in
-  let wt_hider = Retire.Worktree.create ~root:(scratch // "bare") ~node:hider in
   (* The hider READS f.txt (the harness observes the load at the committed
      generation of the moment, zero)... *)
   ignore
@@ -330,15 +348,14 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
   in
   (match
      invoke_lying ~ledger ~registry ~node:hider ~reply_text:denial
-       ~worktree_root:(Retire.Worktree.path wt_hider)
+       ~worktree_root:(scratch // "wt_hider")
    with
   | Ok _ -> print_endline "boundary parse: ok (denial accepted as data)"
   | Error _ -> print_endline "boundary parse: fault");
   (* Upstream lands a REAL change to the hidden dependency and retires. *)
-  write_file (Retire.Worktree.path wt_up // "f.txt") "v2\n";
+  store ~ledger ~repo ~node:upstream "f.txt" "v2\n";
   (match
      Retire.step ~committed ~ledger ~registry ~merges ~node:upstream
-       ~worktree:wt_up
        ~witness:(Witness.observed ledger ~node:upstream)
        ~heads:[]
    with
@@ -361,8 +378,8 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
   (* The retire step routes it as the typed Witness_moved signal — no
      retry, no merge heroics, no silent re-read. *)
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:hider
-       ~worktree:wt_hider ~witness:w ~heads:[]
+     Retire.step ~committed ~ledger ~registry ~merges ~node:hider ~witness:w
+       ~heads:[]
    with
   | Error (Retire.Witness_moved _) ->
       print_endline "hider retire: rejected (Witness_moved)"
@@ -413,18 +430,12 @@ let%expect_test "F7: a byte-identical landing advances nothing, fires \
   let c = Id.mint node_minter in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
   let merges = Retire.Merge_registry.empty in
-  let buffers = repo // "buffers" in
-  let wt_a = Retire.Worktree.create ~root:buffers ~node:a in
-  (* B's buffer snapshots BEFORE A retires: B's later write of "v2" is a
-     real edit against its own base "v1". *)
-  let wt_b = Retire.Worktree.create ~root:buffers ~node:b in
-  let wt_c = Retire.Worktree.create ~root:(scratch // "bare") ~node:c in
   let f_addr = Ledger.Address.File "f.txt" in
   (* Control: A lands a semantic change.  Generation must advance and an
      invalidation must fire — the non-free path is detectable. *)
-  write_file (Retire.Worktree.path wt_a // "f.txt") "v2\n";
+  store ~ledger ~repo ~node:a "f.txt" "v2\n";
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:a ~worktree:wt_a
+     Retire.step ~committed ~ledger ~registry ~merges ~node:a
        ~witness:(Witness.observed ledger ~node:a) ~heads:[]
    with
   | Ok () -> print_endline "A (control) retire: ok"
@@ -456,15 +467,24 @@ let%expect_test "F7: a byte-identical landing advances nothing, fires \
             content = v2_hash;
             confidence = 0.9;
           }));
-  (* B lands byte-identically to the hypothesis: a real write against its
-     snapshot (guard below), identical to the committed bytes. *)
-  write_file (Retire.Worktree.path wt_b // "f.txt") "v2\n";
-  Printf.printf "B store buffer dirty against its snapshot: %b\n"
-    (buffer_dirty wt_b);
+  (* B lands byte-identically to the hypothesis: a real Store event in its
+     ledger (guard below), identical to the committed bytes. B's read of
+     A's landing is observed first — under migration row 2 the landing is
+     built from Store events (README.md § design of record vs shipped
+     engine), so B's write set is visible to the conflict judge and only
+     the witnessed read serializes B behind A; the free-commit law under
+     test is unchanged: the byte-identical landing advances nothing. *)
+  ignore
+    (Ledger.append ledger ~node:b
+       (Ledger.Event.Load
+          { tool = "read"; observed = [ (f_addr, g1, v2_hash) ] }));
+  store ~ledger ~repo ~node:b "f.txt" "v2\n";
+  Printf.printf "B stored f.txt in the event stream: %b\n"
+    (List.exists (Ledger.Address.equal f_addr) (stored_addresses ledger b));
   let gen_before = Retire.Committed.generation committed f_addr in
   let inv_before = invalidations ledger in
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:b ~worktree:wt_b
+     Retire.step ~committed ~ledger ~registry ~merges ~node:b
        ~witness:(Witness.observed ledger ~node:b) ~heads:[]
    with
   | Ok () -> print_endline "B retire: ok"
@@ -495,7 +515,7 @@ let%expect_test "F7: a byte-identical landing advances nothing, fires \
   (* The speculator retires: witness still holds, hypothesis discharged,
      zero reconcile machinery ever ran. *)
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:c ~worktree:wt_c
+     Retire.step ~committed ~ledger ~registry ~merges ~node:c
        ~witness:(Witness.observed ledger ~node:c) ~heads:[]
    with
   | Ok () -> print_endline "speculator retire: ok"
@@ -516,7 +536,7 @@ let%expect_test "F7: a byte-identical landing advances nothing, fires \
     {|
     A (control) retire: ok
     after A: generation g1, invalidations 1
-    B store buffer dirty against its snapshot: true
+    B stored f.txt in the event stream: true
     B retire: ok
     generation advanced by B's landing: false (g1 -> g1)
     invalidations fired by B's landing: 0
@@ -551,14 +571,10 @@ let%expect_test "F7 control: a landing that differs by one byte advances, \
   let c = Id.mint node_minter in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
   let merges = Retire.Merge_registry.empty in
-  let buffers = repo // "buffers" in
-  let wt_a = Retire.Worktree.create ~root:buffers ~node:a in
-  let wt_b = Retire.Worktree.create ~root:buffers ~node:b in
-  let wt_c = Retire.Worktree.create ~root:(scratch // "bare") ~node:c in
   let f_addr = Ledger.Address.File "f.txt" in
-  write_file (Retire.Worktree.path wt_a // "f.txt") "v2\n";
+  store ~ledger ~repo ~node:a "f.txt" "v2\n";
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:a ~worktree:wt_a
+     Retire.step ~committed ~ledger ~registry ~merges ~node:a
        ~witness:(Witness.observed ledger ~node:a) ~heads:[]
    with
   | Ok () -> print_endline "A retire: ok"
@@ -576,11 +592,19 @@ let%expect_test "F7 control: a landing that differs by one byte advances, \
             tool = "snoop";
             observed = [ (f_addr, g1, Ledger.Content_hash.of_string "v2\n") ];
           }));
-  (* ...but B lands DIFFERENT bytes. *)
-  write_file (Retire.Worktree.path wt_b // "f.txt") "v3\n";
+  (* ...but B — serialized behind A's landing by the same observed read as
+     the free-commit test — lands DIFFERENT bytes. *)
+  ignore
+    (Ledger.append ledger ~node:b
+       (Ledger.Event.Load
+          {
+            tool = "read";
+            observed = [ (f_addr, g1, Ledger.Content_hash.of_string "v2\n") ];
+          }));
+  store ~ledger ~repo ~node:b "f.txt" "v3\n";
   let inv_before = invalidations ledger in
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:b ~worktree:wt_b
+     Retire.step ~committed ~ledger ~registry ~merges ~node:b
        ~witness:(Witness.observed ledger ~node:b) ~heads:[]
    with
   | Ok () -> print_endline "B retire: ok"
@@ -590,7 +614,7 @@ let%expect_test "F7 control: a landing that differs by one byte advances, \
   Printf.printf "invalidations fired by B's landing: %d\n"
     (invalidations ledger - inv_before);
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:c ~worktree:wt_c
+     Retire.step ~committed ~ledger ~registry ~merges ~node:c
        ~witness:(Witness.observed ledger ~node:c) ~heads:[]
    with
   | Error (Retire.Witness_moved _) ->
@@ -625,18 +649,17 @@ let%expect_test "F7: an identical head-tuple payload is a free commit" =
   let a = Id.mint node_minter in
   let b = Id.mint node_minter in
   let d = Id.mint node_minter in
-  (* No git needed: tuple state is the committed tuple set; worktrees are
-     bare buffers with no file delta. *)
+  (* No git needed: tuple state is the committed tuple set; the nodes'
+     ledgers hold no file stores, so nothing lands file-shaped. *)
   let committed = Retire.Committed.open_ ~repo:(scratch // "repo") ~branch:"goat" in
   let merges = Retire.Merge_registry.empty in
-  let wt n = Retire.Worktree.create ~root:(scratch // "bare") ~node:n in
   let addr = Ledger.Address.Tuple { relation = "report"; id = "r-1" } in
   let head payload =
     [ { Retire.relation = "report"; id = "r-1"; payload } ]
   in
   let retire node payload =
     match
-      Retire.step ~committed ~ledger ~registry ~merges ~node ~worktree:(wt node)
+      Retire.step ~committed ~ledger ~registry ~merges ~node
         ~witness:(Witness.observed ledger ~node)
         ~heads:(head payload)
     with
@@ -677,7 +700,7 @@ let%expect_test "F7: an identical head-tuple payload is a free commit" =
 (* commit-point check judges the artifact (the content hash the triple    *)
 (* already carries; 50-commit.md § law 1/law 3): the drifted snooper is   *)
 (* rejected, the exact-prediction snooper still retires free, and the     *)
-(* rejection carries the store's delta ref (the net-delta flow).          *)
+(* rejection carries the store event's delta ref.                         *)
 (* ================================================================== *)
 
 let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
@@ -695,9 +718,6 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
   let exact = Id.mint node_minter in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
   let merges = Retire.Merge_registry.empty in
-  let wt_p = Retire.Worktree.create ~root:(repo // "buffers") ~node:producer in
-  let wt_d = Retire.Worktree.create ~root:(scratch // "bare") ~node:drifted in
-  let wt_e = Retire.Worktree.create ~root:(scratch // "bare") ~node:exact in
   let addr = Ledger.Address.File "gen.ml" in
   let g0 = Ledger.Generation.zero in
   (* Both consumers snooped the producer's store buffer BEFORE it settled:
@@ -718,23 +738,27 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
             tool = "snoop";
             observed = [ (addr, g0, Ledger.Content_hash.of_string "final\n") ];
           }));
-  write_file (Retire.Worktree.path wt_p // "gen.ml") "final\n";
-  (* The store buffer's net delta is real data: address paired with the
-     ref consumers pull through (30-channels.md § invalidate, don't
-     update). The ref is the landed content's blob oid — migration row 1
+  store ~ledger ~repo ~node:producer "gen.ml" "final\n";
+  (* The store event's delta is real data: address paired with the ref
+     consumers pull through (20-medium.md § invalidate, don't update).
+     The ref is the landed content's blob oid — migration row 1
      (README.md § design of record vs shipped engine) moved deltas from
-     path locators to content addresses in git's object database
-     (20-medium.md § event taxonomy), so the expected ref below is
+     path locators to content addresses in git's object database, and
+     row 2 made the event stream the landing's one source (30-scheduling.md
+     § retirement order and the landing) — so the expected ref below is
      [git hash-object] of "final\n". *)
   List.iter
-    (fun (a, d) ->
-      Printf.printf "net delta: %s -> %s\n"
-        (Ledger.Address.to_string a)
-        (Ledger.Delta_ref.to_string d))
-    (Retire.Worktree.net_delta wt_p);
+    (fun (e : Ledger.Event.t) ->
+      match (e.kind, e.node) with
+      | Ledger.Event.Store { address; delta; _ }, Some n
+        when Id.equal n producer ->
+          Printf.printf "store event: %s -> %s\n"
+            (Ledger.Address.to_string address)
+            (Ledger.Delta_ref.to_string delta)
+      | _ -> ())
+    (Ledger.Replay.events ledger);
   (match
      Retire.step ~committed ~ledger ~registry ~merges ~node:producer
-       ~worktree:wt_p
        ~witness:(Witness.observed ledger ~node:producer)
        ~heads:[]
    with
@@ -746,7 +770,6 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
      its retire is the typed Witness_moved rejection, delta ref attached. *)
   (match
      Retire.step ~committed ~ledger ~registry ~merges ~node:drifted
-       ~worktree:wt_d
        ~witness:(Witness.observed ledger ~node:drifted)
        ~heads:[]
    with
@@ -765,7 +788,7 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
   | Ok () -> print_endline "drifted retire: ok (STALE WITNESS COMMITTED)");
   (* The exact-prediction snooper is the free commit law 2 promises. *)
   (match
-     Retire.step ~committed ~ledger ~registry ~merges ~node:exact ~worktree:wt_e
+     Retire.step ~committed ~ledger ~registry ~merges ~node:exact
        ~witness:(Witness.observed ledger ~node:exact)
        ~heads:[]
    with
@@ -774,7 +797,7 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
   sh (Printf.sprintf "rm -rf %s %s" (Filename.quote repo) (Filename.quote scratch));
   [%expect
     {|
-    net delta: file:gen.ml -> 8ff82333fa5f2870433063e24f7218e7702a078d
+    store event: file:gen.ml -> 8ff82333fa5f2870433063e24f7218e7702a078d
     producer retire: ok
     gen.ml committed generation: g0
     drifted retire: rejected (Witness_moved file:gen.ml witnessed g0 current g0 delta 8ff82333fa5f2870433063e24f7218e7702a078d)
@@ -796,7 +819,6 @@ let%expect_test "law 3, tuple-shaped: a predicted payload is judged by \
     Retire.Committed.open_ ~repo:(scratch // "repo") ~branch:"goat"
   in
   let merges = Retire.Merge_registry.empty in
-  let wt n = Retire.Worktree.create ~root:(scratch // "bare") ~node:n in
   let addr = Ledger.Address.Tuple { relation = "report"; id = "r-9" } in
   let payload_hash p = Ledger.Content_hash.of_string (Yojson.Safe.to_string p) in
   let pass : Yojson.Safe.t = `Assoc [ ("verdict", `String "pass") ] in
@@ -819,7 +841,7 @@ let%expect_test "law 3, tuple-shaped: a predicted payload is judged by \
           }));
   let retire node ~heads =
     match
-      Retire.step ~committed ~ledger ~registry ~merges ~node ~worktree:(wt node)
+      Retire.step ~committed ~ledger ~registry ~merges ~node
         ~witness:(Witness.observed ledger ~node)
         ~heads
     with

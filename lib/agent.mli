@@ -441,8 +441,12 @@ val shell_gate : Executor.t
 (** Runs the command line declared on the {!Theory.Executor.Shell_gate},
     with the node's store buffer as its working directory — the worktree
     is the checkout the gate's operands landed on, so the command judges
-    exactly that tree and its written artifacts ride the net delta; the
-    harness process cwd is ambient state no footprint declares. Exit
+    exactly that tree. Its judgment is its head tuple; a file the gate
+    writes into the tree is not an evented store and never lands at
+    retire, because the landing is built from Store events alone
+    (docs/architecture/README.md § design of record vs shipped engine,
+    row 2). The harness process cwd is ambient state no footprint
+    declares. Exit
     status and captured output become the head tuple. A non-zero
     exit is data (a failing test run is a tuple, not a fault). The gate
     is an effect against shared machine state: it runs behind the

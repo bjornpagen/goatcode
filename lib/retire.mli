@@ -5,7 +5,7 @@
     ledger events. Squash is: drop the worktree, mark the events squashed —
     nothing else exists to clean up; "failed work leaves nothing" is true
     by construction, never by rollback, and no compensating action is
-    representable here (docs/architecture/50-commit.md § abort by
+    representable here (docs/architecture/30-scheduling.md § abort by
     construction).
 
     Nodes retire in dependency order — a node's producers retire before it
@@ -13,8 +13,13 @@
     storage engine, not a metaphor: the committed tree is a branch,
     retirements are commits, worktrees are git worktrees, and the engine
     holds the only writer lock on the committed branch; agents never run
-    git against it (docs/architecture/50-commit.md § durability
-    boundary). *)
+    git against it (docs/architecture/30-scheduling.md § durability
+    boundary). The landing is built from the ledger, never from any tree:
+    the write set from the node's Store events, the bytes from the object
+    database's blobs, the commit's tree entries from the store events'
+    oids — the worktree is not read at retire
+    (docs/architecture/30-scheduling.md § retirement order and the
+    landing). *)
 
 (** A node's store buffer: its git worktree. Uncommitted, squashable by
     dropping, snoopable by speculative consumers
@@ -30,15 +35,6 @@ module Worktree : sig
   (** The read-only mount speculative downstream nodes read; a snooped read
       enters the consumer's witness at this producer's uncommitted
       generation. *)
-
-  val net_delta : t -> (Ledger.Address.t * Ledger.Delta_ref.t) list
-  (** Stores coalesce here: twelve edits to one file forward as one delta;
-      an edit that restores the original cancels to nothing. Each ref is
-      the landed content's blob oid, written into git's object database at
-      extraction — the same content address the agent layer's store tools
-      mint at store time (docs/architecture/20-medium.md § event taxonomy
-      — the blob store is git's object database). A deletion has no bytes
-      to address and keeps a coordinate locator. *)
 
   val drop : t -> unit
   (** Squash's entire filesystem action ([git worktree remove]). *)
@@ -163,7 +159,6 @@ val step :
   registry:Id.Registry.t ->
   merges:Merge_registry.t ->
   node:Ledger.node Id.t ->
-  worktree:Worktree.t ->
   witness:Witness.t ->
   heads:head_tuple list ->
   (unit, rejection) result
@@ -171,14 +166,19 @@ val step :
     (1) discharge check — all hypotheses discharged, the witness holds;
     (2) conflict judgment — write-set intersection against siblings'
     committed write-sets within the current generation;
-    (3) the merge — the worktree's net delta applies to the committed
-    tree; generations advance only on semantic change (byte-null deltas
-    advance nothing; contract addresses compare by derived-schema hash),
-    so an upstream that lands exactly what speculators predicted retires
-    them for free (falsifier F7); head tuples insert; provisional ids bind
-    ({!Id.Registry.bind}, dense, replay-stable);
+    (3) the landing — the node's write set, from its Store events, lands
+    from the ledger's blobs, never from any tree: a blob ref's bytes come
+    out of the object database, a locator ref at a file address is a
+    deletion, and the commit's tree entries come from the store events'
+    oids, so a neighbor's later in-flight bytes on the same path cannot
+    tear the commit; generations advance only on semantic change
+    (byte-null landings advance nothing), so an upstream that lands
+    exactly what speculators predicted retires them for free (falsifier
+    F7); head tuples insert; provisional ids bind ({!Id.Registry.bind},
+    dense, replay-stable);
     (4) ledger seal — the settlement event, with timings, closes the node
-    (docs/architecture/50-commit.md § retirement order and the merge). *)
+    (docs/architecture/30-scheduling.md § retirement order and the
+    landing). *)
 
 val squash_set :
   Ledger.t -> cause:Ledger.Squash_cause.t -> Ledger.node Id.t list

@@ -1469,10 +1469,11 @@ let publish_heads t (c : completed) =
    (docs/architecture/20-medium.md § event taxonomy: readers of the oid
    include consumers pulling deltas through invalidations). Tuple and
    contract addresses have no blob; their refs stay typed coordinate
-   locators. A file the node moved outside the evented store path (a gate
-   artifact riding the net delta) has no store event to name and keeps the
-   path-shaped locator until migration row 2 derives every delta from the
-   event stream. *)
+   locators. Every landed file delta originates in a Store event now that
+   the landing is built from the event stream (README.md § design of
+   record vs shipped engine, row 2) — the path-shaped fallback survives
+   only for hand-laid ledgers whose invalidations name un-stored
+   addresses. *)
 let delta_locator t ~node (address : Ledger.Address.t) =
   match address with
   | Ledger.Address.File path -> (
@@ -1853,7 +1854,7 @@ let try_retire t =
                 match
                   Retire.step ~committed:t.committed_state ~ledger:t.ledger
                     ~registry:t.registry ~merges:t.merges ~node:c.inst.node
-                    ~worktree:c.worktree ~witness ~heads:c.heads
+                    ~witness ~heads:c.heads
                 with
                 | Ok () ->
                     retire_success t c;

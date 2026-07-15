@@ -776,8 +776,10 @@ let refuse_existing_ledger ~command path =
 (* Store buffers are detached git worktrees of the config's repo, so
    [worktree_root] must live inside that repository: an outside root
    makes [Retire.Worktree.create]'s fallback degrade every buffer to a
-   bare directory (no committed checkout to read, no net delta to land),
-   and a root inside a DIFFERENT repository checks out the wrong tree.
+   bare directory (no committed checkout for the agent to read against —
+   landing itself now rides Store events, README.md § design of record
+   vs shipped engine, row 2), and a root inside a DIFFERENT repository
+   checks out the wrong tree.
    Bare mode is a designed engine mode for the unit suites, so the
    engine stays quiet — the operator-facing loudness lives here, one
    stderr line at bind time, before any node runs (the probe is
@@ -808,8 +810,8 @@ let warn_degraded_worktree_root ~command (file : Config_file.t) =
           Printf.eprintf
             "goat %s: warning: worktree_root %s is not inside a git \
              repository — every store buffer will degrade to a bare \
-             directory (no committed checkout to read, no net delta to \
-             land); point it inside repo %s\n"
+             directory (no committed checkout for agents to read \
+             against); point it inside repo %s\n"
             command root repo
       | Some root_top, _ ->
           Printf.eprintf

@@ -89,7 +89,7 @@ step):
    the same change. Lands FL7. — LANDED (this commit)
 2. **Retire from the ledger, not the tree** — the retire step builds the
    pathspec-limited commit from store-event oids; net-delta consumers move
-   to the event stream.
+   to the event stream. — LANDED (this commit)
 3. **The frontier** — `Retire.Frontier` over ledger + committed state;
    `materialize` as boot/hygiene. Lands FL3, FL4.
 4. **Collapse the tree** — `Agent.Grant.t` loses `worktree_root`/

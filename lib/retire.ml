@@ -1,12 +1,15 @@
 (* Retirement: how speculative state becomes committed state, and how
-   everything else becomes nothing (docs/architecture/50-commit.md).
+   everything else becomes nothing (docs/architecture/30-scheduling.md
+   § retirement order and the landing).
 
    Git is the storage engine, not a metaphor: the committed tree is a
    branch, retirements are commits (one per node, dependency-ordered,
    message = node provenance), worktrees are git worktrees, and this module
-   is the only writer of the committed branch. Squash is [git worktree
-   remove] plus a ledger suffix — no compensating action is representable
-   here. *)
+   is the only writer of the committed branch. The landing is built from
+   the ledger — the write set from Store events, the bytes from the
+   object database's blobs, never from any tree — so the worktree is not
+   read at retire. Squash is [git worktree remove] plus a ledger suffix —
+   no compensating action is representable here. *)
 
 module E = Ledger.Event
 
@@ -16,36 +19,12 @@ module E = Ledger.Event
 let sh_quiet cmd = ignore (Sys.command (cmd ^ " >/dev/null 2>&1"))
 let sh_ok cmd = Sys.command (cmd ^ " >/dev/null 2>&1") = 0
 
-let sh_lines cmd =
-  let tmp = Filename.temp_file "goatcode_retire" ".out" in
-  let status =
-    Sys.command (Printf.sprintf "%s >%s 2>/dev/null" cmd (Filename.quote tmp))
-  in
-  let lines =
-    if status = 0 then
-      In_channel.with_open_text tmp (fun ic ->
-          let rec go acc =
-            match In_channel.input_line ic with
-            | Some line -> go (line :: acc)
-            | None -> List.rev acc
-          in
-          go [])
-    else []
-  in
-  (try Sys.remove tmp with Sys_error _ -> ());
-  lines
-
 let rec mkdirs dir =
   if not (Sys.file_exists dir) then begin
     let parent = Filename.dirname dir in
     if not (String.equal parent dir) then mkdirs parent;
     try Sys.mkdir dir 0o755 with Sys_error _ -> ()
   end
-
-let read_file_opt path =
-  if Sys.file_exists path && not (Sys.is_directory path) then
-    Some (In_channel.with_open_bin path In_channel.input_all)
-  else None
 
 let write_file path contents =
   mkdirs (Filename.dirname path);
@@ -97,8 +76,11 @@ module Worktree = struct
       (* A detached worktree so the committed branch keeps its single
          writer; if [root] is not inside a repository (or the repository
          has no commit to detach from) the buffer degrades to a bare
-         directory — the delta machinery then sees no changes, so file
-         work can never land. Bare mode is a DESIGNED engine mode (the
+         directory — the node's draft surface starts empty instead of
+         snapshotting the committed tree. Landing is unaffected: the
+         retire step reads Store events and the object database's blobs,
+         never this buffer (README.md § design of record vs shipped
+         engine, row 2). Bare mode is a DESIGNED engine mode (the
          unit suites run whole engines on it, and several falsifiers
          assert a silent stderr), so this layer stays quiet; the
          operator-facing loudness lives at the CLI, which probes the
@@ -118,84 +100,6 @@ module Worktree = struct
   (* v0: the read-only discipline is the snooper's grant (loads only), not
      an OS-level remount; the mount point is the worktree itself. *)
   let snoop_mount t = t.path
-
-  (* "R  old -> new" rename lines: the net delta lives at the new path. *)
-  let after_arrow s =
-    let marker = " -> " in
-    let n = String.length s and m = String.length marker in
-    let rec find i =
-      if i + m > n then None
-      else if String.equal (String.sub s i m) marker then Some (i + m)
-      else find (i + 1)
-    in
-    match find 0 with Some i -> String.sub s i (n - i) | None -> s
-
-  let unquote s =
-    let n = String.length s in
-    if n >= 2 && s.[0] = '"' && s.[n - 1] = '"' then String.sub s 1 (n - 2)
-    else s
-
-  (* The coalesced store buffer, as git sees it: twelve edits to one file
-     show once; an edit that restored the original shows not at all.
-     [--untracked-files=all] is load-bearing: porcelain's default
-     collapses untracked files under a new directory into one "?? dir/"
-     line, and a directory entry reads as no content — the whole delta
-     silently vanishes for any file born in a fresh directory (live
-     trace 2026-07-15: docs/haiku.md never landed). Per-file listing
-     makes the address list total over the buffer's files. *)
-  let changed_paths t =
-    sh_lines
-      (Printf.sprintf "git -C %s status --porcelain --untracked-files=all"
-         (Filename.quote t.path))
-    |> List.filter_map (fun line ->
-           if String.length line < 4 then None
-           else
-             Some
-               (unquote
-                  (after_arrow (String.sub line 3 (String.length line - 3)))))
-
-  (* One changed path's content address: the landed bytes go into the
-     object database as a loose blob ([git hash-object -w] — a real
-     worktree shares the enclosing repository's store, so this is the
-     same odb the agent layer's store tools write) and the ref carries
-     the oid (20-medium.md § event taxonomy — the blob store is git's
-     object database). Bare-mode buffers (no enclosing repository,
-     [create]'s designed degrade) fall back to compute-only hashing: the
-     oid is still the content address; only durability degrades, exactly
-     as the buffer itself already has. *)
-  let blob_oid t rel =
-    let file = Filename.concat t.path rel in
-    let parse = function
-      | [ printed ] -> Ledger.Delta_ref.blob printed
-      | _ -> None
-    in
-    match
-      parse
-        (sh_lines
-           (Printf.sprintf "git -C %s hash-object -w -- %s"
-              (Filename.quote t.path) (Filename.quote file)))
-    with
-    | Some d -> Some d
-    | None ->
-        parse
-          (sh_lines
-             (Printf.sprintf "git hash-object -- %s" (Filename.quote file)))
-
-  (* The coalesced net delta in content addresses: each changed path pairs
-     with its landed blob's oid. A deletion has no bytes to address — its
-     ref stays the path-shaped coordinate locator until migration row 2
-     derives deletions from the event stream (README.md § design of record
-     vs shipped engine). *)
-  let net_delta t =
-    List.map
-      (fun rel ->
-        let delta =
-          match blob_oid t rel with
-          | Some d -> d
-          | None -> Ledger.Delta_ref.locator rel
-        in
-        (Ledger.Address.File rel, delta))
-      (changed_paths t)
 
   (* Squash's entire filesystem action. *)
   let drop t =
@@ -334,10 +238,60 @@ module Committed = struct
     t.write_log <- t.write_log @ [ (node, address, base) ];
     gen
 
-  let stage t ~rel_path =
+  (* Byte-exact command output: captured whole, never line-split. *)
+  let sh_bytes cmd =
+    let tmp = Filename.temp_file "goatcode_retire" ".out" in
+    let status =
+      Sys.command
+        (Printf.sprintf "%s >%s 2>/dev/null" cmd (Filename.quote tmp))
+    in
+    let content =
+      if status = 0 then
+        Some (In_channel.with_open_bin tmp In_channel.input_all)
+      else None
+    in
+    (try Sys.remove tmp with Sys_error _ -> ());
+    content
+
+  (* One landed blob's bytes, pulled out of the object database — the
+     retire step's read of record (20-medium.md § the blob store: readers
+     of the oid include the retire step's landing). [None] = the object
+     store does not hold the named oid — unreachable through the tool
+     path, which writes the blob before any event names it. *)
+  let blob_content t oid =
+    sh_bytes
+      (Printf.sprintf "git -C %s cat-file blob %s" (Filename.quote t.repo)
+         (Filename.quote oid))
+
+  (* The committed prior of one path — the branch tip's bytes, the law-2
+     comparand. Never the checkout: the working tree is writable by
+     neighbors under the flat org, so tree bytes carry no authority over
+     what is committed (30-scheduling.md § one ref: the committed state
+     is ledger coordinates plus git objects). [None] = the branch does
+     not hold the path (a fresh address), or no branch exists (the bare
+     committed mode the unit suites run on). *)
+  let branch_content t rel =
+    sh_bytes
+      (Printf.sprintf "git -C %s show %s" (Filename.quote t.repo)
+         (Filename.quote (t.branch ^ ":" ^ rel)))
+
+  (* The commit's tree entry for one landed path comes straight from the
+     store event's oid ([update-index --cacheinfo]), never from
+     working-tree bytes — the pathspec-limited commit built from the
+     ledger's blobs (30-scheduling.md § retirement order and the landing,
+     step 3). The checkout file is written separately, as cache fill; a
+     neighbor's later in-flight bytes on the same path can dirty the
+     checkout, never the commit. *)
+  let stage_blob t ~rel_path ~oid =
     sh_quiet
-      (Printf.sprintf "git -C %s add -A -- %s" (Filename.quote t.repo)
-         (Filename.quote rel_path))
+      (Printf.sprintf "git -C %s update-index --add --cacheinfo %s"
+         (Filename.quote t.repo)
+         (Filename.quote ("100644," ^ oid ^ "," ^ rel_path)))
+
+  let stage_removal t ~rel_path =
+    sh_quiet
+      (Printf.sprintf "git -C %s update-index --force-remove -- %s"
+         (Filename.quote t.repo) (Filename.quote rel_path))
 
   (* One retirement = one commit on the committed branch, message = node
      provenance (50-commit.md § durability boundary). *)
@@ -598,52 +552,82 @@ let conflict_judgment ~committed ~ledger ~merges ~node ~witness =
             { Conflict.node; sibling; overlap = Ledger.Footprint.of_list overlap })
     sibling_writes
 
-(* Phase 3a: the worktree's net delta applies to the committed tree.
-   Generations advance only on semantic change: a byte-identical landing
-   advances nothing and fires nothing — the free commit, falsifier F7.
-   Every advance records the landed content (what a later witness is
-   judged against) and the write's base (what the disjoint law judges). *)
-let apply_worktree ~committed ~ledger ~node ~worktree ~witness =
-  let net = Worktree.net_delta worktree in
-  let delta_for address =
-    List.find_map
-      (fun (a, d) -> if Ledger.Address.equal a address then Some d else None)
-      net
-  in
+(* The node's file write set, from its Store events: the last store per
+   address wins, in first-store order. Stores coalesce in the event
+   stream exactly as they did in the buffer — twelve edits to one file
+   forward as one landing; the buffer itself is never read at retire
+   (README.md § design of record vs shipped engine, row 2). *)
+let write_set ledger node =
+  List.fold_left
+    (fun acc (e : E.t) ->
+      match e.kind with
+      | E.Store { address = Ledger.Address.File rel; delta; _ }
+        when node_matches node e.node ->
+          let rec put = function
+            | [] -> [ (rel, delta) ]
+            | (r, _) :: rest when String.equal r rel -> (r, delta) :: rest
+            | row :: rest -> row :: put rest
+          in
+          put acc
+      | _ -> acc)
+    [] (events ledger)
+
+(* Phase 3a: the landing. The node's write set comes from its Store
+   events, its bytes from the ledger's blobs, never from the tree
+   (30-scheduling.md § retirement order and the landing, step 3): a blob
+   ref's content is pulled out of the object database; a locator ref at a
+   file address is the byte-less movement — a deletion, derived from the
+   event stream. Generations advance only on semantic change: a last
+   store byte-identical to the committed content advances nothing and
+   fires nothing — the free commit, falsifier F7. Every advance records
+   the landed content (what a later witness is judged against) and the
+   write's base (what the disjoint law judges). *)
+let apply_stores ~committed ~ledger ~node ~witness =
   let advanced =
     List.filter_map
-      (fun rel_path ->
-        let wt_content =
-          read_file_opt (Filename.concat (Worktree.path worktree) rel_path)
-        in
+      (fun (rel_path, delta) ->
         let repo_file = Committed.abs_path committed rel_path in
-        let repo_content = read_file_opt repo_file in
+        let prior = Committed.branch_content committed rel_path in
         let address = Ledger.Address.File rel_path in
         let base = Witness.observed_content witness address in
-        match (wt_content, repo_content) with
-        | None, None -> None
-        | Some landed, Some prior when String.equal landed prior ->
-            (* byte-null net delta: cancellation, advances nothing (law 2) *)
-            None
-        | Some landed, prior ->
-            write_file repo_file landed;
-            Committed.stage committed ~rel_path;
-            let fresh = Option.is_none prior in
-            let gen =
-              Committed.advance committed ~node ~address ~fresh
-                ~content:(Some (Ledger.Content_hash.of_string landed))
-                ~base ~delta:(delta_for address)
-            in
-            Some (address, gen, fresh)
-        | None, Some _ ->
-            (try Sys.remove repo_file with Sys_error _ -> ());
-            Committed.stage committed ~rel_path;
-            let gen =
-              Committed.advance committed ~node ~address ~fresh:false
-                ~content:None ~base ~delta:(delta_for address)
-            in
-            Some (address, gen, false))
-      (Worktree.changed_paths worktree)
+        match Ledger.Delta_ref.oid delta with
+        | Some oid -> (
+            match Committed.blob_content committed oid with
+            | None ->
+                (* the object store does not hold the named oid: nothing
+                   can land — unreachable through the tool path, which
+                   writes the blob before the event *)
+                None
+            | Some landed -> (
+                match prior with
+                | Some p when String.equal landed p ->
+                    (* byte-null landing: cancellation, advances nothing
+                       (law 2) *)
+                    None
+                | _ ->
+                    (* checkout write = cache fill; the commit's entry is
+                       the oid, staged below *)
+                    write_file repo_file landed;
+                    Committed.stage_blob committed ~rel_path ~oid;
+                    let fresh = Option.is_none prior in
+                    let gen =
+                      Committed.advance committed ~node ~address ~fresh
+                        ~content:(Some (Ledger.Content_hash.of_string landed))
+                        ~base ~delta:(Some delta)
+                    in
+                    Some (address, gen, fresh)))
+        | None -> (
+            match prior with
+            | None -> None
+            | Some _ ->
+                (try Sys.remove repo_file with Sys_error _ -> ());
+                Committed.stage_removal committed ~rel_path;
+                let gen =
+                  Committed.advance committed ~node ~address ~fresh:false
+                    ~content:None ~base ~delta:(Some delta)
+                in
+                Some (address, gen, false)))
+      (write_set ledger node)
   in
   (* The invalidation record: only a moved generation fires one; fresh
      addresses have no witnesses to invalidate. Channel fan-out belongs to
@@ -732,8 +716,7 @@ let bind_provisional ~registry ~ledger ~node ~heads =
           ())
     pairs
 
-let step ~committed ~ledger ~registry ~merges ~node ~worktree ~witness ~heads
-    =
+let step ~committed ~ledger ~registry ~merges ~node ~witness ~heads =
   (* (1) discharge check: hypotheses first, then the witness (law 3). *)
   match undischarged_hypotheses ledger node with
   | _ :: _ as undischarged -> Error (Undischarged undischarged)
@@ -745,8 +728,8 @@ let step ~committed ~ledger ~registry ~merges ~node ~worktree ~witness ~heads
           match conflict_judgment ~committed ~ledger ~merges ~node ~witness with
           | Some conflict -> Error (Conflict conflict)
           | None ->
-              (* (3) the merge *)
-              apply_worktree ~committed ~ledger ~node ~worktree ~witness;
+              (* (3) the landing *)
+              apply_stores ~committed ~ledger ~node ~witness;
               insert_heads ~committed ~ledger ~node ~witness ~heads;
               bind_provisional ~registry ~ledger ~node ~heads;
               (* (4) ledger seal: timings are derived by Telemetry from

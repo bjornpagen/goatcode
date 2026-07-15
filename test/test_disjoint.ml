@@ -1,17 +1,24 @@
 (* Falsifier for the disjoint-writes retire law
-   (docs/architecture/50-commit.md § retirement order and the merge,
+   (docs/architecture/30-scheduling.md § retirement order and the landing,
    § final-state judgment).
 
    The law is the final-state backstop BEHIND the per-retire conflict
-   judgment: the conflict judge sees only observed store footprints, so a
-   writer whose stores were never evented (the blind writer) sails past it
-   — and the law must still convict the clobber from committed state alone.
-   The coordinates make it detectable by construction: every committed
-   write is recorded with the base it advanced from (the content its
-   writer's witness proves it derived from; blind writes carry the absence
-   case), so two writes to one address from one base ARE the clobber, and
-   serialized writers cannot collide because the later one witnessed the
-   earlier landing.
+   judgment, which sees only observed store footprints and excuses a
+   declared merge route — and the law must still convict the clobber from
+   committed state alone. The coordinates make it detectable by
+   construction: every committed write is recorded with the base it
+   advanced from (the content its writer's witness proves it derived from;
+   blind writes carry the absence case), so two writes to one address from
+   one base ARE the clobber, and serialized writers cannot collide because
+   the later one witnessed the earlier landing.
+
+   Re-aimed under migration row 2 (README.md § design of record vs shipped
+   engine): the landing is built from Store events, so a write that was
+   never evented can no longer land at all — the old blind-writer vehicle
+   is closed by construction. The blind pair now rides the declared-merge
+   route past the per-retire judgment (a registered last-writer-wins merge
+   fn, 30-scheduling.md § retirement order step 2), and the final-state
+   law still convicts the same-base pair.
 
    Rigged fixtures only; no engine, no model, no network. *)
 
@@ -39,7 +46,32 @@ let write_file path contents =
       Out_channel.output_string oc contents)
 
 let sh cmd = ignore (Sys.command (cmd ^ " >/dev/null 2>&1"))
+let read_file path = In_channel.with_open_bin path In_channel.input_all
 let ( // ) = Filename.concat
+
+(* A file store, the way the engine's tool path lands one (migration
+   row 2, README.md § design of record vs shipped engine): the content
+   into the committed repository's object database as a loose blob, the
+   Store event carrying the oid — the retire step's landing reads exactly
+   this, never any tree. *)
+let store ~ledger ~repo ~node rel contents =
+  let tmp = Filename.temp_file "goat_store" ".tmp" in
+  write_file tmp contents;
+  let out = Filename.temp_file "goat_oid" ".txt" in
+  ignore
+    (Sys.command
+       (Printf.sprintf "git -C %s hash-object -w -- %s >%s 2>/dev/null"
+          (Filename.quote repo) (Filename.quote tmp) (Filename.quote out)));
+  let oid = String.trim (read_file out) in
+  (try Sys.remove tmp with Sys_error _ -> ());
+  (try Sys.remove out with Sys_error _ -> ());
+  match Ledger.Delta_ref.blob oid with
+  | None -> failwith ("hash-object printed no oid for " ^ rel)
+  | Some delta ->
+      ignore
+        (Ledger.append ledger ~node
+           (Ledger.Event.Store
+              { tool = "write_file"; address = Ledger.Address.File rel; delta }))
 
 let seed_repo repo ~file ~contents =
   sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
@@ -104,11 +136,11 @@ let verdict_line (v : Theory.Law.verdict) =
 
 (* ==================================================================== *)
 (* Two writers of one path, each derived from the same base (neither saw *)
-(* the other's landing), both slipping past the conflict judge because    *)
-(* their stores were never evented.  The second landing clobbers the      *)
-(* first; the law must say so.  The serialized pair is the control: the   *)
-(* second writer witnessed the first's landing, so its write advances     *)
-(* from a different base and the law stays satisfied.                     *)
+(* the other's landing), both slipping past the conflict judge on the     *)
+(* declared merge route.  The second landing clobbers the first; the law  *)
+(* must say so.  The serialized pair is the control: the second writer    *)
+(* witnessed the first's landing, so its write advances from a different  *)
+(* base and the law stays satisfied.                                      *)
 (* ==================================================================== *)
 
 let%expect_test "disjoint law: a blind clobber is a violation; a serialized \
@@ -123,18 +155,21 @@ let%expect_test "disjoint law: a blind clobber is a violation; a serialized \
   in
   let theory = disjoint_theory () in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
-  let merges = Retire.Merge_registry.empty in
+  (* The declared merge route for the contested path: the per-retire
+     judgment excuses it (merge, never improvised — registered at theory
+     accept), so both blind writers land and only the final-state law is
+     left to convict the same-base pair. *)
+  let merges =
+    Retire.Merge_registry.register Retire.Merge_registry.empty
+      ~address_class:"shared.txt" ~merge_fn:"last-writer-wins"
+  in
   let n1 = Id.mint node_minter in
   let n2 = Id.mint node_minter in
   let n3 = Id.mint node_minter in
   let n4 = Id.mint node_minter in
-  (* Buffers snapshot BEFORE anything retires: n2 genuinely never saw n1's
-     landing (and its ledger holds no load of shared.txt — a blind write). *)
-  let wt n = Retire.Worktree.create ~root:(repo // "buffers") ~node:n in
-  let wt1 = wt n1 and wt2 = wt n2 and wt3 = wt n3 and wt4 = wt n4 in
-  let retire node worktree =
+  let retire node =
     match
-      Retire.step ~committed ~ledger ~registry ~merges ~node ~worktree
+      Retire.step ~committed ~ledger ~registry ~merges ~node
         ~witness:(Witness.observed ledger ~node)
         ~heads:[]
     with
@@ -143,10 +178,12 @@ let%expect_test "disjoint law: a blind clobber is a violation; a serialized \
     | Error (Retire.Witness_moved _) -> "rejected (Witness_moved)"
     | Error (Retire.Undischarged _) -> "rejected (Undischarged)"
   in
-  write_file (Retire.Worktree.path wt1 // "shared.txt") "first landing\n";
-  write_file (Retire.Worktree.path wt2 // "shared.txt") "second landing\n";
-  Printf.printf "n1 (blind writer) retire: %s\n" (retire n1 wt1);
-  Printf.printf "n2 (blind writer) retire: %s\n" (retire n2 wt2);
+  (* n2 genuinely never saw n1's landing: its ledger holds no load of
+     shared.txt — a blind write, base absent. *)
+  store ~ledger ~repo ~node:n1 "shared.txt" "first landing\n";
+  store ~ledger ~repo ~node:n2 "shared.txt" "second landing\n";
+  Printf.printf "n1 (blind writer) retire: %s\n" (retire n1);
+  Printf.printf "n2 (blind writer) retire: %s\n" (retire n2);
   List.iter verdict_line (Retire.judge ~theory ~committed ~ledger);
   [%expect
     {|
@@ -158,8 +195,8 @@ let%expect_test "disjoint law: a blind clobber is a violation; a serialized \
      the base its write advances from, so the pair is serialized, not a
      clobber.  shared.txt's violation persists (final-state judgment is
      over all committed writes); serial.txt adds no offender. *)
-  write_file (Retire.Worktree.path wt3 // "serial.txt") "one\n";
-  Printf.printf "n3 (creator) retire: %s\n" (retire n3 wt3);
+  store ~ledger ~repo ~node:n3 "serial.txt" "one\n";
+  Printf.printf "n3 (creator) retire: %s\n" (retire n3);
   ignore
     (Ledger.append ledger ~node:n4
        (Ledger.Event.Load
@@ -172,8 +209,8 @@ let%expect_test "disjoint law: a blind clobber is a violation; a serialized \
                   Ledger.Content_hash.of_string "one\n" );
               ];
           }));
-  write_file (Retire.Worktree.path wt4 // "serial.txt") "two\n";
-  Printf.printf "n4 (serialized rewriter) retire: %s\n" (retire n4 wt4);
+  store ~ledger ~repo ~node:n4 "serial.txt" "two\n";
+  Printf.printf "n4 (serialized rewriter) retire: %s\n" (retire n4);
   List.iter verdict_line (Retire.judge ~theory ~committed ~ledger);
   sh
     (Printf.sprintf "rm -rf %s %s" (Filename.quote repo)
