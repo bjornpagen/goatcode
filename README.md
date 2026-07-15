@@ -103,7 +103,7 @@ readers:
 ```
 ./_build/default/bin/main.exe report /tmp/goat-ledger.bin    # wall clock, parallelism, speculation account
 ./_build/default/bin/main.exe explain /tmp/goat-ledger.bin node#0
-./_build/default/bin/main.exe replay /tmp/goat-ledger.bin    # replay-determinism audit
+./_build/default/bin/main.exe replay /tmp/goat-ledger.bin    # ledger-coherence audit
 ```
 
 ## Toolchain

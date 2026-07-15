@@ -82,6 +82,59 @@ read), never a silent no-op — agents route around obstacles they can see;
 the refusal is the runtime *edge* of a boundary whose interior is
 compile-time.
 
+A shell gate runs under the same event discipline as any effect: behind
+the mkdir-atomic, holder-named machine lock, with an `Effect` event
+carrying the declared command line as the resource — a gate is never an
+unobserved effect lane. Its idempotence is the declaration's: a gate is a
+build/test command the engine may freely reissue, which is why gates are
+grantable under either speculation index.
+
+**The v0 grant surface, recorded honestly.** The chase derives a node's
+grant from its template: `read_globs` from the declaration, the worktree
+root from dispatch, the declared command line for shell-gate executors.
+Two fields are hard-coded empty. `effects` is empty because no template
+surface declares effect tools yet — `run_command` is unreachable through
+a theory, so F12's runtime half is held by the grant's type index plus
+direct-drive falsifiers; effect grants await the template-declaration
+surface. `snoop_mounts` is empty and gets no wiring: it dies in the
+flat-org migration (`91-flat-org.md` § grants and sensing — everything
+in-grant is snoopable and the resolver consults the frontier, not a mount
+table), and in-engine snooping already rides the body-match feed. Neither
+absence is a capability the docs claim and the engine lacks; both are
+recorded here so nobody builds soon-dead wiring.
+
+## The git ban
+
+**Workers never run git.** (Operator ruling: "ban all git commands from
+any of the workers.") Git is the harness's commit substrate —
+`Retire.Committed` holds the only writer lock on the committed branch,
+worktrees are the engine's store buffers, squash is a worktree drop — so
+a worker running git is three violations in one act: an unwitnessed
+effect (its loads and stores bypass the evented tool loop, breaking the
+mechanized-witness law), revert machinery (abort is by construction,
+never compensation), and branch machinery (the commit topology is the
+engine's own representation). One law, two boundaries:
+
+- **The tool boundary.** `run_command` refuses any command whose token
+  stream names git in command position — argv0; after `&&`/`||`/`;`/`|`/
+  `&`, subshell and substitution opens, and backticks; leading
+  assignments and wrapper commands transparent; one layer of quoting
+  stripped; basenames compared — with the typed in-band refusal ("git is
+  the harness's commit substrate; workers never touch it") and no
+  `Effect` event. The ban is named in the tool's own description, so an
+  agent sees the wall before it walks into it.
+- **The admission boundary.** Shell-gate command lines are data in the
+  theory, so a gate whose argv[0] resolves to git is a typed admission
+  error naming the offending statement (`Theory.Admission.Git_gate`) — a
+  git gate is unwritable, not refused at dispatch.
+
+**Honesty note:** the v0 token screen is a tripwire, not a security
+boundary — `sh -c "git ..."`, `$PATH` games, and a script that itself
+calls git all pass it. The recorded growth path is environmental: PATH
+control and a sandbox that denies the git binary to worker subprocesses.
+The screen exists so an agent cannot drift into git by habit, and so the
+falsifiers (F17 in `80-validation.md`) have a boundary to kill.
+
 ## The executor transport
 
 **Both lanes are direct API calls from the harness process — never a CLI

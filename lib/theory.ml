@@ -193,6 +193,7 @@ module Admission = struct
     | Duplicate_statement of { name : string }
     | Reserved_field of { relation : string; field : string }
     | Invalid_window of { statement : string; reason : string }
+    | Git_gate of { statement : string; command : string }
     | Invalid_generation_bound of { relation : string; bound : int }
     | Unjudgeable_law of { law : string; reason : string }
 
@@ -230,6 +231,11 @@ module Admission = struct
     | Invalid_window { statement; reason } ->
         Printf.sprintf "statement %s: no firing plan satisfies its window: %s"
           statement reason
+    | Git_gate { statement; command } ->
+        Printf.sprintf
+          "statement %s declares a git shell gate (%s): git is the \
+           harness's commit substrate; workers never touch it"
+          statement command
     | Invalid_generation_bound { relation; bound } ->
         Printf.sprintf
           "relation %s: generation bound %d admits no generation; a stratum \
@@ -589,6 +595,27 @@ let declare ~relations ~statements ~laws =
         (fun reason ->
           err (Admission.Invalid_window { statement = s.Spawn.name; reason }))
         (window_reason (snd s.Spawn.exists));
+      (* The git ban's admission boundary: gate command lines are data, so
+         a gate whose argv[0] resolves to git is unwritable — git is the
+         harness's commit substrate (operator ruling;
+         docs/architecture/60-agents.md § the git ban). The tool-lane half
+         lives in the agent layer's [run_command] screen. *)
+      (match s.Spawn.by with
+      | Executor.Shell_gate { command = argv0 :: _ as command; _ }
+      (* Case-insensitive: a case-insensitive filesystem (macOS) happily
+         executes [GIT]. *)
+        when String.equal
+               (String.lowercase_ascii (Filename.basename argv0))
+               "git" ->
+          err
+            (Admission.Git_gate
+               {
+                 statement = s.Spawn.name;
+                 command = String.concat " " command;
+               })
+      | Executor.Shell_gate _ | Executor.Agent_template _ | Executor.Pure_fn _
+        ->
+          ());
       Option.iter
         (fun (Filter.Count { over; link; _ }) ->
           if not (declared over) then unknown over

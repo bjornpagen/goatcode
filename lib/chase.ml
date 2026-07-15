@@ -779,7 +779,18 @@ let invoke_lane :
         Agent.Prompt.assemble ~preamble ~schema
           ~operands:(operands_text inst.consumed) ~hypotheses:hyps ~grant
       in
-      let invocation = { Agent.Invocation.prompt; schema; grant; pin } in
+      let invocation =
+        {
+          Agent.Invocation.prompt;
+          schema;
+          grant;
+          pin;
+          (* Tool loads witness the real committed generation: the run's
+             committed store answers the executor's lookup (B7 —
+             agent.mli § Invocation). *)
+          committed = Retire.Committed.state t.committed_state;
+        }
+      in
       let parse text =
         Result.map (heads_of t inst)
           (Contract.Codec.parse boundary ~registry:t.registry text)
@@ -791,7 +802,18 @@ let invoke_lane :
 
 (* The footprint grant, from the template's declarations. The status
    phantom is chosen at the call site: hypothesis-free dispatches carry the
-   committed index, hypothesis-carrying ones the speculative index. *)
+   committed index, hypothesis-carrying ones the speculative index.
+
+   The v0 grant surface, recorded honestly (docs/architecture/60-agents.md
+   § tool grants): [effects] is empty because no template surface declares
+   effect tools yet — [run_command] is unreachable through a theory, so
+   F12's runtime half is held by the grant's type index plus the
+   direct-drive falsifiers; effect grants await the template-declaration
+   surface. [snoop_mounts] is empty and gets no wiring: it dies in the
+   flat-org migration (docs/architecture/91-flat-org.md § grants and
+   sensing — everything in-grant is snoopable and the resolver consults
+   the frontier, not a mount table); in-engine snooping already rides the
+   body-match feed, not a mount list. *)
 let grant_of (type s) (inst : instance) (worktree : Retire.Worktree.t) :
     s Agent.Grant.t =
   let read_globs, shell_gates =

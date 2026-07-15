@@ -185,7 +185,7 @@ goat run <theory.exe> --seed seed.json --config run.toml
 goat plan "<spec>" --config run.toml
 goat report <ledger>            # summarize
 goat explain <ledger> <node>    # one node's story
-goat replay <ledger>            # replay-determinism check (80-validation.md)
+goat replay <ledger>            # ledger-coherence audit (80-validation.md)
 goat version
 ```
 
@@ -222,7 +222,12 @@ set; a pin routing to a provider whose API key variable
 (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`) is unset names the variable — all
 judged at bind time, before any node runs, so a dry `goat plan` with no
 key exits on the typed key error without a single model call or worktree
-touch.
+touch. Exit codes are a contract: 0 is success (for `plan`, the emitted
+run quiesced with no faulted node and no violated law — squashes alone
+are speculation's normal business); 1 is any typed error path, including
+a final settled map carrying a faulted node or violated law; 2 is an
+argv parse failure. `goat run` returns the theory executable's own exit
+code — the same contract, owed by the linked binary.
 
 ## OPEN items
 

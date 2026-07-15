@@ -166,6 +166,9 @@ let invocation ~worktree_root =
     grant;
     pin =
       { Theory.Pin.provider = "rigged"; model = "none"; sampling = []; options = [] };
+    (* Direct-drive tests run outside any engine: nothing is committed, so
+       tool loads witness [Absent] at generation zero. *)
+    committed = (fun _ -> Witness.Committed_state.Absent);
   }
 
 (* Run one lying reply through the primary lane and return the parsed
@@ -841,9 +844,8 @@ let%expect_test "law 3, tuple-shaped: a predicted payload is judged by \
 (* [Invalidation_sent] event.  A byte-identical landing appends none,    *)
 (* so a consumer edge's pending queue stays empty across it: nothing to  *)
 (* deliver at the next yield, no drift note to render, no reconcile.     *)
-(* Asserted above via ledger event counts; this comment records why no   *)
-(* separate channel-level test exists: the engine constructs no rx and   *)
-(* never calls [Channel.invalidate] yet (delivery is unwired), so the    *)
-(* ledger's [Invalidation_sent] count IS the observable surface           *)
-(* (30-channels.md § the ledger).                                         *)
+(* Asserted above via ledger event counts; the wired delivery half       *)
+(* (retire publishes, consumers pull at yields) is exercised end to end  *)
+(* in test_delivery.ml — including F6's engine half: an observed         *)
+(* [read_file] tool load gating retirement through the real machinery.   *)
 (* ================================================================== *)

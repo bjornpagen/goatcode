@@ -63,7 +63,11 @@ spawn review:
 The body is a conjunctive pattern over relations (single-relation bodies in
 v0 — see the OPEN item); the head names the relation(s) whose tuples the
 firing must produce; `by` names the executor (an agent template, a pure
-function, or a shell gate — `60-agents.md`). One firing = one **node**. The
+function, or a shell gate — `60-agents.md`). A shell gate's command line
+is data, judged at admission like every other declared value: argv[0]
+resolving to git is a typed admission error naming the statement — git is
+the harness's commit substrate, and a git gate is unwritable
+(`60-agents.md` § the git ban). One firing = one **node**. The
 chase fires the statement once per body match — fanout width is
 data-generated, never plan-static. Head mint slots are filled with fresh
 existentials at firing time; this is the rename.

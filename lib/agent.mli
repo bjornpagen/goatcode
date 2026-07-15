@@ -159,6 +159,16 @@ module Invocation : sig
             decode itself stays freeform on the primary lane. *)
     grant : 'status Grant.t;
     pin : Theory.Pin.t;
+    committed : Ledger.Address.t -> Witness.Committed_state.t;
+        (** The committed-state lookup tool loads witness against: a load
+            of a committed address enters the observed witness at its real
+            committed generation; in-flight and absent addresses stay at
+            [Ledger.Generation.zero], with the content hash carrying the
+            commit-point judgment either way
+            (docs/architecture/50-commit.md § law 3). The chase supplies
+            [Retire.Committed.state] over the run's committed store;
+            direct callers outside any engine supply
+            [fun _ -> Witness.Committed_state.Absent]. *)
   }
 end
 
@@ -329,7 +339,12 @@ val agent : stop:Stop.t list -> provider:Provider.t -> Executor.t
     parse once, at the argument boundary, into a bounds-carrying type —
     absolute paths and ['..'] hops are outside every grant by
     construction, and the refusal is a typed in-band tool error
-    ({!Grant.Refusal}), never a silent no-op.
+    ({!Grant.Refusal}), never a silent no-op. [run_command] additionally
+    refuses any command whose token stream names git in command position —
+    git is the harness's commit substrate; workers never touch it
+    (operator ruling; the v0 screen is a recorded tripwire, not a security
+    boundary — docs/architecture/60-agents.md § the git ban; falsifier
+    F17).
 
     Every execution appends the matching ledger event with its footprint —
     Load / Store / Effect — returned by the tool as data and appended by
@@ -378,7 +393,18 @@ val pure_fn : (Yojson.Safe.t -> (Yojson.Safe.t, string) result) -> Executor.t
 
 val shell_gate : Executor.t
 (** Runs the command line declared on the {!Theory.Executor.Shell_gate};
-    exit status and captured output become the head tuple. *)
+    exit status and captured output become the head tuple. A non-zero
+    exit is data (a failing test run is a tuple, not a fault). The gate
+    is an effect against shared machine state: it runs behind the
+    mkdir-atomic, holder-named machine lock and appends
+    [Ledger.Event.Effect] (tool ["shell_gate"], the declared command line
+    as the resource) — the same discipline as [run_command], so a gate
+    run is never an unobserved effect lane. Idempotence is the
+    declaration's: a gate is a build/test command the engine may freely
+    reissue, which is why gates are grantable under either speculation
+    index (docs/architecture/30-channels.md § event taxonomy). A
+    git-naming gate never reaches this runtime — admission rejects it
+    ({!Theory.Admission.error}, [Git_gate]). *)
 
 (** The bounded repair budget, configured per template, small. *)
 module Repair_budget : sig

@@ -21,6 +21,12 @@
      the typed class and the table's route, and replay re-judges them.
    - The squash-cause taxonomy: a conflict loser settles
      [Reissue_loser] (never [Operator_abort]) and reissues bounded.
+   - F6, the end-to-end half: an observed [read_file] tool load gates
+     retirement through the real machinery (the claim/hide directions
+     drive Retire.step directly in test_witness.ml).
+   - B7 generation threading: a tool load of a committed address
+     witnesses the real committed generation, threaded from the chase
+     through the invocation into the toolset.
 
    Rigged executors only; no live model call; no sleeps. *)
 
@@ -74,7 +80,7 @@ let admit ~relations ~statements =
    generation moves, and the write log all ride it
    (docs/architecture/50-commit.md § durability boundary). Store buffers
    live inside it so they are real git worktrees. *)
-let sandbox prefix =
+let sandbox ?file prefix =
   let root = Filename.temp_dir prefix "" in
   let repo = Filename.concat root "repo" in
   Unix.mkdir repo 0o755;
@@ -83,6 +89,14 @@ let sandbox prefix =
       failwith ("fixture command failed: " ^ cmd)
   in
   sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
+  (* An optional committed fixture file: pre-run repository state a node
+     may read through its worktree checkout. *)
+  (match file with
+  | None -> ()
+  | Some (path, contents) ->
+      Out_channel.with_open_bin (Filename.concat repo path) (fun oc ->
+          Out_channel.output_string oc contents);
+      sh (Printf.sprintf "git -C %s add -A" (Filename.quote repo)));
   sh
     (Printf.sprintf
        "git -C %s -c user.name=goatcode-test -c user.email=test@localhost \
@@ -204,6 +218,23 @@ let invalidations events =
     events
 
 let check label ok = Printf.printf "%s: %b\n" label ok
+
+(* The witness triples a node's [read_file] tool loads observed, rendered
+   with their generations — what F6's end-to-end half and the B7
+   generation-threading falsifier assert on. *)
+let file_load_triples events node =
+  List.concat_map
+    (fun (e : Ledger.Event.t) ->
+      match e.kind with
+      | Ledger.Event.Load { tool = "read_file"; observed } when of_node node e
+        ->
+          List.map
+            (fun (a, g, _) ->
+              Format.asprintf "%a @@ %a" Ledger.Address.pp a
+                Ledger.Generation.pp g)
+            observed
+      | _ -> [])
+    events
 
 let replay_verdict ledger =
   match Run.replay ledger with
@@ -925,5 +956,190 @@ let%expect_test "footprint escape: an uncovered load surfaces at retire as \
     the escapee still retired (the declaration is a filter, never a wall): true
     law footprint_cover: violated (offenders: node#0 read file:notes.txt)
     the story reader carries the escape: true
+    replay: coherent
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* F6, the end-to-end half (the claim/hide directions drive Retire.step
+   with hand-appended events in test_witness.ml; this runs the ENGINE):
+   a rigged node's [read_file] tool load enters the observed witness
+   through the real tool loop, and gates its retirement through the real
+   machinery — the sibling lands new content over the file first, the
+   reader's witness fails to hold at retire, the typed Witness_moved
+   rejection is classified per consumer and routed by the drift table,
+   and the bounded reissue retires against the landed state. *)
+
+let%expect_test "F6 end-to-end: an observed tool read gates retirement \
+                 (stale content -> Witness_moved through the engine)" =
+  let task = json_relation "task" in
+  let mmid = json_relation "mmid" in
+  let rmid = json_relation "rmid" in
+  let mover = template "mover" in
+  let reader = template ~read_globs:[ "notes.txt" ] "reader" in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed mmid;
+          Theory.Relation.Packed rmid;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"move" ~for_:"task"
+            ~exists:("mmid", Theory.Window.nodes 1)
+            ~by:mover ();
+          Theory.Spawn.v ~name:"read" ~for_:"task"
+            ~exists:("rmid", Theory.Window.nodes 1)
+            ~by:reader ();
+        ]
+  in
+  (* notes.txt is committed repository state before the run: the reader's
+     worktree checkout carries v1 until the mover's landing moves it. *)
+  let repo, worktrees, ledger_path =
+    sandbox ~file:("notes.txt", "v1\n") "goat_f6_e2e_"
+  in
+  let executors =
+    [
+      binding ~by:mover
+        ~script:[ write_tool "notes.txt" "v2\n"; R.Reply {|{"msg":"moved"}|} ];
+      (* Steps are consumed across attempts of the same executor value:
+         the reissued attempt drains the landing's queued invalidation at
+         a read-free yield (additive for a node that has read nothing —
+         the delivery test's pattern), then re-reads and re-replies. *)
+      binding ~by:reader
+        ~script:
+          [
+            read_tool "notes.txt";
+            R.Reply {|{"msg":"r1"}|};
+            R.Yield;
+            read_tool "notes.txt";
+            R.Reply {|{"msg":"r2"}|};
+          ];
+    ]
+  in
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      (match nodes_of_stmt events "read" with
+      | [ first; second ] ->
+          check "the tool read entered the observed witness (read_file Load)"
+            (not (List.is_empty (file_load_triples events first)));
+          List.iter
+            (fun d -> Printf.printf "first attempt drift: %s\n" d)
+            (drift_notes events first);
+          Printf.printf "first attempt settled: %s\n"
+            (match settlement_of settled first with
+            | Some s -> settlement_str s
+            | None -> "unsettled");
+          List.iter
+            (fun d -> Printf.printf "reissue drift: %s\n" d)
+            (drift_notes events second);
+          Printf.printf "reissued attempt settled: %s\n"
+            (match settlement_of settled second with
+            | Some s -> settlement_str s
+            | None -> "unsettled");
+          (* The reissue read the landed state: its witness triple carries
+             the moved file's committed generation, not a zero stamp. *)
+          List.iter
+            (fun t -> Printf.printf "reissue witnessed %s\n" t)
+            (file_load_triples events second)
+      | attempts ->
+          Printf.printf "!! expected 2 read attempts, saw %d\n"
+            (List.length attempts));
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    the tool read entered the observed witness (read_file Load): true
+    first attempt drift: file:notes.txt: breaking_broad -> flush_subtree
+    first attempt settled: squashed(reissue-loser)
+    reissue drift: file:notes.txt: additive -> reconcile_note
+    reissued attempt settled: retired
+    reissue witnessed file:notes.txt @ g1
+    replay: coherent
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* B7's generation threading (the wave-2 OPEN item closed): a tool load
+   of a COMMITTED address witnesses the real committed generation — the
+   chase threads its committed-state lookup into the executor's toolset
+   through the invocation — while in-flight and absent addresses stay at
+   the zero stamp with the content hash carrying the judgment. The
+   consumer parks (floor above any chain) so it provably reads after the
+   landing. *)
+
+let%expect_test "tool loads witness the real committed generation once the \
+                 address is committed" =
+  let task = json_relation "task" in
+  let mid = json_relation "mid" in
+  let out = json_relation "out" in
+  let mover = template "gen-mover" in
+  let reader = template ~read_globs:[ "notes.txt" ] "gen-reader" in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed mid;
+          Theory.Relation.Packed out;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"move" ~for_:"task"
+            ~exists:("mid", Theory.Window.nodes 1)
+            ~by:mover ();
+          Theory.Spawn.v ~name:"read" ~for_:"mid"
+            ~exists:("out", Theory.Window.nodes 1)
+            ~by:reader ();
+        ]
+  in
+  let repo, worktrees, ledger_path =
+    sandbox ~file:("notes.txt", "v1\n") "goat_gen_"
+  in
+  let executors =
+    [
+      binding ~by:mover
+        ~script:[ write_tool "notes.txt" "v2\n"; R.Reply {|{"msg":"m"}|} ];
+      (* The read-free yield drains the landing's invalidation (additive
+         for a node that has read nothing) so the falsifier isolates the
+         generation stamp, not the delivery lane. *)
+      binding ~by:reader
+        ~script:[ R.Yield; read_tool "notes.txt"; R.Reply {|{"msg":"r"}|} ];
+    ]
+  in
+  (* The floor suspends the read instead of hypothesizing, so the reader
+     provably runs after the mover's landing committed notes.txt. *)
+  let backstops =
+    { Speculate.Backstops.default with confidence_floor = 2.0 }
+  in
+  (match
+     Run.exec ~theory ~seed:(seed_task task)
+       ~config:
+         (config ~repo ~worktrees ~ledger_path ~backstops ~executors ())
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      let events = Ledger.Replay.events settled.Run.ledger in
+      let r_node =
+        match node_of_stmt events "read" with
+        | Some n -> n
+        | None -> failwith "read never fired"
+      in
+      List.iter
+        (fun t -> Printf.printf "reader witnessed %s\n" t)
+        (file_load_triples events r_node);
+      check "the reader retired (content matched, witness held)"
+        (match settlement_of settled r_node with
+        | Some Ledger.Settlement.Retired -> true
+        | _ -> false);
+      Printf.printf "replay: %s\n" (replay_verdict settled.Run.ledger));
+  [%expect
+    {|
+    reader witnessed file:notes.txt @ g1
+    the reader retired (content matched, witness held): true
     replay: coherent
     |}]

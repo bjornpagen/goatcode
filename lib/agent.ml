@@ -263,6 +263,11 @@ module Invocation = struct
     schema : Contract.Wire_schema.t;
     grant : 'status Grant.t;
     pin : Theory.Pin.t;
+    committed : Ledger.Address.t -> Witness.Committed_state.t;
+        (* The committed-state lookup tool loads witness against
+           (agent.mli): the chase threads [Retire.Committed.state] here so
+           an agent's read of committed state witnesses the real
+           generation, not a zero stamp. *)
   }
 end
 
@@ -1134,14 +1139,22 @@ let path_arg ~tool ~boundary name input : (Relpath.t, Tool.failure) result =
 let read_boundary = "reads: read_globs + your worktree + snoop mounts"
 let write_boundary = "writes: your worktree only"
 
-(* Observed witness triples for tool loads carry the content hash by
-   observation; the generation is [zero] until the engine threads
-   committed-state lookups through the executor (the recorded B2/B7
-   rewiring — the event and its footprint are what this layer owes). *)
-let load_triple rel bytes =
-  ( Ledger.Address.File rel,
-    Ledger.Generation.zero,
-    Ledger.Content_hash.of_string bytes )
+(* Observed witness triples for tool loads: the content hash by
+   observation, the generation from the committed-state lookup the
+   invocation carries — a load of a committed address witnesses the REAL
+   committed generation; in-flight and absent addresses stay at [zero],
+   the content hash carrying the commit-point judgment either way (B7:
+   [Witness.holds] judges content; the generation is law 2's shadow). *)
+let load_triple ~committed rel bytes =
+  let address = Ledger.Address.File rel in
+  let generation =
+    match committed address with
+    | Witness.Committed_state.Landed { generation; _ }
+    | Witness.Committed_state.Deleted { generation } ->
+        generation
+    | Witness.Committed_state.Absent -> Ledger.Generation.zero
+  in
+  (address, generation, Ledger.Content_hash.of_string bytes)
 
 let decl name description props ~required : Provider.Tool_decl.t =
   {
@@ -1167,7 +1180,7 @@ let decl name description props ~required : Provider.Tool_decl.t =
         ];
   }
 
-let read_file_tool (grant : _ Grant.t) : Tool.t =
+let read_file_tool ~committed (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "read_file" "Read one file within your grant."
@@ -1203,7 +1216,7 @@ let read_file_tool (grant : _ Grant.t) : Tool.t =
                         Ledger.Event.Load
                           {
                             tool = "read_file";
-                            observed = [ load_triple rel bytes ];
+                            observed = [ load_triple ~committed rel bytes ];
                           };
                       ];
                   }));
@@ -1251,7 +1264,7 @@ let write_file_tool (grant : _ Grant.t) : Tool.t =
               });
   }
 
-let str_replace_edit_tool (grant : _ Grant.t) : Tool.t =
+let str_replace_edit_tool ~committed (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "str_replace_edit"
@@ -1295,7 +1308,7 @@ let str_replace_edit_tool (grant : _ Grant.t) : Tool.t =
                   Ledger.Event.Load
                     {
                       tool = "str_replace_edit";
-                      observed = [ load_triple rel bytes ];
+                      observed = [ load_triple ~committed rel bytes ];
                     }
                 in
                 match count_occurrences ~needle:old_str bytes with
@@ -1342,7 +1355,7 @@ let str_replace_edit_tool (grant : _ Grant.t) : Tool.t =
                           }))));
   }
 
-let glob_list_tool (grant : _ Grant.t) : Tool.t =
+let glob_list_tool ~committed (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "glob_list" "List readable files matching a glob pattern."
@@ -1367,13 +1380,15 @@ let glob_list_tool (grant : _ Grant.t) : Tool.t =
                   {
                     tool = "glob_list";
                     observed =
-                      List.map (fun (rel, _) -> load_triple rel rel) matches;
+                      List.map
+                        (fun (rel, _) -> load_triple ~committed rel rel)
+                        matches;
                   };
               ];
           });
   }
 
-let grep_tool (grant : _ Grant.t) : Tool.t =
+let grep_tool ~committed (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "grep"
@@ -1406,7 +1421,7 @@ let grep_tool (grant : _ Grant.t) : Tool.t =
               match read_file_bytes disk with
               | exception Sys_error _ -> ()
               | bytes ->
-                  observed := load_triple rel bytes :: !observed;
+                  observed := load_triple ~committed rel bytes :: !observed;
                   List.iteri
                     (fun i line ->
                       if !hits < 200 && contains ~needle:pattern line then begin
@@ -1426,17 +1441,117 @@ let grep_tool (grant : _ Grant.t) : Tool.t =
           });
   }
 
-let run_command_tool (grant : _ Grant.t) ~idempotent ~holder : Tool.t =
+(* The git ban (operator ruling: "ban all git commands from any of the
+   workers"; docs/architecture/60-agents.md § the git ban). Git is the
+   harness's commit substrate — [Retire.Committed] holds the only writer
+   lock on the committed branch — so a worker running git is an
+   unwitnessed effect plus revert machinery plus branch machinery, three
+   laws in one act. The screen walks the token stream for
+   command-position tokens: argv0; tokens after [&&]/[||]/[;]/[|]/[&],
+   subshell and substitution opens, and backticks; leading VAR=value
+   assignments, wrapper commands ([env], [exec], ...), their flags, and
+   bare numbers are transparent; one layer of matched quotes is stripped
+   and the basename compared. HONESTY: this is a tripwire, not a security
+   boundary — [sh -c], [$PATH] games, and a script that calls git all
+   pass it; PATH/sandbox control over worker subprocesses is the recorded
+   growth path. *)
+let git_ban_boundary =
+  "git is the harness's commit substrate; workers never touch it"
+
+let names_git command =
+  let unquote token =
+    let n = String.length token in
+    if
+      n >= 2
+      && ((token.[0] = '"' && token.[n - 1] = '"')
+         || (token.[0] = '\'' && token.[n - 1] = '\''))
+    then String.sub token 1 (n - 2)
+    else token
+  in
+  let is_assignment token =
+    match String.index_opt token '=' with
+    | Some i when i > 0 ->
+        String.for_all
+          (fun c ->
+            (c >= 'a' && c <= 'z')
+            || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9')
+            || c = '_')
+          (String.sub token 0 i)
+    | Some _ | None -> false
+  in
+  let is_wrapper = function
+    | "env" | "exec" | "command" | "nohup" | "time" | "timeout" | "nice"
+    | "stdbuf" | "xargs" | "sudo" ->
+        true
+    | _ -> false
+  in
+  let is_number token = String.for_all (fun c -> c >= '0' && c <= '9') token in
+  (* Space out the separator characters so command position survives
+     unspaced spellings like [x&&git status] and [$(git rev-parse)]. *)
+  let spaced = Buffer.create (String.length command * 2) in
+  String.iter
+    (fun c ->
+      match c with
+      | ';' | '|' | '&' | '(' | ')' | '`' | '\n' ->
+          Buffer.add_char spaced ' ';
+          Buffer.add_char spaced c;
+          Buffer.add_char spaced ' '
+      | c -> Buffer.add_char spaced c)
+    command;
+  let tokens =
+    String.split_on_char ' ' (Buffer.contents spaced)
+    |> List.concat_map (String.split_on_char '\t')
+    |> List.filter (fun t -> t <> "")
+  in
+  let separator = function
+    | ";" | "|" | "&" | "(" | ")" | "`" -> true
+    | _ -> false
+  in
+  let rec scan command_position = function
+    | [] -> false
+    | token :: rest ->
+        if separator token then scan true rest
+        else if
+          command_position
+          && (is_assignment token
+             || is_number token
+             || String.length token > 0
+                && token.[0] = '-')
+        then scan true rest
+        else
+          (* Case-insensitive: a case-insensitive filesystem (macOS)
+             happily executes [GIT]. *)
+          let word =
+            String.lowercase_ascii (Filename.basename (unquote token))
+          in
+          if command_position && String.equal word "git" then true
+          else scan (command_position && is_wrapper word) rest
+  in
+  scan true tokens
+
+let run_command_tool ~holder ~idempotent (grant : _ Grant.t) : Tool.t =
   {
     decl =
       decl "run_command"
         "Run one shell command in your worktree, behind the machine effect \
-         lock; exit status and output come back."
+         lock; exit status and output come back. Git is banned: the \
+         harness owns the commit substrate."
         [ ("command", "The shell command line.") ]
         ~required:[ "command" ];
     run =
       (fun input ->
         let* command = str_arg "command" input in
+        let* () =
+          if names_git command then
+            Error
+              (Tool.Refused
+                 {
+                   Grant.Refusal.requested = "run_command " ^ command;
+                   boundary = git_ban_boundary;
+                 })
+          else Ok ()
+        in
         let out_file = Filename.temp_file "goat-cmd-" ".txt" in
         let run () =
           Fun.protect
@@ -1482,15 +1597,17 @@ let run_command_tool (grant : _ Grant.t) ~idempotent ~holder : Tool.t =
 module Toolset = struct
   type t = (string * Tool.t) list
 
-  (* [holder] names the node on the effect lock (holder-named by law). *)
-  let of_grant ~holder (grant : _ Grant.t) : t =
+  (* [holder] names the node on the effect lock (holder-named by law);
+     [committed] is the committed-state lookup load triples witness
+     against. *)
+  let of_grant ~holder ~committed (grant : _ Grant.t) : t =
     let base =
       [
-        read_file_tool grant;
+        read_file_tool ~committed grant;
         write_file_tool grant;
-        str_replace_edit_tool grant;
-        glob_list_tool grant;
-        grep_tool grant;
+        str_replace_edit_tool ~committed grant;
+        glob_list_tool ~committed grant;
+        grep_tool ~committed grant;
       ]
     in
     let effects =
@@ -1498,9 +1615,9 @@ module Toolset = struct
         (fun (e : _ Grant.Effect_tool.t) ->
           match e with
           | Grant.Effect_tool.Idempotent { name = "run_command"; _ } ->
-              Some (run_command_tool grant ~idempotent:true ~holder)
+              Some (run_command_tool ~holder ~idempotent:true grant)
           | Grant.Effect_tool.Non_idempotent { name = "run_command" } ->
-              Some (run_command_tool grant ~idempotent:false ~holder)
+              Some (run_command_tool ~holder ~idempotent:false grant)
           | _ -> None)
         grant.Grant.effects
     in
@@ -1567,7 +1684,8 @@ let agent ~stop ~provider =
       ignore (Ledger.append ledger ~node kind : Ledger.Event.t)
     in
     let toolset =
-      Toolset.of_grant ~holder:(Id.to_string node) inv.Invocation.grant
+      Toolset.of_grant ~holder:(Id.to_string node)
+        ~committed:inv.Invocation.committed inv.Invocation.grant
     in
     let tools = Toolset.decls toolset in
     let conditions =
@@ -1759,7 +1877,15 @@ let pure_fn f =
 
 (* Runs the gate command line the grant declares; exit status and captured
    output become the head tuple. A non-zero exit is data (a failing test
-   run is a tuple, not a fault). *)
+   run is a tuple, not a fault). The gate is an effect against shared
+   machine state, under the same discipline as [run_command]: it executes
+   behind the mkdir-atomic, holder-named machine lock and appends the
+   [Effect] event with the declared command line as the resource — an
+   unobserved, un-locked effect lane is not writable here. Idempotence is
+   the declaration's: a gate is a build/test command the engine may
+   freely reissue, which is why gates are grantable under either
+   speculation index (docs/architecture/30-channels.md § event
+   taxonomy). *)
 let shell_gate =
   let run :
       type s.
@@ -1768,7 +1894,7 @@ let shell_gate =
       node:Ledger.node Id.t ->
       on_yield:_ ->
       _ =
-   fun invocation ~ledger:_ ~node:_ ~on_yield ->
+   fun invocation ~ledger ~node ~on_yield ->
     if stop_requested (on_yield ()) then
       Ok { Executor.outcome = Executor.Text ""; usage = Ledger.Usage.zero }
     else
@@ -1777,18 +1903,33 @@ let shell_gate =
           Error
             (fault Ledger.Fault.Executor_error
                "shell_gate: grant declares no gate command line")
-      | gate :: _ ->
+      | gate :: _ -> (
           let out_file = Filename.temp_file "goat-gate-" ".txt" in
-          Fun.protect
-            ~finally:(fun () -> remove_quietly out_file)
-            (fun () ->
-              let command =
-                Printf.sprintf "%s > %s 2>&1"
-                  (String.concat " " (List.map Filename.quote gate))
-                  (Filename.quote out_file)
-              in
-              let status = Sys.command command in
-              let output = read_file_bytes out_file in
+          let run_gate () =
+            Fun.protect
+              ~finally:(fun () -> remove_quietly out_file)
+              (fun () ->
+                let command =
+                  Printf.sprintf "%s > %s 2>&1"
+                    (String.concat " " (List.map Filename.quote gate))
+                    (Filename.quote out_file)
+                in
+                let status = Sys.command command in
+                (status, read_file_bytes out_file))
+          in
+          match with_effect_lock ~holder:(Id.to_string node) run_gate with
+          | Error m ->
+              Error (fault Ledger.Fault.Executor_error ("shell_gate: " ^ m))
+          | Ok (status, output) ->
+              ignore
+                (Ledger.append ledger ~node
+                   (Ledger.Event.Effect
+                      {
+                        tool = "shell_gate";
+                        resource = String.concat " " gate;
+                        idempotent = true;
+                      })
+                  : Ledger.Event.t);
               let head =
                 `Assoc
                   [ ("exit_status", `Int status); ("output", `String output) ]

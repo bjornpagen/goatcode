@@ -1086,3 +1086,59 @@ let%expect_test "admission audit: reserved mint field, empty windows, and \
     statement empty: no firing plan satisfies its window: an empty tuple range (3..1)
     relation loop: generation bound 0 admits no generation; a stratum must bound at least one
     |}]
+
+(* ------------------------------------------------------------------ *)
+(* F17, the admission lane (docs/architecture/60-agents.md § the git
+   ban): shell-gate command lines are data in the theory, so a gate whose
+   argv[0] resolves to git — bare or by path — is a typed admission error
+   naming the offending statement. A git gate is unwritable, not refused
+   at dispatch. The tool-lane half (run_command's in-band refusal) lives
+   in test_boundary.ml. *)
+
+let%expect_test "F17: a git shell gate is rejected at admission; a build \
+                 gate admits" =
+  let print_declare ~statements =
+    match
+      Theory.declare
+        ~relations:[ packed (rel "a"); packed (rel "b") ]
+        ~statements ~laws:[]
+    with
+    | Ok _ -> print_endline "ADMITTED"
+    | Error errors ->
+        List.iter
+          (fun e -> print_endline (Theory.Admission.to_string e))
+          errors
+  in
+  let gate name command =
+    Theory.Executor.Shell_gate { name; command }
+  in
+  print_declare
+    ~statements:
+      [
+        Theory.Spawn.v ~name:"committer" ~for_:"a"
+          ~exists:("b", Theory.Window.nodes 1)
+          ~by:(gate "committer" [ "git"; "commit"; "-m"; "done" ])
+          ();
+      ];
+  print_declare
+    ~statements:
+      [
+        Theory.Spawn.v ~name:"pather" ~for_:"a"
+          ~exists:("b", Theory.Window.nodes 1)
+          ~by:(gate "pather" [ "/usr/bin/git"; "push" ])
+          ();
+      ];
+  (* Control: a build/test gate is exactly what gates are for. *)
+  print_declare
+    ~statements:
+      [
+        Theory.Spawn.v ~name:"builder" ~for_:"a"
+          ~exists:("b", Theory.Window.nodes 1)
+          ~by:(gate "builder" [ "dune"; "build" ])
+          ();
+      ];
+  [%expect {|
+    statement committer declares a git shell gate (git commit -m done): git is the harness's commit substrate; workers never touch it
+    statement pather declares a git shell gate (/usr/bin/git push): git is the harness's commit substrate; workers never touch it
+    ADMITTED
+    |}]

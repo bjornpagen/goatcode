@@ -80,6 +80,13 @@ owning doc:
   `Report.explain`'s story; a covered read surfaces nothing, and the
   escapee still retires — the declaration is a filter, never a wall
   (`30-channels.md` § footprint filtering).
+- **F17 — the git ban.** Both boundaries of the ruling: a worker's
+  `run_command` naming git in command position — argv0, after separators,
+  through one layer of quoting — gets the typed in-band refusal and
+  appends no `Effect` event, while a precise non-command mention passes;
+  and a theory declaring a shell gate whose argv[0] resolves to git is
+  rejected at admission with the offending statement named
+  (`60-agents.md` § the git ban).
 
 Rigged executors (deterministic fakes with scripted outputs, delays, faults,
 and invalid-output injections) make the whole roster runnable in CI without
@@ -89,16 +96,26 @@ correctness independent of any provider's behavior.
 
 ## Replay determinism
 
-`goat replay <ledger>` re-executes a run's decision trace: same theory, same
-seed, executor outputs substituted from the ledger's recorded events. The
-assertion is that every scheduler decision (firing order, speculation
-choices, drift routes, retire order) reproduces exactly — which holds only
-if every input to every decision was itself ledger-recorded. Replay is
-therefore the audit that **the ledger is complete**: a decision that
-consults unrecorded state diverges under replay and fails the check. This is
-the mechanism behind the no-hidden-state posture (`30-channels.md` § the
-ledger), and the reason `Date.now()`-class nondeterminism is banned from
-the scheduler (timestamps enter decisions only through the ledger).
+`goat replay <ledger>` audits a run's recorded trace for **ledger
+completeness**: every judgment the trace makes re-derivable is re-derived
+from recorded events alone and asserted against what the ledger recorded —
+the clock (timestamps enter decisions only through the ledger, so append
+order is non-decreasing), settlement (every fired node settles exactly
+once), retire order (dependency order recomputed from firing provenance),
+and drift routing (each recorded note's route re-derived from the policy
+table applied to its recorded class). A decision that consulted unrecorded
+state surfaces as a divergence between the recorded rendering and the
+re-derived one. This is the mechanism behind the no-hidden-state posture
+(`30-channels.md` § the ledger), and the reason `Date.now()`-class
+nondeterminism is banned from the scheduler.
+
+**What the checker does not do**, stated so the doc and the code cannot
+drift apart: firing order and speculation choices are recorded but *not*
+re-derived — their inputs include the admitted theory value and the run's
+backstop/switch configuration, which the ledger does not carry. Full
+re-execution (same theory, same seed, executor outputs substituted from
+recorded events, every scheduler decision reproduced exactly) is the OPEN
+item below, with its trigger.
 
 ## Honest measurement of speculation
 
@@ -158,3 +175,11 @@ promissory notes made auditable.
   *provider* pathologies (rate limits mid-run, silent truncation, refusal
   storms) are unscripted. *Trigger: the first live-run incident whose class
   a rigged executor could have rehearsed.*
+- **Full re-execution replay.** The coherence audit (§ replay determinism)
+  re-derives what the trace alone makes derivable; re-running the scheduler
+  against recorded executor outputs additionally needs the admitted theory
+  and the run's backstops/switches in the ledger — the meta-catalog wire
+  rendering (`Theory.Meta`) already exists as the natural carrier.
+  *Trigger: the first divergence dispute the coherence audit cannot
+  adjudicate, or the ledger gaining the admitted theory's wire rendering
+  for any other reason.*

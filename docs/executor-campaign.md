@@ -5,6 +5,88 @@ This is a resumption tracker, not an architecture doc. The architecture docs
 in-flight work and is deleted when the campaign lands. If this file and the
 architecture docs disagree, the architecture docs win.
 
+## WAVE 3 — enforcement rulings + verified-gap closure (2026-07-14)
+
+Landed in one pass (this commit):
+
+- **The git ban (operator ruling, verbatim: "ban all git commands from
+  any of the workers").** Two boundaries, one law. Tool lane:
+  `run_command` refuses any command whose token stream names git in
+  command position (argv0; after `&&`/`||`/`;`/`|`/`&`, subshell/
+  substitution opens, backticks; assignments and wrappers transparent;
+  one quote layer stripped; basenames compared) with the typed
+  `Grant.Refusal` ("git is the harness's commit substrate; workers never
+  touch it") and no `Effect` event; the ban is named in the tool's own
+  description. Admission lane: `Theory.Admission.Git_gate` — a shell
+  gate whose argv[0] resolves to git is rejected with the statement
+  named. RECORDED HONESTLY in `60-agents.md` § the git ban: the v0
+  screen is a tripwire, not a security boundary (`sh -c`, `$PATH` games,
+  and git-calling scripts pass it); PATH/sandbox control is the growth
+  path. Falsifiers F17 on both lanes (test_boundary.ml — the refusal
+  read in-band through a probe provider, Effect-event absence, and the
+  precision control `echo git is banned` running; test_admission.ml —
+  bare and by-path gates rejected, a build gate admitted). Roster + doc
+  sections: `80-validation.md` F17, `60-agents.md`, `10-theory.md`
+  § statement grammar.
+- **CLI exit codes.** The contract is written in `bin/main.ml`'s module
+  comment, the usage text, and `70-api.md` § the CLI: 0 success, 1 any
+  typed error path, 2 usage. Audit result: every error path already
+  exited non-zero EXCEPT the final settled map — `goat plan` printed
+  faulted nodes/violated laws and exited 0. Fixed: `exit_of_settled`
+  (any faulted node or violated law → 1; squashes alone are
+  speculation's normal business). Verified from a terminal: missing API
+  key → 1, missing config key → 1, missing ledger → 1, usage → 2,
+  version → 0.
+- **`shell_gate` eventing (wave-2 OPEN item, closed).** The gate runs
+  behind the mkdir-atomic holder-named machine lock and appends
+  `Ledger.Event.Effect { tool = "shell_gate"; resource = <declared
+  command line>; idempotent = true }` — idempotence is the declaration's
+  (a gate is a reissuable build/test command, which is why gates are
+  grantable under either speculation index). Falsifier in
+  test_boundary.ml. A git gate never reaches this runtime (admission).
+- **Tool-load generations (wave-2 OPEN item, closed).**
+  `Agent.Invocation` carries `committed : Ledger.Address.t ->
+  Witness.Committed_state.t`; the chase threads
+  `Retire.Committed.state` through `invoke_lane`, `Toolset.of_grant`
+  takes it, and `load_triple` stamps the REAL committed generation for
+  committed addresses (in-flight/absent stay zero; content still carries
+  the judgment, per B7). Direct callers supply `fun _ -> Absent`.
+  Falsifier in test_delivery.ml ("tool loads witness the real committed
+  generation…" — printed witness generation g1, pre-fix g0).
+- **F6 end-to-end.** test_delivery.ml "F6 end-to-end: an observed tool
+  read gates retirement" — a rigged node's `read_file` load enters the
+  observed witness through the real tool loop and gates retirement
+  through the real machinery (sibling lands over the file →
+  `Witness_moved` → breaking-broad flush → bounded reissue retires at
+  the landed generation). The claim/hide unit directions stay in
+  test_witness.ml.
+- **Replay gap (judge-panel finding).** `80-validation.md` § replay
+  determinism and `run.mli` now claim exactly what `Run.replay`
+  delivers: a ledger-completeness coherence audit (clock, settlement,
+  retire order, drift routes re-derived); firing order and speculation
+  choices are recorded but NOT re-derived (their inputs include the
+  admitted theory, which the ledger does not carry). Full re-execution
+  is a new `80-validation.md` OPEN item with its trigger (a divergence
+  dispute the audit cannot adjudicate, or the ledger gaining the
+  admitted theory's wire rendering). `goat replay`'s success line and
+  the usage/README wording now say "coherence audit", not "every
+  decision reproduced".
+- **Grant hard-codes (judge-panel finding).** No wiring built —
+  `Theory.Executor.Agent_template` carries no effect-tool declaration
+  surface, so effect grants await that surface; recorded honestly in
+  `60-agents.md` § tool grants ("the v0 grant surface, recorded
+  honestly") and at `chase.ml`'s `grant_of`: `effects = []` (F12's
+  runtime half held by the type index + direct-drive falsifiers) and
+  `snoop_mounts = []` (dies in the flat-org migration, `91-flat-org.md`;
+  in-engine snooping rides the body-match feed).
+
+Small finding, recorded not fixed: `glob_list`'s observed triples hash
+the path string (the listing is the observation), so a glob over a
+COMMITTED file would fail `Witness.holds`' Landed content comparison at
+retire — unexercised in the suite and unreachable until a theory grants
+a glob over landed state; the honest fix (a listing-shaped witness, or
+hashing the listed file's bytes) belongs with the flat-org grant rework.
+
 ## WAVE 2 COMPLETE (2026-07-14)
 
 Every B-finding is closed; the engine runs on the fiber substrate; the
@@ -57,14 +139,12 @@ OPEN after wave 2, with owners:
   rigged lanes cannot show. Anthropic `output_config.format` together
   with tool use is untested live; the `server-side-fallback` betas
   opt-in is still an open decision (details in "Provider wire facts").
-- **`shell_gate` Effect eventing — wave 3.** `Agent.shell_gate` runs the
-  gate command without appending an `Effect` event or taking the machine
-  lock (`agent.ml`); the grant types already encode declared idempotence.
+- **`shell_gate` Effect eventing — CLOSED (wave 3, above).** The gate
+  runs behind the machine lock and appends the `Effect` event.
   `pure_fn` needs nothing (pure over operands — no loads/stores exist).
-- **Tool-load generations — wave 3 (small).** Agent tool loads still
-  record `Generation.zero` in witness triples; harmless since `holds`
-  judges content (B7), but the committed-generation lookup threading
-  through the executor is still owed.
+- **Tool-load generations — CLOSED (wave 3, above).** The committed-state
+  lookup threads chase → invocation → toolset; tool loads witness real
+  generations for committed addresses.
 - **Recorded-shape mechanisms, deliberately unexercised:** the
   `Issued_contract` hypothesis arm and retire's dangling-ref
   serialize-reissue lane are reachable only when dispatch overlaps

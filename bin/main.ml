@@ -7,7 +7,20 @@
    the one-statement bootstrap theory whose single node is the planner
    template emitting a theory through the meta-catalog, then runs admission
    and, on success, the emitted theory — the full loop in one command
-   (docs/architecture/70-api.md § the CLI). *)
+   (docs/architecture/70-api.md § the CLI).
+
+   The exit-code contract (every command; an operator at a shell never
+   parses stdout to learn whether the command went wrong):
+   - 0 — success. For [plan]: the emitted theory's run quiesced with no
+     faulted node and no violated law (squashes alone are speculation's
+     normal business, not errors).
+   - 1 — any typed error path: config parse/bind errors, admission
+     rejection, run-level misuse, a missing ledger or node, a coherence
+     divergence under [replay], the planner emitting no theory, or a
+     final settled map carrying a faulted node or violated law.
+   - 2 — argv did not parse (usage).
+   [goat run] delegates to the theory executable and returns the child's
+   exit code — the same contract, owed by the linked binary. *)
 
 open Goatcode
 
@@ -23,8 +36,11 @@ let usage_text =
       "  goat plan <spec> --config <run.toml>";
       "  goat report <ledger>            # Report.summarize";
       "  goat explain <ledger> <node>    # one node's story";
-      "  goat replay <ledger>            # replay-determinism check";
+      "  goat replay <ledger>            # ledger-coherence audit";
       "  goat version";
+      "";
+      "exit codes: 0 success; 1 typed error (config, admission, faulted";
+      "nodes, violated laws, coherence divergence); 2 usage";
     ]
 
 let ( let* ) = Result.bind
@@ -141,6 +157,27 @@ let render_diagnostics (d : Contract.Repair.diagnostics) =
   let refusal = if d.refusal then [ "  (the reply carried refusal markers)" ] else [] in
   String.concat "\n"
     (("the emitted tuple failed the boundary parse:" :: complaints) @ refusal)
+
+(* The settled map is the answer (run.mli), and the exit code is its
+   terminal rendering: any faulted node or violated law is a non-zero
+   exit. Squashes alone are not errors — they are speculation's normal
+   business (reissue losers, upstream squash), and the retired survivors
+   are the work. *)
+let exit_of_settled (settled : Run.settled) =
+  let faulted =
+    List.exists
+      (fun (_, (r : Run.node_report)) ->
+        match r.Run.settlement with
+        | Ledger.Settlement.Faulted _ -> true
+        | Ledger.Settlement.Retired | Ledger.Settlement.Squashed _ -> false)
+      settled.Run.nodes
+  in
+  let violated =
+    List.exists
+      (fun (v : Theory.Law.verdict) -> not v.Theory.Law.satisfied)
+      settled.Run.laws
+  in
+  if faulted || violated then 1 else 0
 
 let print_settled (settled : Run.settled) =
   List.iter
@@ -762,7 +799,13 @@ let cmd_replay ~ledger_path =
   else
     match Run.replay (Ledger.load ~path:ledger_path) with
     | Ok () ->
-        print_endline "replay: deterministic (every recorded decision reproduced)";
+        (* The honest claim (run.mli [replay]): the coherence audit passed —
+           the clock, settlement, retire order, and drift routes the trace
+           makes re-derivable all reproduce. Full re-execution is the
+           recorded OPEN item (80-validation.md § replay determinism). *)
+        print_endline
+          "replay: coherent (clock, settlement, retire order, and drift \
+           routes reproduce from the recorded trace)";
         0
     | Error divergences ->
         List.iter
@@ -873,7 +916,10 @@ let cmd_plan ~spec ~config_path =
                                 Printf.printf
                                   "plan ledger: %s\nrun ledger: %s\n"
                                   plan_ledger config'.Run.ledger_path;
-                                0))))))
+                                (* The map is the answer; the exit code is
+                                   its terminal rendering — a faulted node
+                                   or violated law must not exit 0. *)
+                                exit_of_settled settled'))))))
 
 (* ------------------------------------------------------------------ *)
 (* Entry.                                                              *)

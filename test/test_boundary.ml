@@ -14,6 +14,12 @@
      non-idempotent effect tool, under every template configuration this
      suite can generate (30-channels.md § event taxonomy, 60-agents.md
      § tool grants).
+   - F17 (tool lane) — the git ban: run_command naming git in command
+     position is a typed in-band refusal with no Effect event; the
+     admission lane (a declared git gate) is in test_admission.ml
+     (60-agents.md § the git ban).
+   - shell_gate eventing: a gate run is an Effect event behind the
+     machine lock, carrying the declared command line.
 
    Rigged executors only; no live model call, no live provider lane, no
    network, no sleeps. *)
@@ -102,6 +108,10 @@ let invocation grant =
     schema = wire_schema;
     grant;
     pin;
+    (* Direct-drive tests run outside any engine: nothing is committed, so
+       tool loads witness [Absent] at generation zero (agent.mli
+       § Invocation). *)
+    committed = (fun _ -> Witness.Committed_state.Absent);
   }
 
 type env = {
@@ -591,6 +601,7 @@ let admission_error_name = function
   | Theory.Admission.Duplicate_statement _ -> "Duplicate_statement"
   | Theory.Admission.Reserved_field _ -> "Reserved_field"
   | Theory.Admission.Invalid_window _ -> "Invalid_window"
+  | Theory.Admission.Git_gate _ -> "Git_gate"
   | Theory.Admission.Invalid_generation_bound _ -> "Invalid_generation_bound"
   | Theory.Admission.Unjudgeable_law _ -> "Unjudgeable_law"
 
@@ -947,4 +958,171 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     draft landed in worktree: true
     Store write_file at file:src/gen.ml (delta src/gen.ml)
     Load read_file observing [file:src/gen.ml]
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* F17, the tool lane (docs/architecture/60-agents.md § the git ban):
+   run_command refuses any command whose token stream names git in
+   command position — argv0, after separators, through one layer of
+   quoting, behind wrapper commands — as a typed IN-BAND refusal the
+   agent can read, and appends no Effect event; a precise non-command
+   mention of "git" still runs (the ban is a wall, not a word filter).
+   The admission lane (a declared git gate) is in test_admission.ml. *)
+
+let%expect_test "F17: run_command names git -> typed in-band refusal, no \
+                 Effect event; command-position precision holds" =
+  let e = env () in
+  let worktree =
+    let d = Filename.temp_file "goat-git-ban-" "" in
+    Sys.remove d;
+    Unix.mkdir d 0o755;
+    d
+  in
+  let grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [];
+      worktree_root = worktree;
+      snoop_mounts = [];
+      shell_gates = [];
+      effects =
+        [
+          Agent.Grant.Effect_tool.idempotent ~name:"run_command"
+            (Agent.Grant.Idempotence.declare ~tool:"run_command"
+               ~why:"test lane");
+        ];
+    }
+  in
+  (* A hand-built provider lane that hands the tool result back as its
+     final text, so the refusal the agent READS is the asserted value —
+     in-band by observation, not by trust in the dispatcher. *)
+  let probe command =
+    let step = ref 0 in
+    let turn (req : Agent.Provider.request) =
+      incr step;
+      if !step = 1 then
+        Ok
+          {
+            Agent.Provider.outcome =
+              Agent.Provider.Calls
+                {
+                  text = "";
+                  first =
+                    {
+                      Agent.Provider.Call.id = "c1";
+                      name = "run_command";
+                      input = `Assoc [ ("command", `String command) ];
+                    };
+                  rest = [];
+                };
+            usage = Ledger.Usage.zero;
+          }
+      else
+        let text =
+          List.concat_map
+            (function
+              | Agent.Provider.Message.Tool_results rs ->
+                  List.map
+                    (fun (r : Agent.Provider.Tool_result.t) ->
+                      (if r.is_error then "ERR " else "OK ") ^ r.output)
+                    rs
+              | _ -> [])
+            req.Agent.Provider.messages
+          |> String.concat "\n"
+        in
+        Ok
+          {
+            Agent.Provider.outcome = Agent.Provider.Settled { text };
+            usage = Ledger.Usage.zero;
+          }
+    in
+    { Agent.Provider.turn }
+  in
+  let drive command =
+    let exec = Agent.agent ~stop:[] ~provider:(probe command) in
+    match
+      exec.Agent.Executor.run (invocation grant) ~ledger:e.ledger ~node:e.node
+        ~on_yield:(fun () -> [])
+    with
+    | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
+        let refused = String.length t >= 4 && String.equal (String.sub t 0 4) "ERR " in
+        Printf.printf "%-28s -> %s (git-ban boundary named: %b)\n" command
+          (if refused then "refused in-band" else "ran")
+          (contains t "git is the harness's commit substrate")
+    | Ok _ -> Printf.printf "%-28s -> refusal outcome\n" command
+    | Error f -> Printf.printf "%-28s -> fault: %s\n" command f.Ledger.Fault.message
+  in
+  drive "git status";
+  drive "cd sub && git commit -m x";
+  drive "'git' push";
+  drive "/usr/bin/git fetch";
+  drive "env -i git fetch";
+  drive "V=1 git tag";
+  drive "true; (git log)";
+  (* Precision: "git" outside command position is a word, not a wall. *)
+  drive "echo git is banned";
+  let effects =
+    List.filter_map
+      (fun (ev : Ledger.Event.t) ->
+        match ev.kind with
+        | Ledger.Event.Effect { tool; resource; idempotent } ->
+            Some (Printf.sprintf "Effect %s on %s (idempotent %b)" tool resource idempotent)
+        | _ -> None)
+      (Ledger.Replay.events e.ledger)
+  in
+  Printf.printf "Effect events appended: %d (the precision control's only)\n"
+    (List.length effects);
+  List.iter print_endline effects;
+  [%expect {|
+    git status                   -> refused in-band (git-ban boundary named: true)
+    cd sub && git commit -m x    -> refused in-band (git-ban boundary named: true)
+    'git' push                   -> refused in-band (git-ban boundary named: true)
+    /usr/bin/git fetch           -> refused in-band (git-ban boundary named: true)
+    env -i git fetch             -> refused in-band (git-ban boundary named: true)
+    V=1 git tag                  -> refused in-band (git-ban boundary named: true)
+    true; (git log)              -> refused in-band (git-ban boundary named: true)
+    echo git is banned           -> ran (git-ban boundary named: false)
+    Effect events appended: 1 (the precision control's only)
+    Effect run_command on machine (idempotent true)
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* The shell gate is an evented effect (docs/architecture/60-agents.md
+   § tool grants; the wave-2 OPEN item closed): it runs behind the
+   machine lock and appends the Effect event carrying the declared
+   command line as the resource — an unobserved gate run is not
+   writable. Exit status and output become the head tuple; idempotence
+   is the declaration's (a gate is a reissuable build/test command). *)
+
+let%expect_test "shell_gate: the gate run is an Effect event carrying the \
+                 declared command line" =
+  let e = env () in
+  let grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [];
+      worktree_root = "/tmp/goat-test-worktree";
+      snoop_mounts = [];
+      shell_gates = [ [ "printf"; "gate-ok" ] ];
+      effects = [];
+    }
+  in
+  (match
+     Agent.shell_gate.Agent.Executor.run (invocation grant) ~ledger:e.ledger
+       ~node:e.node
+       ~on_yield:(fun () -> [])
+   with
+  | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
+      Printf.printf "head tuple: %s\n" t
+  | Ok _ -> print_endline "refusal outcome"
+  | Error f -> Printf.printf "fault: %s\n" f.Ledger.Fault.message);
+  List.iter
+    (fun (ev : Ledger.Event.t) ->
+      match ev.kind with
+      | Ledger.Event.Effect { tool; resource; idempotent } ->
+          Printf.printf "Effect %s on %S (idempotent %b)\n" tool resource
+            idempotent
+      | _ -> ())
+    (Ledger.Replay.events e.ledger);
+  [%expect {|
+    head tuple: {"exit_status":0,"output":"gate-ok"}
+    Effect shell_gate on "printf gate-ok" (idempotent true)
     |}]

@@ -103,9 +103,21 @@ type divergence = {
     decision consulted unrecorded state. *)
 
 val replay : Ledger.t -> (unit, divergence list) result
-(** Re-execute a run's decision trace: same theory (recovered from the
-    ledger), same seed, executor outputs substituted from recorded events.
-    Every scheduler decision — firing order, speculation choices, drift
-    routes, retire order — must reproduce exactly; replay is the audit
-    that the ledger is complete
+(** The ledger-completeness audit over a run's recorded trace: every
+    judgment the trace makes re-derivable is re-derived from recorded
+    events alone and asserted against what the ledger recorded — the
+    clock (timestamps enter decisions only through the ledger, so append
+    order is non-decreasing), settlement (every fired node settles
+    exactly once), retire order (dependency order recomputed from firing
+    provenance), and drift routing (each note's route re-derived from the
+    policy table applied to its recorded class). A decision that
+    consulted unrecorded state surfaces as a mismatch between the
+    recorded rendering and the re-derived one.
+
+    What this checker does {e not} do: firing order and speculation
+    choices are recorded but not re-derived — their inputs include the
+    admitted theory value and the run's backstop/switch configuration,
+    which the ledger does not carry. Full re-execution (same theory, same
+    seed, executor outputs substituted, every scheduler decision
+    reproduced) is the recorded OPEN item, with its trigger
     (docs/architecture/80-validation.md § replay determinism). *)

@@ -343,6 +343,14 @@ module Admission : sig
         (** A cardinality window no firing plan can satisfy ([0 nodes], a
             negative or inverted tuple range) — shape nonsense rejected
             where it is written, never a per-node fault at the boundary. *)
+    | Git_gate of { statement : string; command : string }
+        (** A shell gate whose argv[0] resolves to git. Git is the
+            harness's commit substrate — [Retire.Committed] holds the only
+            writer lock on the committed branch — and a worker running git
+            is an unwitnessed effect plus revert and branch machinery;
+            gate command lines are data in the theory, so the ban is an
+            admission judgment, not a dispatch-time refusal (operator
+            ruling; docs/architecture/60-agents.md § the git ban). *)
     | Invalid_generation_bound of { relation : string; bound : int }
         (** A generation stratum that does not bound: the counter must
             admit at least one generation or the loop it carries is an
