@@ -3,3 +3,8 @@ _opam/
 *.install
 .DS_Store
 .claude/
+
+# Run scratch: the quickstart works in ./.goat and copies examples/run.toml
+# to ./run.toml — both are one operator's local state, never repo content.
+/.goat/
+/run.toml
