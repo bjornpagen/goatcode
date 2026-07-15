@@ -331,9 +331,9 @@ concept the design replaces with something sharper:
   not restore (§ fix forward).
 - **"Worktree", "branch"** (as coordination objects) — one tree, one ref;
   isolation was a second coherence mechanism and is deleted
-  (`20-medium.md`). Git worktrees survive only in the migration ledger
-  (`README.md` § design of record vs shipped engine) until the code catches
-  up.
+  (`20-medium.md`). The code has caught up: the vocabulary is deleted from
+  the engine outright and a grep-gate falsifier keeps it out (FL1,
+  `50-api.md`; `README.md` § design of record vs shipped engine, row 5).
 
 ## Prior art (inheritance, stated once)
 

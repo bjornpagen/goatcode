@@ -37,11 +37,6 @@ repo = ".goat/demo-repo"
 # The branch retirements commit to. Created on first run if absent.
 committed_branch = "goat-committed"
 
-# Unused since migration row 4 (nodes dispatch with no worktree; stores
-# land in the shared tree). Still parsed; the key dies with row 5
-# (README.md § design of record vs shipped engine).
-worktree_root = ".goat/demo-repo/.goat-worktrees"
-
 # The append-only event ledger. Created on run open; read back by
 # `goat report`, `goat explain`, `goat replay`. One run per ledger: an
 # existing file at this path is refused (choose a fresh path — never

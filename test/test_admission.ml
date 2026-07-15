@@ -76,14 +76,12 @@ let admit_exn ~relations ~statements =
 let fresh_dir () =
   let dir = Filename.temp_dir "goatcode_admission" "" in
   Sys.mkdir (Filename.concat dir "repo") 0o755;
-  Sys.mkdir (Filename.concat dir "wt") 0o755;
   dir
 
 let config_of dir ~bindings =
   {
     Run.repo = Filename.concat dir "repo";
     committed_branch = "goat-test";
-    worktree_root = Filename.concat dir "wt";
     ledger_path = Filename.concat dir "ledger";
     ports;
     executors = bindings;
@@ -736,7 +734,7 @@ let%expect_test "F14: squash drops exactly the dead subtree's provisional \
   let doomed = Retire.squash_set ledger ~cause in
   Printf.printf "squash set: [%s]\n"
     (String.concat " " (List.map Id.to_string doomed));
-  Retire.squash ~ledger ~registry ~worktrees:[] ~cause;
+  Retire.squash ~ledger ~registry ~cause;
   let resolves realm s =
     match Id.Registry.resolve registry ~realm s with
     | Ok (_ : widget Id.t) -> "resolves"

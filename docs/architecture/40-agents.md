@@ -139,9 +139,8 @@ declaration, the declared command line for shell-gate executors, and
 `effects` from the template's declared effect tools. The shipped grant is
 the grant above — nodes dispatch with no worktree, the resolver consults
 the frontier, and a snooped read is a tracked store-buffer hypothesis
-(migration ledger row 4, landed). One residue remains config-side:
-`run.toml`'s `worktree_root` key is parsed and unused until row 5 deletes
-it (`README.md` § design of record vs shipped engine).
+(migration ledger rows 4–5, landed; the retired `worktree_root` config
+key is refused by name at the CLI, `50-api.md` § the CLI).
 
 ## The git ban
 

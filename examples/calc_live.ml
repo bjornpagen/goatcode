@@ -290,7 +290,6 @@ let config =
   {
     Run.repo = ".goat/calc-repo";
     committed_branch = "goat-committed";
-    worktree_root = ".goat/calc-repo/.goat-worktrees";
     ledger_path = ".goat/ledger-calc.bin";
     ports = [ Chase.Port.open_ ~name:"agents" ];
     executors =

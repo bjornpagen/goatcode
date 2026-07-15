@@ -6,8 +6,8 @@
     into git's object database. Squash is the settlement append: the
     subtree's events become provenance-dead by derivation, its tree bytes
     are the hygiene sweep's ({!Frontier.materialize}) — "failed work
-    leaves nothing committable" is true by construction, never by
-    rollback, and no compensating action is representable here
+    leaves nothing committable" is true by construction, and no
+    compensating action is representable here
     (docs/architecture/20-medium.md § squash without isolation).
 
     Nodes retire in dependency order — a node's producers retire before it
@@ -21,25 +21,6 @@
     from the object database's blobs, the commit's tree entries from the
     store events' oids (docs/architecture/30-scheduling.md § retirement
     order and the landing). *)
-
-(** The former store buffer (a per-node git worktree). Dead machinery
-    since migration row 4 — nodes dispatch with no worktree and the
-    engine never constructs one; the module dies with row 5 (README.md
-    § design of record vs shipped engine). *)
-module Worktree : sig
-  type t
-
-  val create : root:string -> node:Ledger.node Id.t -> t
-  val path : t -> string
-
-  val snoop_mount : t -> string
-  (** The read-only mount speculative downstream nodes read; a snooped read
-      enters the consumer's witness at this producer's uncommitted
-      generation. *)
-
-  val drop : t -> unit
-  (** Squash's entire filesystem action ([git worktree remove]). *)
-end
 
 (** The committed tree and tuple set: reachable only through {!step}, the
     retire path. *)
@@ -129,10 +110,10 @@ module Frontier : sig
   val materialize : t -> repo:string -> unit
   (** Converge the tree to the frontier: write each address's live top,
       delete files whose top is [Absent] or [Deleted]. Idempotent;
-      appends nothing; moves no coordinate. This is checkout, not
-      restore — it runs at boot, after a crash, and as the hygiene sweep,
-      never on any per-node path (docs/architecture/20-medium.md § squash
-      without isolation: overwrite-on-reissue primary, lazy convergence
+      appends nothing; moves no coordinate. Checkout semantics — it runs
+      at boot, after a crash, and as the hygiene sweep, never on any
+      per-node path (docs/architecture/20-medium.md § squash without
+      isolation: overwrite-on-reissue primary, lazy convergence
       backstop). *)
 end
 
@@ -241,14 +222,13 @@ val squash_set :
 val squash :
   ledger:Ledger.t ->
   registry:Id.Registry.t ->
-  worktrees:(Ledger.node Id.t * Worktree.t) list ->
   cause:Ledger.Squash_cause.t ->
   unit
 (** Execute a squash: {!squash_set}, drop the subtree's provisional ids,
-    append [Settled (Squashed cause)] for each node. Nothing renumbers;
-    nothing compensates. [worktrees] is dead machinery since migration
-    row 4 (the engine passes [[]]; nothing filesystem-shaped rides a
-    squash); the argument dies with row 5. *)
+    append [Settled (Squashed cause)] for each node. The settlement
+    append is the whole act — nothing filesystem-shaped rides a squash;
+    the subtree's tree bytes are {!Frontier.materialize}'s hygiene.
+    Nothing renumbers; nothing compensates. *)
 
 val judge :
   theory:Theory.admitted ->

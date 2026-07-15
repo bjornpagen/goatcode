@@ -62,7 +62,7 @@ val open_all : Theory.admitted -> registry
 val tx : registry -> 'a Theory.Relation.t -> 'a tx
 (** The unique writer end for a relation. The engine is the only caller;
     executors never hold channel ends (their reads and writes are tool
-    calls against worktrees, observed by the ledger).
+    calls against the one shared tree, observed by the ledger).
 
     The presented relation must be the very declaration the registry was
     opened for: the lookup judges the relation's payload witness

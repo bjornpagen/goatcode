@@ -366,8 +366,8 @@ let wake t ~key operand =
   List.length woken
 
 (* Discontinue a held continuation now: finalizers run before the caller's
-   squash returns, so a dropped worktree is gone when the cause chain is
-   recorded. *)
+   squash returns, so the fiber's cleanup is complete when the cause chain
+   is recorded. *)
 let discontinue_held t fid once =
   match Once.take once with
   | None -> ()

@@ -38,7 +38,7 @@
 (** Tool grants: the node's footprint made operational — reads and writes
     within granted globs over the ONE shared tree, the shell gates its
     template declares. There is no private root: [write_globs] is the
-    load-bearing boundary that replaced the worktree
+    load-bearing boundary that replaced per-node isolation
     (docs/architecture/40-agents.md § tool grants; README.md § design of
     record vs shipped engine, row 4).
 

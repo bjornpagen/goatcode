@@ -91,7 +91,6 @@ let admit ~relations ~statements ~laws =
 let fresh_dir () =
   let dir = Filename.temp_dir "goatcode_heads" "" in
   Sys.mkdir (Filename.concat dir "repo") 0o755;
-  Sys.mkdir (Filename.concat dir "wt") 0o755;
   dir
 
 let run_exn ~theory ~seed ~bindings =
@@ -100,7 +99,6 @@ let run_exn ~theory ~seed ~bindings =
     {
       Run.repo = Filename.concat dir "repo";
       committed_branch = "goat-test";
-      worktree_root = Filename.concat dir "wt";
       ledger_path = Filename.concat dir "ledger";
       ports = [ Chase.Port.open_ ~name:"rig" ];
       executors = bindings;

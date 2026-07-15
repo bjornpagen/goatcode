@@ -224,7 +224,6 @@ let config =
   {
     Run.repo = ".goat/demo-repo";
     committed_branch = "goat-committed";
-    worktree_root = ".goat/demo-repo/.goat-worktrees";
     ledger_path = ".goat/ledger-live.bin";
     ports = [ Chase.Port.open_ ~name:"agents" ];
     executors = [ binding writer; binding reviewer ];

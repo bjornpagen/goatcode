@@ -17,7 +17,6 @@
 type config = {
   repo : string;
   committed_branch : string;
-  worktree_root : string;
   ledger_path : string;
   ports : Chase.Port.t list;
   executors : Chase.executor_binding list;
@@ -61,8 +60,7 @@ let directory_exists path = Sys.file_exists path && Sys.is_directory path
    only ever name an operator-owned one: [repo] is the operator's act
    (goat never creates a repository — the same posture as the git ban),
    while the ledger's parent is goat-owned scratch, made to exist rather
-   than guarded against not existing. [worktree_root] is unused since
-   migration row 4 and dies with row 5 (run.mli). *)
+   than guarded against not existing. *)
 let rec ensure_dir dir =
   if dir = "." || dir = "/" || directory_exists dir then ()
   else begin

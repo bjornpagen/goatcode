@@ -41,8 +41,9 @@ module Hypothesis : sig
         producer : Ledger.node Id.t;
         snapshot : Ledger.Content_hash.t;
       }
-        (** A partial artifact snooped from the producer's uncommitted
-            worktree (docs/architecture/30-channels.md § store-to-load
+        (** A partial artifact snooped from the producer's in-flight
+            stores — the frontier's [In_flight] top
+            (docs/architecture/30-channels.md § store-to-load
             forwarding). *)
 
   type t = {

@@ -6,9 +6,8 @@
 
    The laws under test:
    - the retire step's write set is the node's Store events, its bytes the
-     object database's blobs — no tree (worktree or checkout) is a source
-     of landed content, so a neighbor's later in-flight bytes cannot tear
-     the commit;
+     object database's blobs — no tree is a source of landed content, so a
+     neighbor's later in-flight bytes cannot tear the commit;
    - the retire commit is pathspec-limited: exactly the node's write set,
      its tree entries the store events' oids;
    - stores coalesce in the event stream (last store per address wins; a
@@ -288,13 +287,17 @@ let%expect_test "row 2: a neighbor's in-flight path never enters the retire \
 
 (* ================================================================== *)
 (* Row 2 — the write set is the event stream.  Bytes sitting in the      *)
-(* node's own worktree with NO Store event never land: the worktree is    *)
-(* not read at retire.  The control arm proves the instrument sees a      *)
-(* landing: the same bytes WITH a Store event land.                       *)
+(* shared tree with NO Store event never land — even bytes the retiring   *)
+(* node itself put there: the tree is not read at retire.  (Re-aimed at   *)
+(* the one shared tree with migration row 5, README.md § design of        *)
+(* record vs shipped engine — the per-node buffer this test used to       *)
+(* write into no longer exists; the law is unchanged.)  The control arm   *)
+(* proves the instrument sees a landing: the same bytes WITH a Store      *)
+(* event land.                                                            *)
 (* ================================================================== *)
 
-let%expect_test "row 2: un-evented worktree bytes never land — the worktree \
-                 is not read at retire" =
+let%expect_test "row 2: un-evented tree bytes never land — the tree is not \
+                 read at retire" =
   let repo, scratch, ledger, registry = fixture "goat_r2_unevented" in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
   let node_minter : Ledger.node Id.Minter.t =
@@ -302,13 +305,12 @@ let%expect_test "row 2: un-evented worktree bytes never land — the worktree \
   in
   let n = Id.mint node_minter in
   let m = Id.mint node_minter in
-  (* The node's store buffer holds real bytes... that no Store event ever
-     named (the old changed-paths read would have landed them). *)
-  let wt = Retire.Worktree.create ~root:(repo // "buffers") ~node:n in
-  write_file (Retire.Worktree.path wt // "junk.txt") "never stored\n";
-  Printf.printf "worktree holds the bytes: %b\n"
-    (String.equal (read_file (Retire.Worktree.path wt // "junk.txt"))
-       "never stored\n");
+  (* The shared tree holds real bytes, written by the retiring node
+     itself... that no Store event ever named (the old changed-paths read
+     would have landed them). *)
+  write_file (repo // "junk.txt") "never stored\n";
+  Printf.printf "tree holds the bytes: %b\n"
+    (String.equal (read_file (repo // "junk.txt")) "never stored\n");
   Printf.printf "retire n: %s\n" (retire ~committed ~ledger ~registry ~node:n);
   Printf.printf "junk.txt committed state: %s\n"
     (state_str
@@ -326,7 +328,7 @@ let%expect_test "row 2: un-evented worktree bytes never land — the worktree \
        (Filename.quote scratch));
   [%expect
     {|
-    worktree holds the bytes: true
+    tree holds the bytes: true
     retire n: ok
     junk.txt committed state: absent
     junk.txt on the committed branch: <absent>

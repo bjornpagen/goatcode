@@ -427,14 +427,12 @@ let misuse_string = function
 
 (* One run of the review theory with fresh rigged executors (scripts are
    consumed across invocations, so every run gets its own executor
-   values), fresh repo / worktree / ledger paths, and the given
+   values), fresh repo / ledger paths, and the given
    speculation posture. *)
 let run_review ~tag ~backstops ~switches (theory, target_rel) =
   let dir = Filename.temp_dir "goatcode_f9" ("." ^ tag) in
   let repo = Filename.concat dir "repo" in
-  let worktree_root = Filename.concat dir "worktrees" in
   Sys.mkdir repo 0o755;
-  Sys.mkdir worktree_root 0o755;
   let binding by script =
     {
       Chase.executor = Theory.Executor.id by;
@@ -460,7 +458,6 @@ let run_review ~tag ~backstops ~switches (theory, target_rel) =
     {
       Run.repo;
       committed_branch = "committed";
-      worktree_root;
       ledger_path = Filename.concat dir "ledger.bin";
       ports = [ Chase.Port.open_ ~name:"model" ];
       executors = [ binding sweep_by sweep_script; binding review_by review_script ];

@@ -88,8 +88,7 @@ let admit ~relations ~statements =
 
 (* A real git repo: the committed branch's storage engine — file deltas,
    generation moves, and the write log all ride it
-   (docs/architecture/50-commit.md § durability boundary). Store buffers
-   live inside it so they are real git worktrees. *)
+   (docs/architecture/50-commit.md § durability boundary). *)
 let sandbox ?(files = []) prefix =
   let root = Filename.temp_dir prefix "" in
   let repo = Filename.concat root "repo" in
@@ -100,7 +99,7 @@ let sandbox ?(files = []) prefix =
   in
   sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
   (* Optional committed fixture files: pre-run repository state a node
-     may read through its worktree checkout. *)
+     may read through the committed checkout. *)
   List.iter
     (fun (path, contents) ->
       Out_channel.with_open_bin (Filename.concat repo path) (fun oc ->
@@ -113,16 +112,13 @@ let sandbox ?(files = []) prefix =
        "git -C %s -c user.name=goatcode-test -c user.email=test@localhost \
         commit -q --allow-empty -m fixture-seed"
        (Filename.quote repo));
-  let worktrees = Filename.concat repo "_buffers" in
-  Unix.mkdir worktrees 0o755;
-  (repo, worktrees, Filename.concat root "ledger.bin")
+  (repo, Filename.concat root "ledger.bin")
 
-let config ~repo ~worktrees ~ledger_path ?(backstops = Speculate.Backstops.default)
+let config ~repo ~ledger_path ?(backstops = Speculate.Backstops.default)
     ?(merges = Retire.Merge_registry.empty) ~executors () =
   {
     Run.repo;
     committed_branch = "goat-committed";
-    worktree_root = worktrees;
     ledger_path;
     ports = [ Chase.Port.open_ ~name:"main" ];
     executors;
@@ -284,7 +280,7 @@ let%expect_test "F7: a snooped hypothesis discharges on exact landing and \
             ~by:consumer ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_f7_" in
+  let repo, ledger_path = sandbox "goat_f7_" in
   let executors =
     [
       binding ~by:producer ~script:[ R.Reply {|{"msg":"mid landed"}|} ];
@@ -293,7 +289,7 @@ let%expect_test "F7: a snooped hypothesis discharges on exact landing and \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+       ~config:(config ~repo ~ledger_path ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -411,7 +407,7 @@ let%expect_test "delivery: the invalidation and the typed drift note reach \
             ~by:c ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_delivery_" in
+  let repo, ledger_path = sandbox "goat_delivery_" in
   let executors =
     [
       binding ~by:w1
@@ -430,7 +426,7 @@ let%expect_test "delivery: the invalidation and the typed drift note reach \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~backstops ~merges ~executors ())
+       ~config:(config ~repo ~ledger_path ~backstops ~merges ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -507,7 +503,7 @@ let%expect_test "FL2 tracked arm: a tool read of a sibling's in-flight \
             ~by:drafter ();
         ]
   in
-  let repo, worktrees, ledger_path =
+  let repo, ledger_path =
     sandbox ~files:[ ("shared.txt", "base\n") ] "goat_fl2_tracked_"
   in
   let executors =
@@ -520,7 +516,7 @@ let%expect_test "FL2 tracked arm: a tool read of a sibling's in-flight \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+       ~config:(config ~repo ~ledger_path ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -645,7 +641,7 @@ let%expect_test "FL2 cascade arm: a consumer of a squashed writer's dead \
             ~by:snooper ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_fl2_cascade_" in
+  let repo, ledger_path = sandbox "goat_fl2_cascade_" in
   let executors =
     [
       binding ~by:first
@@ -664,7 +660,7 @@ let%expect_test "FL2 cascade arm: a consumer of a squashed writer's dead \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+       ~config:(config ~repo ~ledger_path ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -817,7 +813,7 @@ let%expect_test "the token ceiling binds: eager work deflected, announced, \
             ~by:deflected ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox "goat_ceiling_" in
+  let repo, ledger_path = sandbox "goat_ceiling_" in
   let executors =
     [
       binding ~by:producer ~script:[ R.Reply {|{"msg":"mid landed"}|} ];
@@ -828,7 +824,7 @@ let%expect_test "the token ceiling binds: eager work deflected, announced, \
   let backstops = { Speculate.Backstops.default with token_ceiling = 0 } in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~backstops ~executors ())
+       ~config:(config ~repo ~ledger_path ~backstops ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -943,7 +939,7 @@ let%expect_test "FL5: two live writers of one path convict at retire; the \
   (* One committed base for both writers: the disjoint law's coordinate
      (and a real generation move at the winner's landing, so the
      invalidation exists to deliver). *)
-  let repo, worktrees, ledger_path =
+  let repo, ledger_path =
     sandbox ~files:[ ("same.txt", "base\n") ] "goat_fl5_"
   in
   let executors =
@@ -962,7 +958,7 @@ let%expect_test "FL5: two live writers of one path convict at retire; the \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+       ~config:(config ~repo ~ledger_path ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -1050,7 +1046,7 @@ let%expect_test "footprint escape: an uncovered load surfaces at retire as \
             ~by:covered ();
         ]
   in
-  let repo, worktrees, ledger_path =
+  let repo, ledger_path =
     sandbox
       ~files:[ ("notes.txt", "n1\n"); ("covered.txt", "c1\n") ]
       "goat_escape_"
@@ -1077,7 +1073,7 @@ let%expect_test "footprint escape: an uncovered load surfaces at retire as \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+       ~config:(config ~repo ~ledger_path ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -1184,7 +1180,7 @@ let%expect_test "F6 end-to-end: an observed tool read gates retirement \
   in
   (* notes.txt is committed repository state before the run; the mover's
      store moves it in the shared tree before the reader looks. *)
-  let repo, worktrees, ledger_path =
+  let repo, ledger_path =
     sandbox ~files:[ ("notes.txt", "v1\n") ] "goat_f6_e2e_"
   in
   let executors =
@@ -1198,7 +1194,7 @@ let%expect_test "F6 end-to-end: an observed tool read gates retirement \
   in
   (match
      Run.exec ~theory ~seed:(seed_task task)
-       ~config:(config ~repo ~worktrees ~ledger_path ~executors ())
+       ~config:(config ~repo ~ledger_path ~executors ())
    with
   | Error _ -> print_endline "run rejected as misuse"
   | Ok settled ->
@@ -1297,7 +1293,7 @@ let run_reader_after_landing ~prefix ~reader_globs ~reader_script =
             ~by:reader ();
         ]
   in
-  let repo, worktrees, ledger_path = sandbox ~files:[ ("notes.txt", "v1\n") ] prefix in
+  let repo, ledger_path = sandbox ~files:[ ("notes.txt", "v1\n") ] prefix in
   let executors =
     [
       binding ~by:mover
@@ -1311,7 +1307,7 @@ let run_reader_after_landing ~prefix ~reader_globs ~reader_script =
     { Speculate.Backstops.default with confidence_floor = 2.0 }
   in
   Run.exec ~theory ~seed:(seed_task task)
-    ~config:(config ~repo ~worktrees ~ledger_path ~backstops ~executors ())
+    ~config:(config ~repo ~ledger_path ~backstops ~executors ())
 
 let%expect_test "tool loads witness the real committed generation once the \
                  address is committed" =

@@ -1,17 +1,31 @@
-(* Falsifiers, group "squash" (docs/architecture/80-validation.md):
+(* Falsifiers, group "squash" (docs/architecture/50-api.md § the
+   falsifier discipline):
 
    - F3 — squash precision. A fault or dead hypothesis squashes exactly the
      provenance-closed subtree; siblings retire undisturbed. The falsifier
      builds graphs where any over-squash removes a committed tuple a sibling
      owns and any under-squash leaks a doomed node's tuple into committed
-     state, and asserts neither happens (docs/architecture/50-commit.md).
+     state, and asserts neither happens (docs/architecture/30-scheduling.md).
 
    - F5 — abort by construction. Kill a run at arbitrary points (fault
      injection at every yield class of the rigged executor, plus abandoning
      the engine after every possible number of scheduling steps); committed
-     state contains only fully-retired nodes' effects; worktree drops leave
-     no orphan state (docs/architecture/50-commit.md § abort by
-     construction).
+     state contains only fully-retired nodes' effects
+     (docs/architecture/30-scheduling.md § abort by construction). The
+     old worktree-drop cleanliness arm is re-aimed per the flat org
+     (50-api.md F5: the injection asserts committed-state purity and
+     frontier re-derivation instead of buffer-drop cleanliness; README.md
+     § design of record vs shipped engine, row 5).
+
+   - FL1 — squash-revert counterfactual. A producer stores over committed
+     content, then squashes: the committed coordinate never moves, squash
+     appends only settlements, the repair is a forward event, a consumer
+     of the dead bytes is refused at retire and routed forward, and the
+     only code path that can bring the old bytes back to the tree is
+     [Retire.Frontier.materialize]'s cache fill (50-api.md § the flat-org
+     roster, FL1; the grep-gate arm — no worktree/restore vocabulary in
+     lib/ — is a dune rule in test/dune, and the negative-compile arm is
+     probe_fl1_generation_retreat.ml).
 
    Rigged executors only ([Agent.Rigged]); no test constructs
    [Agent.claude_cli]; no network, no model, no sleeps ([Delay_s] is
@@ -49,8 +63,7 @@ let git ~repo args =
   sh (Printf.sprintf "git -C %s %s" (Filename.quote repo) args)
 
 (* One disposable run environment: a real git repo (the committed branch's
-   storage engine), a worktree root inside it (so store buffers are real
-   git worktrees), and a ledger path. *)
+   storage engine — the ONE shared tree) and a ledger path. *)
 let with_fixture f =
   let tmp = Filename.temp_dir "goatcode_squash" "" in
   Fun.protect
@@ -64,10 +77,8 @@ let with_fixture f =
       git ~repo
         "-c user.name=goatcode-test -c user.email=test@localhost commit -q \
          --allow-empty -m fixture-seed";
-      let wt = Filename.concat repo "_buffers" in
-      Sys.mkdir wt 0o755;
       let ledger_path = Filename.concat tmp "ledger" in
-      f ~repo ~wt ~ledger_path)
+      f ~repo ~ledger_path)
 
 (* ------------------------------------------------------------------ *)
 (* A small pipeline theory: task --work--> result --summarize--> summary.
@@ -162,11 +173,10 @@ let binding by script =
     port = "main";
   }
 
-let config ~repo ~wt ~ledger_path ~executors =
+let config ~repo ~ledger_path ~executors =
   {
     Run.repo;
     committed_branch = "goat";
-    worktree_root = wt;
     ledger_path;
     ports = [ Chase.Port.open_ ~name:"main" ];
     executors;
@@ -205,31 +215,6 @@ let ids_str ids = "[" ^ String.concat "; " (List.map Id.to_string ids) ^ "]"
 let tuple_key (t : Retire.Committed.tuple) =
   t.Retire.Committed.relation ^ "/" ^ t.Retire.Committed.id
 
-let worktree_dirs wt =
-  Sys.readdir wt |> Array.to_list |> List.sort String.compare
-
-(* Store buffers registered with git (the linked-worktree table): the other
-   half of "worktree drops leave no orphan state" — a dropped buffer must
-   vanish from git's own bookkeeping, not only from the filesystem. *)
-let registered_buffers ~repo =
-  sh_lines
-    (Printf.sprintf "git -C %s worktree list --porcelain" (Filename.quote repo))
-  |> List.filter_map (fun line ->
-         let prefix = "worktree " in
-         if String.starts_with ~prefix line then
-           let path =
-             String.sub line (String.length prefix)
-               (String.length line - String.length prefix)
-           in
-           if
-             String.equal
-               (Filename.basename (Filename.dirname path))
-               "_buffers"
-           then Some (Filename.basename path)
-           else None
-         else None)
-  |> List.sort String.compare
-
 let retire_log ~repo =
   sh_lines
     (Printf.sprintf "git -C %s log --format=%%s goat --" (Filename.quote repo))
@@ -244,11 +229,15 @@ let retire_log ~repo =
 
 (* ------------------------------------------------------------------ *)
 (* The F5 invariant: committed state contains only fully-retired nodes'
-   effects, and settled-without-retiring nodes leave no worktree state —
-   filesystem or git bookkeeping. Checked from the ledger, the committed
-   tuple set, the durability boundary (git log), and the worktree root. *)
+   effects. Checked from the ledger, the committed tuple set, and the
+   durability boundary (git log). Re-aimed per the flat org (50-api.md
+   F5; README.md § design of record vs shipped engine, row 5): the old
+   checks 3-4 — per-node buffer directories and git's linked-worktree
+   table — judged machinery that no longer exists; a squashed node's
+   tree bytes are hygiene for [Retire.Frontier.materialize] (FL3's
+   sweep), never committable state. *)
 
-let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo ~wt =
+let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo =
   let violations = ref [] in
   let bad fmt = Printf.ksprintf (fun s -> violations := s :: !violations) fmt in
   let minted_by =
@@ -260,7 +249,6 @@ let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo ~wt =
         | _ -> [])
       (Ledger.Replay.events ledger)
   in
-  let fired_nodes = List.map snd minted_by in
   let retired =
     List.filter_map
       (fun (n, s) ->
@@ -269,14 +257,6 @@ let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo ~wt =
         | _ -> None)
       settlements
     |> List.sort String.compare
-  in
-  let settled_not_retired =
-    List.filter_map
-      (fun (n, s) ->
-        match s with
-        | Ledger.Settlement.Retired -> None
-        | _ -> Some (Id.to_string n))
-      settlements
   in
   (* 1. Every committed tuple was minted by a node that fully retired — or
      is one of the run's seeds, committed at run open with no minting node
@@ -298,21 +278,6 @@ let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo ~wt =
     bad "retire commits [%s] disagree with retired nodes [%s]"
       (String.concat "; " log)
       (String.concat "; " retired);
-  (* 3. No settled-without-retiring node leaves a worktree directory, and
-     every directory belongs to a node this run fired. *)
-  List.iter
-    (fun dir ->
-      if List.mem dir settled_not_retired then
-        bad "orphan worktree directory %s (node settled without retiring)" dir;
-      if not (List.mem dir fired_nodes) then
-        bad "stray worktree directory %s (no fired node owns it)" dir)
-    (worktree_dirs wt);
-  (* 4. Git's linked-worktree table holds no entry for a dropped buffer. *)
-  List.iter
-    (fun dir ->
-      if List.mem dir settled_not_retired then
-        bad "orphan git worktree registration %s" dir)
-    (registered_buffers ~repo);
   List.rev !violations
 
 let print_violations = function
@@ -431,19 +396,12 @@ let%expect_test "F3: squash_set is exactly the provenance-closed subtree" =
       (* Execute the squash for the upstream fault. Provisional ids of the
          doomed subtree die with it (ra was minted by a, which settles as
          its own fault — [Retire.squash] handles only the dependents, so we
-         pass a's cause and check the subtree's own mints). Worktrees are
-         dropped; nothing renumbers; a second walk finds nothing left. *)
-      let wt_root = Filename.concat tmp "buffers" in
-      Sys.mkdir wt_root 0o755;
-      let worktrees =
-        List.map
-          (fun n -> (n, Retire.Worktree.create ~root:wt_root ~node:n))
-          [ b; c; e ]
-      in
-      Retire.squash ~ledger ~registry ~worktrees
+         pass a's cause and check the subtree's own mints). The squash is
+         the settlement append — nothing filesystem-shaped rides it
+         (README.md § design of record vs shipped engine, row 5); nothing
+         renumbers; a second walk finds nothing left. *)
+      Retire.squash ~ledger ~registry
         ~cause:(Ledger.Squash_cause.Upstream_fault a);
-      Printf.printf "buffers left: [%s]\n"
-        (String.concat "; " (worktree_dirs wt_root));
       Printf.printf "sb resolves: %b\n"
         (Result.is_ok (Id.Registry.resolve registry ~realm:"s" sb));
       Printf.printf "rd resolves: %b\n"
@@ -464,7 +422,6 @@ let%expect_test "F3: squash_set is exactly the provenance-closed subtree" =
               ~cause:(Ledger.Squash_cause.Upstream_fault a)));
       [%expect
         {|
-        buffers left: []
         sb resolves: false
         rd resolves: true
         squash settlements sealed: 3
@@ -562,7 +519,7 @@ let%expect_test "F3: snooped store-buffer dependents squash with the producer" =
 (* ==================================================================== *)
 
 let%expect_test "F3: end-to-end sibling precision through Run.exec" =
-  with_fixture (fun ~repo ~wt ~ledger_path ->
+  with_fixture (fun ~repo ~ledger_path ->
       let theory = pipeline_theory () in
       let executors =
         [
@@ -571,7 +528,7 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
           binding summarizer [ ok_reply "summary of t1" ];
         ]
       in
-      let config = config ~repo ~wt ~ledger_path ~executors in
+      let config = config ~repo ~ledger_path ~executors in
       match
         Run.exec ~theory ~seed:[ task_seed "t1"; task_seed "t2" ] ~config
       with
@@ -586,12 +543,6 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
             (String.concat "; " (List.map tuple_key settled.tuples));
           Printf.printf "retire commits: [%s]\n"
             (String.concat "; " (retire_log ~repo));
-          (* Migration row 4 (README.md § design of record vs shipped
-             engine): nodes dispatch with no worktree, so no buffer dir
-             ever exists to leak or to keep — the empty listing is the
-             flat-org invariant. *)
-          Printf.printf "buffers left: [%s]\n"
-            (String.concat "; " (worktree_dirs wt));
           let nodes_settlements =
             List.map
               (fun (n, (r : Run.node_report)) -> (n, r.settlement))
@@ -600,7 +551,7 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
           print_violations
             (abort_invariant_violations ~ledger:settled.ledger
                ~settlements:nodes_settlements ~tuples:settled.tuples
-               ~seeds:[ "task/task#0"; "task/task#1" ] ~repo ~wt);
+               ~seeds:[ "task/task#0"; "task/task#1" ] ~repo);
           (* Settle order: the fault lands at dispatch, before the sibling
              reaches retirement — so node#1 settles first. *)
           [%expect
@@ -610,7 +561,6 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
             node#2: retired
             tuples: [task/task#0; task/task#1; result/result#0; summary/summary#0]
             retire commits: [node#0; node#2]
-            buffers left: []
             invariant: ok
             |}])
 
@@ -621,8 +571,7 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
 (* after a recognized refusal, and by script exhaustion at a yield. Each  *)
 (* is injected twice: upstream (the pipeline's first node) and downstream *)
 (* (after the first node retired) — committed state must contain exactly  *)
-(* the fully-retired nodes' effects either way, and no dropped worktree   *)
-(* may leave state.                                                       *)
+(* the fully-retired nodes' effects either way.                           *)
 (* ==================================================================== *)
 
 let fault_scripts =
@@ -645,7 +594,7 @@ let fault_scripts =
   ]
 
 let run_fault_scenario ~label ~inject =
-  with_fixture (fun ~repo ~wt ~ledger_path ->
+  with_fixture (fun ~repo ~ledger_path ->
       let theory = pipeline_theory () in
       let script = List.assoc label fault_scripts in
       let executors =
@@ -655,7 +604,7 @@ let run_fault_scenario ~label ~inject =
         | `Downstream ->
             [ binding worker [ ok_reply "r" ]; binding summarizer script ]
       in
-      let config = config ~repo ~wt ~ledger_path ~executors in
+      let config = config ~repo ~ledger_path ~executors in
       match Run.exec ~theory ~seed:[ task_seed "t1" ] ~config with
       | Error _ -> Printf.printf "%s: unexpected host misuse\n" label
       | Ok settled ->
@@ -678,7 +627,7 @@ let run_fault_scenario ~label ~inject =
           in
           let violations =
             abort_invariant_violations ~ledger:settled.ledger ~settlements
-              ~tuples:settled.tuples ~seeds:[ "task/task#0" ] ~repo ~wt
+              ~tuples:settled.tuples ~seeds:[ "task/task#0" ] ~repo
           in
           Printf.printf "%s | %s | tuples=[%s] | %s\n" label brief
             (String.concat "; " (List.map tuple_key settled.tuples))
@@ -719,12 +668,11 @@ let%expect_test "F5: downstream fault at every yield class keeps exactly the \
 (* F5: kill the run at every possible point. The engine is abandoned      *)
 (* after k scheduling steps for every k from 0 to quiescence; at each     *)
 (* kill point committed state (tuples AND the committed branch's git      *)
-(* history) contains only fully-retired nodes' effects, and no            *)
-(* settled-without-retiring node has worktree state. Abandoning the       *)
+(* history) contains only fully-retired nodes' effects. Abandoning the    *)
 (* engine mid-run is the process-death model: nothing runs after step k.  *)
 (* ==================================================================== *)
 
-let build_engine ~repo ~wt:_ ~ledger_path =
+let build_engine ~repo ~ledger_path =
   let theory = pipeline_theory () in
   let ledger = Ledger.create ~path:ledger_path in
   let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
@@ -746,8 +694,8 @@ let build_engine ~repo ~wt:_ ~ledger_path =
 let%expect_test "F5: killing the run after any number of steps leaks nothing" =
   (* Measure the healthy run's step count once. *)
   let steps =
-    with_fixture (fun ~repo ~wt ~ledger_path ->
-        let chase, _ = build_engine ~repo ~wt ~ledger_path in
+    with_fixture (fun ~repo ~ledger_path ->
+        let chase, _ = build_engine ~repo ~ledger_path in
         let rec go n =
           match Chase.step chase with
           | `Progressed -> go (n + 1)
@@ -758,8 +706,8 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
   Printf.printf "steps to quiescence: %d\n" steps;
   (* Kill after every k, on a fresh fixture each time. *)
   for k = 0 to steps do
-    with_fixture (fun ~repo ~wt ~ledger_path ->
-        let chase, ledger = build_engine ~repo ~wt ~ledger_path in
+    with_fixture (fun ~repo ~ledger_path ->
+        let chase, ledger = build_engine ~repo ~ledger_path in
         for _ = 1 to k do
           ignore (Chase.step chase : [ `Progressed | `Quiescent ])
         done;
@@ -767,7 +715,7 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
         let tuples = Retire.Committed.tuples (Chase.committed chase) in
         let violations =
           abort_invariant_violations ~ledger ~settlements ~tuples
-            ~seeds:[ "task/task#0" ] ~repo ~wt
+            ~seeds:[ "task/task#0" ] ~repo
         in
         Printf.printf "kill@%d: retired=[%s] tuples=[%s] %s\n" k
           (String.concat "; "
@@ -793,3 +741,284 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
     kill@5: retired=[node#0] tuples=[task/task#0; result/result#0] ok
     kill@6: retired=[node#0; node#1] tuples=[task/task#0; result/result#0; summary/summary#0] ok
     |}]
+
+(* ==================================================================== *)
+(* FL1: the squash-revert counterfactual (docs/architecture/50-api.md    *)
+(* § the flat-org roster). A producer stores over committed content,     *)
+(* then squashes. The committed coordinate never moves — the squash      *)
+(* appends settlements and nothing else (no event class expresses a      *)
+(* retreat); the dead bytes sit in the tree with no authority until      *)
+(* [Retire.Frontier.materialize]'s cache fill converges them away — the  *)
+(* ONE code path that can bring the old bytes back, and it appends       *)
+(* nothing and moves no coordinate; a consumer that read the dead bytes  *)
+(* is refused at retire by the content-judged witness and routed         *)
+(* forward, never retired; the repair is a forward event — a reissued    *)
+(* store landing ABOVE the committed coordinate. The negative-compile    *)
+(* arm (no constructor takes a generation backward) is                   *)
+(* probe_fl1_generation_retreat.ml; the grep-gate arm (no worktree/      *)
+(* restore vocabulary in lib/) is a dune rule in test/dune.              *)
+(* ==================================================================== *)
+
+let fl1_write_file path contents =
+  Out_channel.with_open_bin path (fun oc ->
+      Out_channel.output_string oc contents)
+
+let fl1_read_file path = In_channel.with_open_bin path In_channel.input_all
+
+let fl1_sh_out cmd =
+  let tmp = Filename.temp_file "goat_fl1" ".out" in
+  let status =
+    Sys.command (Printf.sprintf "%s >%s 2>/dev/null" cmd (Filename.quote tmp))
+  in
+  let out = if status = 0 then Some (fl1_read_file tmp) else None in
+  (try Sys.remove tmp with Sys_error _ -> ());
+  out
+
+(* A file store, the way the engine's tool path lands one: the blob into
+   the object database first, the shared tree second, the Store event
+   (carrying the oid) third — so the clobber over committed content is
+   real at store time, before any settlement. *)
+let fl1_store ~ledger ~repo ~node rel contents =
+  let tmp = Filename.temp_file "goat_fl1_store" ".tmp" in
+  fl1_write_file tmp contents;
+  let oid =
+    match
+      fl1_sh_out
+        (Printf.sprintf "git -C %s hash-object -w -- %s" (Filename.quote repo)
+           (Filename.quote tmp))
+    with
+    | Some printed -> String.trim printed
+    | None -> failwith ("hash-object refused " ^ rel)
+  in
+  (try Sys.remove tmp with Sys_error _ -> ());
+  fl1_write_file (Filename.concat repo rel) contents;
+  match Ledger.Delta_ref.blob oid with
+  | None -> failwith ("hash-object printed no oid for " ^ rel)
+  | Some delta ->
+      ignore
+        (Ledger.append ledger ~node
+           (Ledger.Event.Store
+              { tool = "write_file"; address = Ledger.Address.File rel; delta })
+          : Ledger.Event.t)
+
+let fl1_state_str = function
+  | Witness.Committed_state.Absent -> "absent"
+  | Witness.Committed_state.Landed { generation; _ } ->
+      Format.asprintf "landed@%a" Ledger.Generation.pp generation
+  | Witness.Committed_state.Deleted { generation } ->
+      Format.asprintf "deleted@%a" Ledger.Generation.pp generation
+
+let fl1_branch_content repo rel =
+  match
+    fl1_sh_out
+      (Printf.sprintf "git -C %s show goat:%s" (Filename.quote repo)
+         (Filename.quote rel))
+  with
+  | Some c -> Printf.sprintf "%S" c
+  | None -> "<absent>"
+
+let%expect_test "FL1: a squash retreats nothing — the settlement is the \
+                 whole act, dead bytes are the frontier's cache fill, the \
+                 repair is forward" =
+  with_fixture (fun ~repo ~ledger_path ->
+      let ledger = Ledger.create ~path:ledger_path in
+      let registry = Id.Registry.create () in
+      let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+      let nodes : Ledger.node Id.Minter.t =
+        Id.Minter.create ~registry ~realm:"node"
+      in
+      let hyps : Ledger.hypothesis Id.Minter.t =
+        Id.Minter.create ~registry ~realm:"hypothesis"
+      in
+      let statement =
+        match Theory.statements (pipeline_theory ()) with
+        | (sid, _) :: _ -> sid
+        | [] -> failwith "pipeline theory has no statements"
+      in
+      let fired node seed_tuple =
+        ignore
+          (Ledger.append ledger ~node
+             (Ledger.Event.Fired
+                {
+                  provenance =
+                    {
+                      Ledger.Provenance.statement;
+                      consumed = [ ("task", seed_tuple) ];
+                      hypotheses = [];
+                    };
+                  minted = [];
+                })
+            : Ledger.Event.t)
+      in
+      let retire node =
+        match
+          Retire.step ~committed ~ledger ~registry
+            ~merges:Retire.Merge_registry.empty ~node
+            ~witness:(Witness.observed ledger ~node)
+            ~heads:[]
+        with
+        | Ok () -> "ok"
+        | Error (Retire.Witness_moved _) ->
+            "rejected (Witness_moved) — a typed forward signal"
+        | Error (Retire.Undischarged _) -> "rejected (Undischarged)"
+        | Error (Retire.Conflict _) -> "rejected (Conflict)"
+      in
+      let addr = Ledger.Address.File "f.txt" in
+      let coordinate () =
+        Printf.sprintf "%s %s"
+          (fl1_state_str (Retire.Committed.state committed addr))
+          (fl1_branch_content repo "f.txt")
+      in
+      let committed_gen () =
+        match Retire.Committed.generation committed addr with
+        | Some g -> g
+        | None -> Ledger.Generation.zero
+      in
+      (* Baseline: c0 lands v1 as committed content. *)
+      let c0 = Id.mint nodes in
+      fired c0 "t0";
+      fl1_store ~ledger ~repo ~node:c0 "f.txt" "v1\n";
+      Printf.printf "baseline retire: %s\n" (retire c0);
+      Printf.printf "baseline coordinate: %s\n" (coordinate ());
+      (* The producer stores OVER the committed content — the clobber is
+         in the shared tree at store time — on a hypothesis that will
+         die. *)
+      let p = Id.mint nodes in
+      fired p "t1";
+      let h = Id.mint hyps in
+      ignore
+        (Ledger.append ledger ~node:p
+           (Ledger.Event.Hypothesis_taken
+              {
+                hypothesis = h;
+                address = Ledger.Address.Contract "r";
+                source = "issued-contract:r";
+                content = Ledger.Content_hash.of_string "guess";
+                confidence = 0.5;
+              })
+          : Ledger.Event.t);
+      fl1_store ~ledger ~repo ~node:p "f.txt" "dead draft\n";
+      Printf.printf "tree holds the producer's draft: %b\n"
+        (String.equal (fl1_read_file (Filename.concat repo "f.txt"))
+           "dead draft\n");
+      (* The consumer read the dead bytes — an untracked read, judged by
+         content at retire, not by any kill mark. *)
+      let k = Id.mint nodes in
+      fired k "t2";
+      ignore
+        (Ledger.append ledger ~node:k
+           (Ledger.Event.Load
+              {
+                tool = "read_file";
+                observed =
+                  [
+                    ( addr,
+                      committed_gen (),
+                      Ledger.Content_hash.of_string "dead draft\n" );
+                  ];
+              })
+          : Ledger.Event.t);
+      (* The hypothesis dies. The squash is the settlement append — count
+         what it adds and prove every appended event is a settlement:
+         no event class lowers, rewrites, or deletes a coordinate. *)
+      let before_squash = List.length (Ledger.Replay.events ledger) in
+      Retire.squash ~ledger ~registry
+        ~cause:(Ledger.Squash_cause.Dead_hypothesis h);
+      let appended =
+        List.filteri
+          (fun i _ -> i >= before_squash)
+          (Ledger.Replay.events ledger)
+      in
+      Printf.printf "squash appended %d event(s); settlements only: %b\n"
+        (List.length appended)
+        (List.for_all
+           (fun (e : Ledger.Event.t) ->
+             match e.kind with
+             | Ledger.Event.Settled (Ledger.Settlement.Squashed _) -> true
+             | _ -> false)
+           appended);
+      Printf.printf "coordinate after squash (never moved): %s\n"
+        (coordinate ());
+      Printf.printf "dead bytes still in the tree (garbage, no authority): %b\n"
+        (String.equal (fl1_read_file (Filename.concat repo "f.txt"))
+           "dead draft\n");
+      (* The counterfactual arm's positive half: the ONE code path that
+         brings the old bytes back is the frontier's cache fill — and it
+         appends nothing and moves no coordinate. *)
+      let after_squash = List.length (Ledger.Replay.events ledger) in
+      let frontier = Retire.Frontier.of_ledger ledger ~committed in
+      Retire.Frontier.materialize frontier ~repo;
+      Printf.printf "materialize converged the tree to the committed top: %b\n"
+        (String.equal (fl1_read_file (Filename.concat repo "f.txt")) "v1\n");
+      Printf.printf "materialize appended nothing: %b\n"
+        (List.length (Ledger.Replay.events ledger) = after_squash);
+      Printf.printf "coordinate after materialize: %s\n" (coordinate ());
+      (* The consumer of the dead bytes: refused by the content-judged
+         witness, routed forward as a typed signal — never retired. *)
+      Printf.printf "consumer retire: %s\n" (retire k);
+      Printf.printf "consumer settled events: %d\n"
+        (List.length
+           (List.filter
+              (fun (e : Ledger.Event.t) ->
+                match (e.node, e.kind) with
+                | Some n, Ledger.Event.Settled _ -> Id.equal n k
+                | _ -> false)
+              (Ledger.Replay.events ledger)));
+      (* The repair is a forward event: a reissued producer witnesses the
+         committed coordinate and lands ABOVE it. *)
+      let m = Id.mint nodes in
+      fired m "t3";
+      ignore
+        (Ledger.append ledger ~node:m
+           (Ledger.Event.Load
+              {
+                tool = "read_file";
+                observed =
+                  [
+                    ( addr,
+                      committed_gen (),
+                      Ledger.Content_hash.of_string "v1\n" );
+                  ];
+              })
+          : Ledger.Event.t);
+      fl1_store ~ledger ~repo ~node:m "f.txt" "repaired v2\n";
+      Printf.printf "repair retire: %s\n" (retire m);
+      Printf.printf "repair coordinate (forward, never lowered): %s\n"
+        (coordinate ());
+      (* Monotonicity, read off the ledger's own trail: every published
+         generation for the address strictly increases (FL4's fold,
+         locally). *)
+      let published =
+        List.filter_map
+          (fun (e : Ledger.Event.t) ->
+            match e.kind with
+            | Ledger.Event.Invalidation_sent { address; new_generation; _ }
+              when Ledger.Address.equal address addr ->
+                Some new_generation
+            | _ -> None)
+          (Ledger.Replay.events ledger)
+      in
+      let rec strictly_increasing = function
+        | a :: (b :: _ as rest) ->
+            Ledger.Generation.compare a b < 0 && strictly_increasing rest
+        | _ -> true
+      in
+      Printf.printf "published generations strictly increase: %b\n"
+        (strictly_increasing published);
+      [%expect
+        {|
+        baseline retire: ok
+        baseline coordinate: landed@g0 "v1\n"
+        tree holds the producer's draft: true
+        squash appended 1 event(s); settlements only: true
+        coordinate after squash (never moved): landed@g0 "v1\n"
+        dead bytes still in the tree (garbage, no authority): true
+        materialize converged the tree to the committed top: true
+        materialize appended nothing: true
+        coordinate after materialize: landed@g0 "v1\n"
+        consumer retire: rejected (Witness_moved) — a typed forward signal
+        consumer settled events: 0
+        repair retire: ok
+        repair coordinate (forward, never lowered): landed@g1 "repaired v2\n"
+        published generations strictly increase: true
+        |}])

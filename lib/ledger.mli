@@ -62,7 +62,7 @@ module Address : sig
         (** A relation's contract; its generation input is the derived
             schema hash (docs/architecture/20-contracts.md § versioning). *)
     | Resource of string
-        (** Shared machine state outside any worktree — the effect lock's
+        (** Shared machine state outside the tree — the effect lock's
             domain (docs/architecture/30-channels.md § event taxonomy). *)
 
   val equal : t -> t -> bool
@@ -198,7 +198,7 @@ end
     (docs/architecture/40-scheduling.md § settlement). *)
 module Settlement : sig
   type t =
-    | Retired  (** Committed; head tuples inserted; worktree merged. *)
+    | Retired  (** Committed; head tuples inserted; stores landed. *)
     | Faulted of Fault.t
     | Squashed of Squash_cause.t
 end
@@ -285,8 +285,11 @@ module Event : sig
                 witnesses). *)
       }
     | Store of { tool : string; address : Address.t; delta : Delta_ref.t }
-        (** A write against the node's own worktree; deltas are net
-            (coalesced per yield in the store buffer). *)
+        (** A write landed in the ONE shared tree at store time, its
+            bytes content-addressed into git's object database first —
+            [delta] is the blob oid for file content, a locator for
+            deletions and committed-structure movements
+            ({!Delta_ref}). *)
     | Effect of { tool : string; resource : string; idempotent : bool }
         (** Shared machine state; acquired the footprint lock; the one
             class not squashable by construction — which is why

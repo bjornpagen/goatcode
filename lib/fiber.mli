@@ -73,7 +73,7 @@ type _ Effect.t +=
 
 exception Squash
 (** What a squashed fiber's continuation is discontinued with. It unwinds
-    the fiber's stack, so [Fun.protect] finalizers (worktree cleanup) run
+    the fiber's stack, so [Fun.protect] finalizers run
     — abort by construction, not compensation
     (docs/architecture/50-commit.md § abort by construction). Catching it
     buys the fiber nothing: squash is scheduler state, and every

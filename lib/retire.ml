@@ -48,68 +48,6 @@ let events ledger = Ledger.Replay.events ledger
 
 (* ------------------------------------------------------------------ *)
 
-module Worktree = struct
-  (* The store buffer: a detached git worktree of the enclosing repository,
-     one per node. Uncommitted, squashable by dropping, snoopable
-     (docs/architecture/30-channels.md § event taxonomy). *)
-  type t = { root : string; path : string }
-
-  (* One coordinate system, fixed here at the boundary: [root] absolutizes
-     before any git command sees it. [git -C root worktree add path]
-     resolves a relative [path] against ROOT, not this process's cwd — so
-     a relative root doubled up: the real worktree landed at
-     root/root/node while the engine read and wrote root/node, a bare
-     directory inside the repo whose git view was the enclosing checkout.
-     Net delta: empty; retire commits: empty; the deliverable never
-     landed while the run reported success (live trace 2026-07-15). An
-     absolute path means the same place to this process, to
-     [git -C root], and to [git -C path] — the divergent reading is
-     unwritable, not guarded. *)
-  let create ~root ~node =
-    let root =
-      if Filename.is_relative root then Filename.concat (Sys.getcwd ()) root
-      else root
-    in
-    let path = Filename.concat root (Id.to_string node) in
-    if not (Sys.file_exists path) then begin
-      mkdirs root;
-      (* A detached worktree so the committed branch keeps its single
-         writer; if [root] is not inside a repository (or the repository
-         has no commit to detach from) the buffer degrades to a bare
-         directory — the node's draft surface starts empty instead of
-         snapshotting the committed tree. Landing is unaffected: the
-         retire step reads Store events and the object database's blobs,
-         never this buffer (README.md § design of record vs shipped
-         engine, row 2). Bare mode is a DESIGNED engine mode (the
-         unit suites run whole engines on it, and several falsifiers
-         assert a silent stderr), so this layer stays quiet; the
-         operator-facing loudness lives at the CLI, which probes the
-         config's worktree_root against its repo at bind time and warns
-         on stderr before any node runs (bin/main.ml, wave-3 M6). *)
-      if
-        not
-          (sh_ok
-             (Printf.sprintf "git -C %s worktree add --detach %s"
-                (Filename.quote root) (Filename.quote path)))
-      then mkdirs path
-    end;
-    { root; path }
-
-  let path t = t.path
-
-  (* v0: the read-only discipline is the snooper's grant (loads only), not
-     an OS-level remount; the mount point is the worktree itself. *)
-  let snoop_mount t = t.path
-
-  (* Squash's entire filesystem action. *)
-  let drop t =
-    sh_quiet
-      (Printf.sprintf "git -C %s worktree remove --force %s"
-         (Filename.quote t.root) (Filename.quote t.path));
-    if Sys.file_exists t.path then
-      sh_quiet (Printf.sprintf "rm -rf %s" (Filename.quote t.path))
-end
-
 module Committed = struct
   type tuple = {
     relation : string;
@@ -497,7 +435,7 @@ module Frontier = struct
     | None -> Committed (committed_state t address)
 
   (* Converge the tree to the frontier: write each address's live top,
-     delete files whose top is Absent or Deleted. Checkout, not restore —
+     delete files whose top is Absent or Deleted. Checkout semantics —
      no coordinate moves, nothing appends; run at boot, after a crash, and
      as the hygiene sweep (20-medium.md § squash without isolation:
      overwrite-on-reissue primary, this lazy convergence the backstop).
@@ -1091,15 +1029,8 @@ let squash_set ledger ~cause =
   |> List.filter (fun n -> List.exists (Id.equal n) closed)
   |> List.filter unsettled
 
-let squash ~ledger ~registry ~worktrees ~cause =
+let squash ~ledger ~registry ~cause =
   let doomed = squash_set ledger ~cause in
-  (* drop each worktree: squash's entire filesystem action *)
-  List.iter
-    (fun n ->
-      List.iter
-        (fun (m, worktree) -> if Id.equal m n then Worktree.drop worktree)
-        worktrees)
-    doomed;
   (* drop the subtree's provisional ids; nothing renumbers *)
   let pairs =
     dedup ~eq:pair_equal (List.concat_map (fun n -> minted_of ledger n) doomed)

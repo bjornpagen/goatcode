@@ -197,7 +197,6 @@ let config =
   {
     Run.repo = ".goat/fizzbuzz-repo";
     committed_branch = "goat-committed";
-    worktree_root = ".goat/fizzbuzz-repo/.goat-worktrees";
     ledger_path = ".goat/ledger-coding.bin";
     ports = [ Chase.Port.open_ ~name:"agents" ];
     executors =

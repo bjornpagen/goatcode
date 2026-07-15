@@ -68,8 +68,8 @@ module Grant = struct
   type 'status t = {
     read_globs : string list;
     write_globs : string list;
-        (* The load-bearing boundary that replaced the private worktree
-           root: stores land in the ONE shared tree, within these globs
+        (* The load-bearing boundary that replaced per-node isolation:
+           stores land in the ONE shared tree, within these globs
            (agent.mli owns the ruling; 40-agents.md § tool grants). *)
     shell_gates : string list list;
     effects : 'status Effect_tool.t list;

@@ -101,7 +101,6 @@ let fresh_dir prefix =
 type sandbox = {
   root : string;
   repo : string;
-  worktrees : string;
   ledger_path : string;
 }
 
@@ -115,7 +114,6 @@ let sandbox prefix =
   {
     root;
     repo = sub "repo";
-    worktrees = sub "worktrees";
     ledger_path = Filename.concat root "ledger.bin";
   }
 
@@ -123,7 +121,6 @@ let config sb ~ports ~executors =
   {
     Run.repo = sb.repo;
     committed_branch = "goat-committed";
-    worktree_root = sb.worktrees;
     ledger_path = sb.ledger_path;
     ports;
     executors;

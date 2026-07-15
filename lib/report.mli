@@ -13,7 +13,7 @@ type speculation_account = {
   tokens_under_hypotheses : int;
       (** Spend while hypotheses were undischarged. *)
   tokens_squashed : int;
-      (** Gross: salvageable work in squashed worktrees counts in full. *)
+      (** Gross: salvageable work in squashed subtrees counts in full. *)
   overlap_bought_s : float;
       (** Measured overlap, not theoretical — the wall clock speculation
           actually bought. *)

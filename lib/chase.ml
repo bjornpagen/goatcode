@@ -355,7 +355,7 @@ let settle_fault t (inst : instance) fault =
   match dependents with
   | [] -> ()
   | _ :: _ ->
-      Retire.squash ~ledger:t.ledger ~registry:t.registry ~worktrees:[] ~cause;
+      Retire.squash ~ledger:t.ledger ~registry:t.registry ~cause;
       List.iter
         (fun n -> settle t n (Settlement.Squashed cause) ~seal:false)
         dependents;
@@ -868,7 +868,7 @@ let invoke_lane :
    the effect list is built PER INDEX from the template's declarations
    ([idempotent_effects] constructs at either index; non-idempotent
    declarations exist only in [committed_effects], so a speculative grant
-   carrying one is unconstructible, F12/F15). There is no worktree
+   carrying one is unconstructible, F12/F15). There is no per-node
    coordinate and no mount table: reads and writes range over the ONE
    shared tree, and the resolver consults the frontier — everything
    in-grant is snoopable, automatically (20-medium.md § store-to-load
@@ -1431,8 +1431,7 @@ let abandon t (c : completed) ~action ~reason ~cause ~count ~refire =
   (match Retire.squash_set t.ledger ~cause:dcause with
   | [] -> ()
   | dependents ->
-      Retire.squash ~ledger:t.ledger ~registry:t.registry ~worktrees:[]
-        ~cause:dcause;
+      Retire.squash ~ledger:t.ledger ~registry:t.registry ~cause:dcause;
       List.iter
         (fun n -> settle t n (Settlement.Squashed dcause) ~seal:false)
         dependents;
@@ -1768,8 +1767,7 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
             ~counters:
               [ ("undischarged", float_of_int (List.length t.undischarged)) ];
           let set = Retire.squash_set t.ledger ~cause in
-          Retire.squash ~ledger:t.ledger ~registry:t.registry ~worktrees:[]
-            ~cause;
+          Retire.squash ~ledger:t.ledger ~registry:t.registry ~cause;
           settle t c.inst.node (Settlement.Squashed cause) ~seal:false;
           List.iter
             (fun n -> settle t n (Settlement.Squashed cause) ~seal:false)

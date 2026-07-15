@@ -80,10 +80,10 @@ ledger below.
 
 The flat org — one tree, no branches, no worktrees, coherence by ledger —
 is the **design of record** (operator ruling), and these docs describe it
-normatively. The shipped engine now runs it: nodes dispatch with no
-worktree against the one shared tree (rows 1–4 landed). The gap, in
-full, each row struck when its change lands (suite green at every
-step):
+normatively. The shipped engine now runs it: nodes dispatch against the
+one shared tree, and the worktree machinery is deleted outright (rows
+1–5 landed). The gap, in full, each row struck when its change lands
+(suite green at every step):
 
 1. **Blobs into git's object store** — store tools write content-addressed
    blobs at store time; `Delta_ref` carries the oid; tmp+rename lands in
@@ -99,7 +99,8 @@ step):
    (this commit)
 5. **Delete `Worktree`** — the module dies; squash finalizers become the
    settlement append; `run.mli` `config.worktree_root` dies. Lands FL1 and
-   the grep-gate (no worktree/restore vocabulary in lib/).
+   the grep-gate (no worktree/restore vocabulary in lib/). — LANDED (this
+   commit)
 6. **Gates** — gate dispatch snapshots the frontier over the grant into
    hypotheses + witness triples; the effect lock re-scopes to declared
    build resources. Lands FL6.

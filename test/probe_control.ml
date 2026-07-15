@@ -72,3 +72,8 @@ let publish_on_tx (t : finding Channel.tx) ~(id : finding Id.t) (v : finding) =
 let publish_via_registry (registry : Channel.registry)
     (r : finding Theory.Relation.t) ~(id : finding Id.t) (v : finding) =
   Channel.publish (Channel.tx registry r) ~id v
+
+(* Legal twin of probe_fl1_generation_retreat.ml: the generation
+   vocabulary moves forward — [next] typechecks; no retreat exists. *)
+let forward (g : Ledger.Generation.t) : Ledger.Generation.t =
+  Ledger.Generation.next g

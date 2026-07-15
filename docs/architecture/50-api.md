@@ -221,10 +221,11 @@ would make `goat replay` report false divergences).
 
 **`run.toml` is the CLI's config subset**, parsed once and entirely at
 bind time — `examples/run.toml` documents every key. Top level:
-`repo`, `committed_branch`, `worktree_root`, `ledger_path` (required
-strings — `worktree_root` and the branch-as-coordination reading of
-`committed_branch` die with the flat-org migration, `README.md` § design
-of record vs shipped engine); `port` (default executor port, default
+`repo`, `committed_branch`, `ledger_path` (required strings —
+`committed_branch` names the one ref retirement advances, its commits
+built from ledger blobs, never a coordination channel; the retired
+`worktree_root` key is refused by name with the migration pointer, never
+silently ignored); `port` (default executor port, default
 `"agents"`); `token_ceiling`, `confidence_floor` (the backstops);
 `repair_attempts` (default 3); `planner_provider`/`planner_model` (the
 plan pin, default `anthropic`/`claude-fable-5`). `[[ports]]` tables

@@ -582,7 +582,7 @@ module Witness_index = struct
       (events_of_node t node)
 
   (* The store footprint, for the [disjoint] EGD.  Effects are excluded:
-     they are lock-guarded machine resources, not worktree writes, and the
+     they are lock-guarded machine resources, not tree writes, and the
      disjoint-writes law is judged over committed paths (50-commit.md
      § retirement order). *)
   let writes t node =

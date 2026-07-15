@@ -269,3 +269,45 @@
  (action
   (run grep -q "not_finding Goatcode.Id.t"
     probe_f15_wrong_payload_publish.err)))
+
+; --- FL1: the squash-revert counterfactual's compile-time and grep-gate
+; arms (docs/architecture/50-api.md § the flat-org roster; the dynamic
+; arms live in test_squash.ml).
+
+; FL1 negative-compile arm: no constructor takes a generation backward.
+
+(rule
+ (targets probe_fl1_generation_retreat.err)
+ (deps
+  (sandbox none)
+  probe_fl1_generation_retreat.ml
+  ../lib/goatcode.cma)
+ (action
+  (with-accepted-exit-codes
+   2
+   (with-stderr-to
+    probe_fl1_generation_retreat.err
+    (run ocamlfind ocamlc -package yojson -I ../lib/.goatcode.objs/byte -c
+      probe_fl1_generation_retreat.ml)))))
+
+(rule
+ (alias runtest)
+ (deps probe_fl1_generation_retreat.err)
+ (action (run grep -q "Unbound value" probe_fl1_generation_retreat.err)))
+
+; FL1 grep-gate arm: no worktree/restore vocabulary anywhere in lib/ —
+; comments included; the vocabulary is deleted, not deprecated (README.md
+; § design of record vs shipped engine, row 5; fix-forward is a closed
+; ruling). grep exits 1 on zero matches — the only accepted exit — so any
+; reappearance of the vocabulary in a source or interface file goes red
+; with the offending lines in the log.
+
+(rule
+ (alias runtest)
+ (deps
+  (source_tree ../lib))
+ (action
+  (with-accepted-exit-codes
+   1
+   (run grep -r -i -E "worktree|restor|rollback" --include=*.ml
+     --include=*.mli ../lib))))

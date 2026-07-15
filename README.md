@@ -10,10 +10,11 @@ work as a **theory** — relations (typed tuple schemas that become
 channels), spawn statements (for every body match, head tuples exist,
 produced by an executor), and retire laws (countable predicates judged
 once, at quiescence, against final state) — and a small evaluator chases
-it. Agents are execution units behind contracts: each node runs in its own
-git worktree, talks to a model API directly through a harness-owned tool
-loop, emits one typed tuple, and is retired by the engine as one commit on
-a committed branch. Everything a node does — every load, store, effect,
+it. Agents are execution units behind contracts: each node runs against
+the one shared tree, talks to a model API directly through a harness-owned
+tool loop, emits one typed tuple, and is retired by the engine as one
+commit — built from the ledger's content-addressed blobs — on a committed
+branch. Everything a node does — every load, store, effect,
 model turn, hypothesis, and scheduler decision — is an event in an
 append-only ledger you can read back, and the ledger's coherence is
 machine-audited.
@@ -108,11 +109,12 @@ objective. Consequences, each a ruling in the architecture docs:
   commits for free. The same discipline runs the planner: a theory is
   itself wire data through a meta-catalog, and planner emissions face
   exactly the admission judgment hand-written theories face.
-- **Abort by construction.** Speculative state lives in git worktrees and
-  an append-only ledger; squash drops a worktree and marks events — no
-  rollback, no compensation. Witnesses are observed from tool events, never
-  self-reported. Retirement is dependency-ordered; squash precision is
-  absolute.
+- **Abort by construction.** Speculative state lives in the append-only
+  ledger; squash is a settlement append — the subtree's events become
+  provenance-dead by derivation, its tree bytes are hygiene for the
+  frontier's materialize — no rollback, no compensation. Witnesses are
+  observed from tool events, never self-reported. Retirement is
+  dependency-ordered; squash precision is absolute.
 - **Two graphs, one bus.** Derivation is a strict forward DAG — feedback
   is a forward edge firing a new generation, and a backward derivation
   edge is unrepresentable. Communication is an event bus: publication and
@@ -137,9 +139,9 @@ to forget:
 
 | tool | class | notes |
 |---|---|---|
-| `read_file` | load | worktree draft, falling through to the committed checkout for in-glob paths; snooped reads witness at the producer's uncommitted generation |
+| `read_file` | load | resolves through the frontier over the one shared tree; a read of an in-flight top witnesses at the producer's uncommitted generation |
 | `glob_list`, `grep` | load | same three-place resolution; every match enters the observed witness with its content hash |
-| `write_file`, `str_replace_edit` | store | land only in the node's own worktree — the store buffer retirement commits |
+| `write_file`, `str_replace_edit` | store | land in the shared tree within granted write globs, bytes content-addressed into git's object database first — retirement commits from those blobs |
 | `run_command` | effect | exists only when the template declares it: an idempotence argument makes it grantable under speculation; without one it reaches only hypothesis-free dispatches — the forbidden combination has no constructor. Machine-locked; git in command position is a typed refusal (the harness owns the commit substrate) |
 
 Prompts are assembled, never authored per node: template preamble (the one
@@ -265,8 +267,11 @@ default-on speculation, retirement, and the readers are implemented and
 held by the falsifier suite; three live pipelines have run green
 end-to-end, including a from-scratch coding task built by parallel agents
 and verified by a test gate. The docs describe the **design of record** —
-the flat org (one tree, no branches, no worktrees) — while the shipped
-engine still runs the worktree machine; the gap is recorded in one place,
+the flat org (one tree, no branches, no worktrees) — and the shipped
+engine now runs it: stores land as content-addressed blobs, retirement
+commits from the ledger, nodes dispatch against the one shared tree, and
+the worktree machinery is deleted. The remaining gap (gates, boot-time
+recovery) is recorded in one place,
 the [migration ledger](docs/architecture/README.md#design-of-record-vs-shipped-engine-the-migration-ledger).
 Other open seams are recorded where they live: the plan-to-run seed
 surface and the supervisor module (doc-resident until their triggers),

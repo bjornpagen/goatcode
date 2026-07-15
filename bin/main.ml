@@ -351,8 +351,8 @@ let node_of_string ledger s =
 (* ------------------------------------------------------------------ *)
 (* run.toml: the CLI's config subset, parsed line-by-line.             *)
 (*                                                                     *)
-(* Top-level keys: repo, committed_branch, worktree_root, ledger_path  *)
-(* (required strings); port (default executor port, default "agents"); *)
+(* Top-level keys: repo, committed_branch, ledger_path (required       *)
+(* strings); port (default executor port, default "agents");           *)
 (* token_ceiling, confidence_floor (backstop overrides);               *)
 (* repair_attempts; planner_provider, planner_model (the plan pin).    *)
 (* [[ports]] tables declare the port table: name, and — only together, *)
@@ -607,7 +607,20 @@ let run_config_of ~path ~(file : Config_file.t) ~theory =
   in
   let* repo = require "repo" in
   let* committed_branch = require "committed_branch" in
-  let* worktree_root = require "worktree_root" in
+  (* A retired key is refused by name, never silently ignored: an old
+     config carrying it gets the migration pointer, not a run whose
+     stated layout the engine no longer honors (README.md § design of
+     record vs shipped engine, row 5). *)
+  let* () =
+    match List.assoc_opt "worktree_root" file.Config_file.scalars with
+    | None -> Ok ()
+    | Some _ ->
+        Error
+          (Printf.sprintf
+             "%s: key \"worktree_root\" is retired — nodes dispatch \
+              against the one shared tree (repo); delete the key"
+             path)
+  in
   let* ledger_path = require "ledger_path" in
   let default_port =
     Option.value (Config_file.str file "port") ~default:"agents"
@@ -643,7 +656,6 @@ let run_config_of ~path ~(file : Config_file.t) ~theory =
     {
       Run.repo;
       committed_branch;
-      worktree_root;
       ledger_path;
       ports;
       executors;
@@ -773,13 +785,6 @@ let refuse_existing_ledger ~command path =
     false
   end
   else true
-
-(* Nodes dispatch with no worktree since migration row 4 (README.md
-   § design of record vs shipped engine): reads and stores range over the
-   config's repo — the one shared tree — so the old degraded-buffer
-   warning has nothing left to warn about and is gone. [worktree_root]
-   stays a parsed config key until row 5 deletes it, so existing run
-   configs keep binding. *)
 
 (* Theories compile to executables that link the library and call
    [Run.exec]; run spawns exactly that, holding no semantics of its
