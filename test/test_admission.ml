@@ -751,3 +751,333 @@ let%expect_test "F14: squash drops exactly the dead subtree's provisional \
     sibling's id binds at its retirement: ok
     squash set after squash: []
     |}]
+
+(* ------------------------------------------------------------------ *)
+(* F13, stratified half: feedback is forward                           *)
+
+(* The canonical review -> revision_request -> repair -> module_impl loop
+   (docs/architecture/10-theory.md § feedback is forward): the reviewer
+   either approves (an empty 0..1 window) or demands a revision; the
+   repair firing mints a new generation of the implementation. Without a
+   stratum this is exactly the infinite factory admission exists to
+   reject; with a bounded generation counter on the loop relation the
+   cycle crosses strata and admits. *)
+
+let ref_prop target doc : Yojson.Safe.t =
+  `Assoc
+    [
+      ("type", `String "string");
+      ("format", `String ("ref:" ^ target));
+      ("description", `String doc);
+    ]
+
+let revision_request_schema : Yojson.Safe.t =
+  `Assoc
+    [
+      ("type", `String "object");
+      ("additionalProperties", `Bool false);
+      ( "properties",
+        `Assoc
+          [
+            ( "target",
+              ref_prop "module_impl" "The implementation under revision." );
+            ("diagnostics", `Assoc [ ("type", `String "string") ]);
+          ] );
+      ("required", `List [ `String "target"; `String "diagnostics" ]);
+    ]
+
+let feedback_fixture ~generations =
+  let module_impl =
+    match generations with
+    | None -> rel "module_impl"
+    | Some g -> Theory.Relation.stratified ~generations:g (rel "module_impl")
+  in
+  let revision_request =
+    Theory.Relation.dynamic ~name:"revision_request"
+      ~schema:revision_request_schema
+  in
+  let statements =
+    [
+      Theory.Spawn.v ~name:"review" ~for_:"module_impl"
+        ~exists:("revision_request", Theory.Window.upto 1)
+        ~by:(agent "reviewer") ();
+      Theory.Spawn.v ~name:"repair" ~for_:"revision_request"
+        ~exists:("module_impl", Theory.Window.nodes 1)
+        ~by:(agent "repairer") ();
+    ]
+  in
+  (module_impl, [ packed module_impl; packed revision_request ], statements)
+
+let demand target =
+  Agent.Rigged.Reply
+    (Yojson.Safe.to_string
+       (`List
+         [
+           `Assoc
+             [
+               ("target", `String target);
+               ("diagnostics", `String "tighten it");
+             ];
+         ]))
+
+let approve = Agent.Rigged.Reply (Yojson.Safe.to_string (`List []))
+
+let%expect_test "F13: the canonical feedback loop is rejected without a \
+                 stratum, admitted with one" =
+  let _, relations, statements = feedback_fixture ~generations:None in
+  (match Theory.declare ~relations ~statements ~laws:[] with
+  | Ok _ -> print_endline "ADMITTED AN INFINITE FACTORY"
+  | Error errors ->
+      List.iter
+        (fun e -> print_endline (Theory.Admission.to_string e))
+        errors);
+  let _, relations, statements = feedback_fixture ~generations:(Some 2) in
+  (match Theory.declare ~relations ~statements ~laws:[] with
+  | Ok _ -> print_endline "with a generation stratum: admitted"
+  | Error errors ->
+      List.iter
+        (fun e ->
+          print_endline ("REJECTED: " ^ Theory.Admission.to_string e))
+        errors);
+  [%expect {|
+    weak-acyclicity violation: this statement chain can spawn itself forever; cycle through mint positions [module_impl.id -> revision_request.id]
+    with a generation stratum: admitted
+    |}]
+
+let%expect_test "F13: an admitted feedback loop quiesces when the reviewer \
+                 approves" =
+  let module_impl, relations, statements =
+    feedback_fixture ~generations:(Some 2)
+  in
+  let theory =
+    match Theory.declare ~relations ~statements ~laws:[] with
+    | Ok t -> t
+    | Error _ -> failwith "fixture unexpectedly rejected"
+  in
+  let reviewer = agent "reviewer" and repairer = agent "repairer" in
+  let quiesced, chase =
+    drive_bounded ~theory
+      ~seed:[ Theory.Tuple.v module_impl (body "m0") ]
+      ~bindings:
+        [
+          (* Demand one revision of the seed, then approve the repair. *)
+          bind reviewer [ demand "module_impl#0"; approve ];
+          bind repairer [ reply "m1" ];
+        ]
+  in
+  Printf.printf "quiescent within budget: %b\n" quiesced;
+  let kinds =
+    List.map (fun (_, s) -> settlement_kind s) (Chase.settlements chase)
+  in
+  Printf.printf "settled: %d (%s)\n" (List.length kinds)
+    (settlement_counts kinds);
+  print_committed (Retire.Committed.tuples (Chase.committed chase));
+  [%expect {|
+    quiescent within budget: true
+    settled: 3 (retired=3 faulted=0 squashed=0)
+    module_impl: module_impl#1
+    revision_request: revision_request#0
+    |}]
+
+let%expect_test "F13: the stratum bound is the loop's terminal generation — \
+                 an always-demanding reviewer stops at the bound" =
+  let module_impl, relations, statements =
+    feedback_fixture ~generations:(Some 2)
+  in
+  let theory =
+    match Theory.declare ~relations ~statements ~laws:[] with
+    | Ok t -> t
+    | Error _ -> failwith "fixture unexpectedly rejected"
+  in
+  Printf.printf "declared bound: %s\n"
+    (match Theory.generations theory ~relation:"module_impl" with
+    | Some n -> string_of_int n
+    | None -> "none");
+  let reviewer = agent "reviewer" and repairer = agent "repairer" in
+  (* The reviewer demands a revision of every generation it sees; the
+     repairer's script is sized to the bound. Without the runtime stratum
+     guard the loop would fire a third repair, exhaust the script, and
+     fault. *)
+  let quiesced, chase =
+    drive_bounded ~theory
+      ~seed:[ Theory.Tuple.v module_impl (body "m0") ]
+      ~bindings:
+        [
+          bind reviewer
+            [
+              demand "module_impl#0"; demand "module_impl#1";
+              demand "module_impl#2";
+            ];
+          bind repairer [ reply "m1"; reply "m2" ];
+        ]
+  in
+  Printf.printf "quiescent within budget: %b\n" quiesced;
+  let kinds =
+    List.map (fun (_, s) -> settlement_kind s) (Chase.settlements chase)
+  in
+  Printf.printf "settled: %d (%s)\n" (List.length kinds)
+    (settlement_counts kinds);
+  print_committed (Retire.Committed.tuples (Chase.committed chase));
+  [%expect {|
+    declared bound: 2
+    quiescent within budget: true
+    settled: 5 (retired=5 faulted=0 squashed=0)
+    module_impl: module_impl#1 module_impl#2
+    revision_request: revision_request#0 revision_request#1 revision_request#2
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* Slot totality: nested refs                                          *)
+
+(* A ref below the payload's top level (inside an array or a sub-record)
+   carries the same witness obligation as a top-level one. The slot set,
+   the consumer edge, and the compiled footprint subscription must all see
+   it — a nested ref with no slot silently loses its edge, its footprint
+   subscription, and its witness obligation
+   (docs/architecture/10-theory.md § relations;
+   docs/architecture/30-channels.md § footprint filtering). *)
+
+let summary_schema : Yojson.Safe.t =
+  `Assoc
+    [
+      ("type", `String "object");
+      ("additionalProperties", `Bool false);
+      ( "properties",
+        `Assoc
+          [
+            ("body", `Assoc [ ("type", `String "string") ]);
+            ( "findings",
+              `Assoc
+                [
+                  ("type", `String "array");
+                  ("items", ref_prop "finding" "Findings this summary covers.");
+                ] );
+            ( "detail",
+              `Assoc
+                [
+                  ("type", `String "object");
+                  ("additionalProperties", `Bool false);
+                  ( "properties",
+                    `Assoc [ ("primary", ref_prop "finding" "The lead finding.") ]
+                  );
+                  ("required", `List [ `String "primary" ]);
+                ] );
+          ] );
+      ("required", `List [ `String "body"; `String "findings"; `String "detail" ]);
+    ]
+
+let%expect_test "slot totality: nested refs get slots, edges, and footprint \
+                 subscriptions" =
+  let finding = rel "finding" in
+  let summary =
+    Theory.Relation.dynamic ~name:"summary" ~schema:summary_schema
+  in
+  let digest = rel "digest" in
+  let theory =
+    admit_exn
+      ~relations:[ packed finding; packed summary; packed digest ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"condense" ~for_:"summary"
+            ~exists:("digest", Theory.Window.nodes 1)
+            ~by:(agent "condenser") ();
+        ]
+  in
+  let kind_text = function
+    | Theory.Slot.Mint -> "mint"
+    | Theory.Slot.Ref target -> "ref " ^ target
+    | Theory.Slot.Value -> "value"
+  in
+  (match Theory.slots theory ~relation:"summary" with
+  | None -> print_endline "NO SLOTS for summary"
+  | Some slots ->
+      List.iter
+        (fun (s : Theory.Slot.t) ->
+          Printf.printf "slot %s: %s\n" s.Theory.Slot.field
+            (kind_text s.Theory.Slot.kind))
+        slots);
+  List.iter
+    (fun (e : Theory.Edge.t) ->
+      Printf.printf "edge %s reads %s, dereferences [%s]\n"
+        (Theory.Statement.to_string e.Theory.Edge.statement)
+        e.Theory.Edge.reads
+        (String.concat " " e.Theory.Edge.ref_fields))
+    (Theory.edges theory);
+  (* The compiled footprint of the consumer edge must subscribe the nested
+     refs' target relation, or drift in a referenced finding would never
+     reach this consumer. *)
+  let channels = Channel.open_all theory in
+  let edge = List.hd (Theory.edges theory) in
+  let rx = Channel.rx channels summary ~edge in
+  let fp = Channel.footprint rx in
+  Printf.printf "footprint covers finding's contract: %b\n"
+    (Ledger.Footprint.mem fp (Ledger.Address.Contract "finding"));
+  List.iter
+    (fun a -> print_endline ("  " ^ Ledger.Address.to_string a))
+    (List.sort Ledger.Address.compare (Ledger.Footprint.to_list fp));
+  [%expect {|
+    slot id: mint
+    slot body: value
+    slot findings: value
+    slot detail: value
+    slot findings.[]: ref finding
+    slot detail.primary: ref finding
+    edge condense reads summary, dereferences [findings.[] detail.primary]
+    footprint covers finding's contract: true
+      tuple:finding/*
+      tuple:summary/*
+      contract:finding
+      contract:summary
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* Admission audit: shape nonsense rejected where it is written        *)
+
+let%expect_test "admission audit: reserved mint field, empty windows, and \
+                 unbounded strata are admission errors" =
+  let print_declare ~relations ~statements =
+    match Theory.declare ~relations ~statements ~laws:[] with
+    | Ok _ -> print_endline "ADMITTED"
+    | Error errors ->
+        List.iter
+          (fun e -> print_endline (Theory.Admission.to_string e))
+          errors
+  in
+  (* A payload field spelled like the engine-filled mint slot. *)
+  let shadow_schema : Yojson.Safe.t =
+    `Assoc
+      [
+        ("type", `String "object");
+        ("additionalProperties", `Bool false);
+        ( "properties",
+          `Assoc [ ("id", `Assoc [ ("type", `String "string") ]) ] );
+        ("required", `List [ `String "id" ]);
+      ]
+  in
+  print_declare
+    ~relations:
+      [ packed (Theory.Relation.dynamic ~name:"shadow" ~schema:shadow_schema) ]
+    ~statements:[];
+  (* Windows no firing plan can satisfy. *)
+  print_declare
+    ~relations:[ packed (rel "a"); packed (rel "b") ]
+    ~statements:
+      [
+        Theory.Spawn.v ~name:"never" ~for_:"a"
+          ~exists:("b", Theory.Window.nodes 0)
+          ~by:(agent "x") ();
+        Theory.Spawn.v ~name:"empty" ~for_:"a"
+          ~exists:("b", Theory.Window.between ~min:3 ~max:1)
+          ~by:(agent "y") ();
+      ];
+  (* A stratum that bounds nothing. *)
+  print_declare
+    ~relations:
+      [ packed (Theory.Relation.stratified ~generations:0 (rel "loop")) ]
+    ~statements:[];
+  [%expect {|
+    relation shadow: payload field id collides with the engine-filled mint slot
+    statement never: no firing plan satisfies its window: 0 nodes: a firing count below one
+    statement empty: no firing plan satisfies its window: an empty tuple range (3..1)
+    relation loop: generation bound 0 admits no generation; a stratum must bound at least one
+    |}]

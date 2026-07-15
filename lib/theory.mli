@@ -39,6 +39,17 @@ module Relation : sig
       codecs-by-schema) is identical
       (docs/architecture/60-agents.md § the planner). *)
 
+  val stratified : generations:int -> 'a t -> 'a t
+  (** Mark the relation as a feedback loop's stratum carrier: at most
+      [generations] engine-minted generations of it may exist along any one
+      derivation chain (seeds are generation zero). Admission consumes the
+      bound as strata in the weak-acyclicity judgment — every edge into a
+      bounded relation crosses to a new stratum, so a loop through it is a
+      bounded spiral, not an infinite factory — and the chase refuses the
+      firing that would exceed the bound
+      (docs/architecture/10-theory.md § feedback is forward). A bound below
+      one is an admission error. *)
+
   val name : 'a t -> string
 
   type packed = Packed : 'a t -> packed
@@ -48,17 +59,25 @@ end
 (** Slot classification, as parsed from the contract at admission. Exactly
     one mint slot exists per relation (the engine-filled id); a mint is a
     write port in the rename analogy
-    (docs/architecture/10-theory.md § relations). *)
+    (docs/architecture/10-theory.md § relations).
+
+    The slot set is total over everything admission admits: a ref nested
+    below the payload's top level (inside arrays or sub-records) carries
+    the same edge, footprint subscription, and witness obligation as a
+    top-level one, so it gets a slot of its own, named by its dotted
+    payload path (array items step spelled [[]]). *)
 module Slot : sig
   type kind =
     | Mint  (** Born here; filled by the engine at firing time. *)
     | Ref of string
-        (** A foreign identity; the payload field is a [target Id.t]. The
-            inclusion statement is implicit and its enforcement plan is the
-            codec's registry check plus retire re-judgment. *)
+        (** A foreign identity; the payload position is a [target Id.t].
+            The inclusion statement is implicit and its enforcement plan is
+            the codec's registry check plus retire re-judgment. *)
     | Value  (** Plain payload data, shaped by the contract. *)
 
   type t = { field : string; kind : kind }
+  (** [field] is a top-level payload field name, or the dotted payload path
+      of a nested ref slot. *)
 end
 
 (** Cardinality windows: between [n] and [m] head tuples per body match.
@@ -288,6 +307,18 @@ module Admission : sig
         (** A [Ref_id] naming a relation the theory doesn't declare. *)
     | Duplicate_relation of { name : string }
     | Duplicate_statement of { name : string }
+    | Reserved_field of { relation : string; field : string }
+        (** A payload field that collides with the engine-filled mint slot:
+            the engine owns [id], and a contract declaring its own would
+            shadow the mint at every consumer. *)
+    | Invalid_window of { statement : string; reason : string }
+        (** A cardinality window no firing plan can satisfy ([0 nodes], a
+            negative or inverted tuple range) — shape nonsense rejected
+            where it is written, never a per-node fault at the boundary. *)
+    | Invalid_generation_bound of { relation : string; bound : int }
+        (** A generation stratum that does not bound: the counter must
+            admit at least one generation or the loop it carries is an
+            infinite factory. *)
     | Unjudgeable_law of { law : string; reason : string }
         (** A law the compiler cannot turn into a final-state query — prose
             wearing law's clothing, rejected at admission. *)
@@ -311,10 +342,12 @@ val declare :
   (admitted, Admission.error list) result
 (** Declaration runs admission immediately, and admission is a parse: weak
     acyclicity (the dependency graph over relation positions, rejecting
-    cycles through mint edges), the acceptance gate (every law compiled to
-    its judge), the schema parse into {!Contract.Wire_schema.t}, and
-    ref-slot resolution all happen here, once. Errors accumulate — the
-    planner's repair call sees all of them. *)
+    cycles through mint edges — edges into a generation-bounded relation
+    cross a stratum and never close one), the acceptance gate (every law
+    compiled to its judge), the schema parse into
+    {!Contract.Wire_schema.t}, and ref-slot resolution all happen here,
+    once. Errors accumulate — the planner's repair call sees all of
+    them. *)
 
 (** {2 Reading an admitted theory}
 
@@ -336,7 +369,16 @@ val schema_hash : admitted -> relation:string -> Contract.Schema_hash.t option
     (docs/architecture/50-commit.md § law 2). *)
 
 val slots : admitted -> relation:string -> Slot.t list option
-(** Slot classification as parsed from the contract at admission. *)
+(** Slot classification as parsed from the contract at admission: the
+    synthetic mint slot, the top-level payload fields, then the nested ref
+    slots — total over every [Ref_id] the schema carries. *)
+
+val generations : admitted -> relation:string -> int option
+(** The relation's declared generation bound — the stratum data the
+    weak-acyclicity judgment consumed, and the firing bound the chase
+    enforces at the loop's terminal generation
+    (docs/architecture/10-theory.md § feedback is forward). [None] for
+    unstratified relations and undeclared names. *)
 
 (** The meta-catalog: a theory as wire data, which is how the planner emits
     one — relations, statements, templates, pins are just more catalog. A

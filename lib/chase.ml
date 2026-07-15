@@ -70,6 +70,11 @@ type tuple_entry = {
   relation : string;
   id : string;
   payload : Yojson.Safe.t option;
+  strata : (string * int) list;
+      (* Engine-minted generation counts per generation-bounded relation
+         along this tuple's derivation chain — the runtime half of the
+         stratified-admission exemption (docs/architecture/10-theory.md
+         § feedback is forward). Seeds are generation zero. *)
 }
 
 (* One firing of a dependency statement: a node, pre-settlement. *)
@@ -604,6 +609,21 @@ let filter_satisfied t (spawn : Theory.Spawn.t) (body : tuple_entry) =
       in
       cmp_holds cmp (List.length (List.filter counted t.tuples)) bound
 
+(* The generation-stratum bound: a statement minting into a bounded head
+   refuses the firing that would exceed the bound — the loop's terminal
+   generation. This is the runtime half of the admission exemption for
+   stratified feedback (docs/architecture/10-theory.md § feedback is
+   forward); without it an admitted spiral would fire forever on data that
+   keeps demanding another generation. *)
+let within_stratum_bound t (spawn : Theory.Spawn.t) (body : tuple_entry) =
+  let head = fst spawn.Theory.Spawn.exists in
+  match Theory.generations t.theory ~relation:head with
+  | None -> true
+  | Some bound -> (
+      match List.assoc_opt head body.strata with
+      | None -> true (* generation zero: minting reaches generation one *)
+      | Some n -> n < bound)
+
 let find_fireable t =
   List.find_map
     (fun (sid, spawn) ->
@@ -613,6 +633,7 @@ let find_fireable t =
           if
             String.equal entry.relation spawn.Theory.Spawn.for_
             && (not (List.mem (stmt, entry.id) t.fired))
+            && within_stratum_bound t spawn entry
             && filter_satisfied t spawn entry
           then Some (sid, spawn, entry)
           else None)
@@ -720,11 +741,38 @@ let retire_success t (c : completed) =
   settle t c.inst.node Settlement.Retired ~seal:false;
   t.retire_queue <-
     List.filter (fun c' -> not (Id.equal c'.inst.node c.inst.node)) t.retire_queue;
+  (* Head tuples inherit the derivation's strata (pointwise max over the
+     consumed operands) and, when the head relation is generation-bounded,
+     count one generation deeper. *)
+  let stratum_max acc (rel, n) =
+    match List.assoc_opt rel acc with
+    | Some m when m >= n -> acc
+    | Some _ | None -> (rel, n) :: List.remove_assoc rel acc
+  in
+  let inherited =
+    List.fold_left
+      (fun acc (e : tuple_entry) -> List.fold_left stratum_max acc e.strata)
+      [] c.inst.consumed
+  in
+  let head_strata relation =
+    match Theory.generations t.theory ~relation with
+    | None -> inherited
+    | Some _ ->
+        let n =
+          match List.assoc_opt relation inherited with Some n -> n | None -> 0
+        in
+        (relation, n + 1) :: List.remove_assoc relation inherited
+  in
   t.tuples <-
     t.tuples
     @ List.map
         (fun (h : Retire.head_tuple) ->
-          { relation = h.relation; id = h.id; payload = Some h.payload })
+          {
+            relation = h.relation;
+            id = h.id;
+            payload = Some h.payload;
+            strata = head_strata h.relation;
+          })
         c.heads;
   (* The operand space changed: resume suspended reads. *)
   List.iter (fun i -> i.cls <- Priority.Resumed_witnessed) t.parked;
@@ -910,7 +958,7 @@ let seed_entry t (tu : Theory.Tuple.t) : tuple_entry =
       let id = Id.mint minter in
       let tx = Channel.tx t.channels rel in
       Channel.publish tx ~id payload;
-      { relation; id = Id.to_string id; payload = None }
+      { relation; id = Id.to_string id; payload = None; strata = [] }
 
 let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
     ~executors ~backstops ~switches ~merges ~seed =

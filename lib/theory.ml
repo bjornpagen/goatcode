@@ -5,9 +5,16 @@
    [Contract.Wire_schema.t], ref-slot resolution — happens there, once. *)
 
 module Relation = struct
-  type 'a t = { name : string; contract : 'a Contract.t }
+  type 'a t = {
+    name : string;
+    contract : 'a Contract.t;
+    generations : int option;
+        (* The feedback stratum bound: at most this many engine-minted
+           generations along one derivation chain
+           (docs/architecture/10-theory.md § feedback is forward). *)
+  }
 
-  let v ~name contract = { name; contract }
+  let v ~name contract = { name; contract; generations = None }
 
   let dynamic ~name ~schema =
     (* The planner lane: the payload is schema-checked JSON, so the codec is
@@ -15,7 +22,9 @@ module Relation = struct
        resolution, exactly as for typed payloads
        (docs/architecture/60-agents.md § the planner). *)
     let codec = Contract.Codec.v ~of_json:(fun j -> j) ~to_json:(fun j -> j) in
-    { name; contract = Contract.v ~name ~schema ~codec }
+    { name; contract = Contract.v ~name ~schema ~codec; generations = None }
+
+  let stratified ~generations t = { t with generations = Some generations }
 
   let name t = t.name
 
@@ -159,6 +168,9 @@ module Admission = struct
       }
     | Duplicate_relation of { name : string }
     | Duplicate_statement of { name : string }
+    | Reserved_field of { relation : string; field : string }
+    | Invalid_window of { statement : string; reason : string }
+    | Invalid_generation_bound of { relation : string; bound : int }
     | Unjudgeable_law of { law : string; reason : string }
 
   let position (rel, field) = rel ^ "." ^ field
@@ -187,6 +199,19 @@ module Admission = struct
         Printf.sprintf "relation %s is declared twice" name
     | Duplicate_statement { name } ->
         Printf.sprintf "statement %s is declared twice" name
+    | Reserved_field { relation; field } ->
+        Printf.sprintf
+          "relation %s: payload field %s collides with the engine-filled \
+           mint slot"
+          relation field
+    | Invalid_window { statement; reason } ->
+        Printf.sprintf "statement %s: no firing plan satisfies its window: %s"
+          statement reason
+    | Invalid_generation_bound { relation; bound } ->
+        Printf.sprintf
+          "relation %s: generation bound %d admits no generation; a stratum \
+           must bound at least one"
+          relation bound
     | Unjudgeable_law { law; reason } ->
         Printf.sprintf
           "law %s cannot compile to a final-state query and is rejected at \
@@ -221,8 +246,14 @@ let duplicates names =
 
 (* Slot classification, parsed from the contract's derived schema: the mint
    slot is synthetic (outside the payload); ref slots are the schema's
-   [Ref_id] nodes at the payload's top level; everything else is value. *)
-let slots_of_schema (ws : Contract.Wire_schema.t) : Slot.t list =
+   [Ref_id] nodes; everything else is value. The slot set is total over the
+   schema: a ref nested below the top level (inside arrays or sub-records)
+   carries the same edge, footprint subscription, and witness obligation as
+   a top-level one, so it gets a slot of its own, named by its dotted
+   payload path. Returned as (top-level slots, nested ref slots): the v0
+   filter/law grammar addresses top-level fields only, everything else
+   consumes the union. *)
+let slots_of_schema (ws : Contract.Wire_schema.t) : Slot.t list * Slot.t list =
   let open Contract.Wire_schema in
   let rec resolve seen node =
     match node with
@@ -238,15 +269,44 @@ let slots_of_schema (ws : Contract.Wire_schema.t) : Slot.t list =
     | Nullable n -> kind_of seen n
     | _ -> Slot.Value
   in
-  let payload =
+  (* Every [Ref_id] under [node], at its dotted payload path (array items
+     step spelled "[]"). [$defs] hops are walked in place so the path stays
+     a payload coordinate; [seen] cuts recursive defs, whose deeper refs
+     repeat slots already collected at the first level. *)
+  let rec nested_refs seen path node acc =
+    match node with
+    | Prim _ | Str_enum _ -> acc
+    | Def_ref d -> (
+        if List.mem d seen then acc
+        else
+          match List.assoc_opt d ws.defs with
+          | Some n -> nested_refs (d :: seen) path n acc
+          | None -> acc)
+    | Nullable n -> nested_refs seen path n acc
+    | Record { fields; _ } ->
+        List.fold_left
+          (fun acc (f : field) -> nested_refs seen (f.name :: path) f.schema acc)
+          acc fields
+    | Array { items; _ } -> nested_refs seen ("[]" :: path) items acc
+    | Ref_id { relation; _ } ->
+        { Slot.field = String.concat "." (List.rev path); kind = Slot.Ref relation }
+        :: acc
+  in
+  (* A position directly classified Ref has no interior; anything else may
+     hide refs below it. *)
+  let slot_of name node =
+    match kind_of [] node with
+    | Slot.Ref _ as kind -> ({ Slot.field = name; kind }, [])
+    | kind -> ({ Slot.field = name; kind }, List.rev (nested_refs [] [ name ] node []))
+  in
+  let classified =
     match resolve [] ws.root with
     | Record { fields; _ } ->
-        List.map
-          (fun (f : field) -> { Slot.field = f.name; kind = kind_of [] f.schema })
-          fields
-    | _ -> [ { Slot.field = "value"; kind = Slot.Value } ]
+        List.map (fun (f : field) -> slot_of f.name f.schema) fields
+    | node -> [ slot_of "value" node ]
   in
-  { Slot.field = mint_field; kind = Slot.Mint } :: payload
+  ( { Slot.field = mint_field; kind = Slot.Mint } :: List.map fst classified,
+    List.concat_map snd classified )
 
 (* Every [Ref_id] node anywhere in the schema, with a dotted diagnostic path:
    the raw material of ref-slot resolution. *)
@@ -273,9 +333,29 @@ let refs_of_schema (ws : Contract.Wire_schema.t) : (string * string) list =
    edge to the head's mint position (the fresh existential). The theory is
    weakly acyclic iff no cycle passes through a special edge; each offending
    strongly-connected component is reported once, as a position path
-   (docs/architecture/10-theory.md § termination). *)
-let mint_cycles (edges : ((string * string) * (string * string) * bool) list) :
+   (docs/architecture/10-theory.md § termination).
+
+   Generation strata ride the edges as data: a statement whose head
+   relation carries a generation bound places every head tuple in a new
+   stratum, so all of its edges are [Advance] — in the unrolled
+   (position, generation) coordinates they run from stratum g to g+1 of a
+   bounded ladder and can never lie on a cycle. The check consumes that by
+   building the graph without them; a cycle that survives is
+   stratum-preserving, a real infinite factory
+   (docs/architecture/10-theory.md § feedback is forward). *)
+type dep_kind = Dep_value | Dep_mint | Dep_advance
+
+let mint_cycles
+    (edges : ((string * string) * (string * string) * dep_kind) list) :
     (string * string) list list =
+  let edges =
+    List.filter_map
+      (function
+        | _, _, Dep_advance -> None
+        | u, v, Dep_mint -> Some (u, v, true)
+        | u, v, Dep_value -> Some (u, v, false))
+      edges
+  in
   let pos_equal (a, b) (c, d) = String.equal a c && String.equal b d in
   let positions =
     List.fold_left
@@ -411,16 +491,46 @@ let declare ~relations ~statements ~laws =
             None)
       relations
   in
-  let slot_table = List.map (fun (name, ws) -> (name, slots_of_schema ws)) parsed in
-  let slot_kind rel field =
-    match List.assoc_opt rel slot_table with
+  let classified =
+    List.map (fun (name, ws) -> (name, slots_of_schema ws)) parsed
+  in
+  (* The exported slot set is total (top-level fields plus nested refs);
+     the filter/law checks below consult top-level slots only — the v0
+     grammar's link and group_by are payload fields, never paths. *)
+  let slot_table =
+    List.map (fun (name, (top, nested)) -> (name, top @ nested)) classified
+  in
+  let top_kind rel field =
+    match List.assoc_opt rel classified with
     | None -> None
-    | Some slots ->
+    | Some (top, _) ->
         List.find_map
           (fun (s : Slot.t) ->
             if String.equal s.Slot.field field then Some s.Slot.kind else None)
-          slots
+          top
   in
+  (* The engine owns the mint slot's name: a payload field spelled [id]
+     would shadow the engine-filled identity at every consumer. *)
+  List.iter
+    (fun (name, (top, _)) ->
+      if
+        List.exists
+          (fun (s : Slot.t) ->
+            String.equal s.Slot.field mint_field && s.Slot.kind <> Slot.Mint)
+          top
+      then err (Admission.Reserved_field { relation = name; field = mint_field }))
+    classified;
+  (* Generation strata must bound: a bound below one admits no generation
+     at all, so the loop it is meant to close is an infinite factory. *)
+  List.iter
+    (fun (Relation.Packed r) ->
+      match r.Relation.generations with
+      | Some bound when bound < 1 ->
+          err
+            (Admission.Invalid_generation_bound
+               { relation = r.Relation.name; bound })
+      | Some _ | None -> ())
+    relations;
   (* Ref-slot resolution: every [Ref_id] anywhere in a payload schema must
      target a declared relation. *)
   List.iter
@@ -432,8 +542,18 @@ let declare ~relations ~statements ~laws =
         (refs_of_schema ws))
     parsed;
   (* Statement checks: body, head, and filter relations must be declared;
-     the filter's link must be a ref slot of the counted relation pointing
-     at the body relation, or the readiness query cannot compile. *)
+     the window must admit a firing plan; the filter's link must be a ref
+     slot of the counted relation pointing at the body relation, or the
+     readiness query cannot compile. *)
+  let window_reason = function
+    | Window.Nodes n when n < 1 ->
+        Some (Printf.sprintf "%d nodes: a firing count below one" n)
+    | Window.Tuples { min; _ } when min < 0 ->
+        Some (Printf.sprintf "a negative tuple bound (min %d)" min)
+    | Window.Tuples { min; max } when max < min ->
+        Some (Printf.sprintf "an empty tuple range (%d..%d)" min max)
+    | Window.Nodes _ | Window.Tuples _ -> None
+  in
   List.iter
     (fun (s : Spawn.t) ->
       let unknown relation =
@@ -443,10 +563,14 @@ let declare ~relations ~statements ~laws =
       let head = fst s.Spawn.exists in
       if not (declared head) then unknown head;
       Option.iter
+        (fun reason ->
+          err (Admission.Invalid_window { statement = s.Spawn.name; reason }))
+        (window_reason (snd s.Spawn.exists));
+      Option.iter
         (fun (Filter.Count { over; link; _ }) ->
           if not (declared over) then unknown over
           else
-            match slot_kind over link with
+            match top_kind over link with
             | None when not (List.mem_assoc over slot_table) ->
                 () (* schema escape already reported for [over] *)
             | Some (Slot.Ref target) when String.equal target s.Spawn.for_ -> ()
@@ -473,7 +597,7 @@ let declare ~relations ~statements ~laws =
             unjudgeable
               (Printf.sprintf "counted relation %s is not declared" over)
           else if List.mem_assoc over slot_table then (
-            match slot_kind over group_by with
+            match top_kind over group_by with
             | Some (Slot.Ref _) -> ()
             | Some Slot.Mint | Some Slot.Value ->
                 unjudgeable
@@ -485,20 +609,34 @@ let declare ~relations ~statements ~laws =
                 unjudgeable
                   (Printf.sprintf "relation %s has no field %s" over group_by)))
     laws;
-  (* Weak acyclicity over relation positions. *)
+  (* Weak acyclicity over relation positions. A statement heading into a
+     generation-bounded relation contributes only stratum-crossing edges:
+     every firing mints a fresh, counted generation of the head, so no edge
+     of that statement can preserve a stratum. *)
+  let generational name =
+    List.exists
+      (fun (Relation.Packed r) ->
+        String.equal r.Relation.name name
+        && Option.is_some r.Relation.generations)
+      relations
+  in
   let dep_edges =
     List.concat_map
       (fun (s : Spawn.t) ->
         let body = s.Spawn.for_ and head = fst s.Spawn.exists in
         match (List.assoc_opt body slot_table, List.assoc_opt head slot_table) with
         | Some body_slots, Some head_slots ->
+            let advances = generational head in
             List.concat_map
               (fun (bp : Slot.t) ->
                 List.map
                   (fun (hp : Slot.t) ->
-                    ( (body, bp.Slot.field),
-                      (head, hp.Slot.field),
-                      hp.Slot.kind = Slot.Mint ))
+                    let kind =
+                      if advances then Dep_advance
+                      else if hp.Slot.kind = Slot.Mint then Dep_mint
+                      else Dep_value
+                    in
+                    ((body, bp.Slot.field), (head, hp.Slot.field), kind))
                   head_slots)
               body_slots
         | _ -> [])
@@ -558,11 +696,19 @@ let wire_schema a ~relation = List.assoc_opt relation a.a_schemas
 let schema_hash a ~relation = List.assoc_opt relation a.a_hashes
 let slots a ~relation = List.assoc_opt relation a.a_slots
 
+let generations a ~relation =
+  List.find_map
+    (fun (Relation.Packed r) ->
+      if String.equal r.Relation.name relation then r.Relation.generations
+      else None)
+    a.a_relations
+
 module Meta = struct
   module U = Yojson.Safe.Util
 
   type t = {
-    m_relations : (string * Yojson.Safe.t) list;
+    m_relations : (string * Yojson.Safe.t * int option) list;
+        (* (name, payload schema, generation bound). *)
     m_statements : Spawn.t list;
     m_laws : Law.t list;
   }
@@ -692,7 +838,10 @@ module Meta = struct
         U.to_list (U.member "relations" j)
         |> List.map (fun r ->
                ( U.to_string (U.member "name" r),
-                 embedded_json ~field:"schema_json" r ));
+                 embedded_json ~field:"schema_json" r,
+                 match U.member "generations" r with
+                 | `Null -> None
+                 | g -> Some (U.to_int g) ));
       m_statements = U.to_list (U.member "statements" j) |> List.map statement_of_json;
       m_laws = U.to_list (U.member "laws" j) |> List.map law_of_json;
     }
@@ -844,11 +993,15 @@ module Meta = struct
         ( "relations",
           `List
             (List.map
-               (fun (name, schema) ->
+               (fun (name, schema, generations) ->
                  `Assoc
                    [
                      ("name", `String name);
                      ("schema_json", `String (Yojson.Safe.to_string schema));
+                     ( "generations",
+                       match generations with
+                       | None -> `Null
+                       | Some n -> `Int n );
                    ])
                t.m_relations) );
         ("statements", `List (List.map json_of_statement t.m_statements));
@@ -886,10 +1039,11 @@ module Meta = struct
     "relation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "schema_json"],
+      "required": ["name", "schema_json", "generations"],
       "properties": {
         "name": { "type": "string", "description": "The relation's name; unique within the theory." },
-        "schema_json": { "type": "string", "description": "The payload's JSON Schema, as JSON text. Parsed into the LLM-safe subset at admission; escapes are admission errors." }
+        "schema_json": { "type": "string", "description": "The payload's JSON Schema, as JSON text. Parsed into the LLM-safe subset at admission; escapes are admission errors." },
+        "generations": { "anyOf": [ { "type": "integer" }, { "type": "null" } ], "description": "Generation bound for a feedback loop's stratum carrier: at most this many engine-minted generations of the relation along one derivation chain. Null for relations outside any loop." }
       }
     },
     "pin": {
@@ -1036,7 +1190,14 @@ module Meta = struct
     declare
       ~relations:
         (List.map
-           (fun (name, schema) -> Relation.Packed (Relation.dynamic ~name ~schema))
+           (fun (name, schema, generations) ->
+             let r = Relation.dynamic ~name ~schema in
+             let r =
+               match generations with
+               | None -> r
+               | Some g -> Relation.stratified ~generations:g r
+             in
+             Relation.Packed r)
            t.m_relations)
       ~statements:t.m_statements ~laws:t.m_laws
 end

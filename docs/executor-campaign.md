@@ -304,21 +304,32 @@ B8. **judge_disjoint is a tautology.** `Committed.advance` gives every write
     10-theory.md (`law disjoint`). Falsifier: test_disjoint.ml (blind
     clobber violated; serialized rewrite satisfied).
 
-B9. **feedback-is-forward inadmissible.** `dep_edges` adds an unconditional
-    mint edge from every body position to every head mint position, with no
-    generation-stratum handling — so the canonical review→revision_request→
-    repair→module_impl pattern the docs declare representable is REJECTED at
-    admission as a mint cycle. Either implement generation strata in
-    admission, or amend `10-theory.md` § feedback-is-forward to match what
-    admission can actually do (doc rule 4 — decide which is right; the docs
-    currently over-promise). (theory.ml:489.)
+B9. **feedback-is-forward inadmissible.** DONE (2026-07-14, admission-layer
+    commit): generation strata implemented as data the cycle check consumes.
+    `Theory.Relation.stratified ~generations` (and a `generations` field in
+    the meta-catalog relation wire shape) declares the loop relation's
+    bounded counter; every dep edge of a statement heading into a bounded
+    relation is an `Advance` edge, excluded from the cycle graph (in
+    unrolled (position, generation) coordinates it can never close a
+    cycle); the chase carries per-derivation strata on `tuple_entry` and
+    refuses the firing past the bound (quiescence, not a fault) — that
+    runtime guard is what keeps F13's "admitted theories quiesce" true.
+    `10-theory.md` § termination and § feedback-is-forward amended.
+    Falsifiers in test_admission.ml: the canonical loop rejected bare,
+    admitted with a stratum, quiesces on approval, and stops at the bound
+    under an always-demanding reviewer.
 
-B10. **Nested ref slots dropped.** `Ref_id` nodes below top-level (inside
-     arrays/nested records) are accepted by admission and resolved by
-     `refs_of_schema`, but slot classification only inspects top-level
-     record fields → such a ref gets no Ref slot, no edge, no footprint
-     subscription, no witness obligation. Fix `slots_of_schema`/`kind_of`
-     to recurse, or reject nested refs at admission. (theory.ml:235.)
+B10. **Nested ref slots dropped.** DONE (2026-07-14, same commit):
+     `slots_of_schema` now returns a total slot set — top-level fields as
+     before, plus a Ref slot for every nested `Ref_id` named by its dotted
+     payload path ("findings.[]", "detail.primary"); edges and channel
+     footprint subscriptions pick them up (the falsifier consumes
+     `Channel.footprint`, giving the B15 orphan its first caller). The v0
+     filter/law grammar still resolves link/group_by against top-level
+     slots only. Bonus admission audit fixes in the same commit: a payload
+     field named `id` (mint-slot shadow), windows no firing plan satisfies
+     (`0 nodes`, inverted/negative tuple ranges), and generation bounds
+     below one are now typed admission errors.
 
 B11. **Telemetry/predictor event starvation.** No code appends the lifecycle
      Decision actions (queued/admitted/suspended/resumed) or `Pin_bump`, so

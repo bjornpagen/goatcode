@@ -28,7 +28,12 @@ exactly one of:
   is a ref. (Rename semantics: a mint is a write port.)
 - **ref** — a foreign identity, checked by an inclusion statement (below). A
   ref is an operand: a node that reads a tuple through a ref slot acquires a
-  witness obligation on the referent (`50-commit.md`).
+  witness obligation on the referent (`50-commit.md`). A ref may sit anywhere
+  in the payload shape — inside arrays and nested records, not only at the
+  top level — and the slot set is total over every ref position (nested ones
+  are named by their dotted payload path), so the edge, footprint
+  subscription, and witness obligation a ref implies are never lost to
+  nesting.
 - **value** — plain payload data, shaped by the contract.
 
 Example relations for an antagonistic-review theory, in the notation used
@@ -127,7 +132,13 @@ admission is a parser, not a validator.** The chase over arbitrary TGDs need
 not terminate (a mint slot feeding a body that spawns tuples feeding the same
 mint is an infinite factory). Admission builds the standard dependency graph
 over relation positions (edges for value propagation, special edges for mint
-positions) and rejects cycles through mint edges. The check is a page of
+positions) and rejects cycles through mint edges. Stratified iteration is in
+the grammar, not an exception to it: a relation may carry a bounded
+`generation` counter (§ feedback is forward), and every dependency edge into
+a bounded relation crosses to a new stratum of a finite ladder — the cycle
+judgment runs over the stratum-preserving edges, so a bounded feedback loop
+admits while the same loop without its bound is rejected with its cycle
+path. The check is a page of
 graph code, runs at theory-accept time, and **returns a refined type**:
 `Theory.admitted` is a distinct type with no public constructor — the only
 way to obtain one is to pass admission, and it is the only type `Run.exec`
@@ -143,10 +154,10 @@ here's the cycle") into a runtime bill with a confusing shape; the backstop
 remains for *admitted* theories whose data is bigger than expected, which
 is a different failure with a different message (`40-scheduling.md`
 § backstops).
-**Reverses if:** a censused workload genuinely needs a recursive spawn shape
-(iterate-until-fixed-point repair); the recorded path is stratified
-iteration — a bounded `generation` counter on the loop relation, which
-restores weak acyclicity per stratum — not unrestricted chase.
+**Reverses if:** a censused workload needs a fixed-point iteration no
+a-priori generation bound can honestly carry; the recorded path is an
+operator-raised bound (a theory edit, judged at re-admission) — not
+unrestricted chase.
 
 ## Feedback is forward
 
@@ -154,13 +165,25 @@ There are no backward edges and no cycles in the fired graph, ever. "The
 reviewer sends work back" is representable and common — as a *new fact*:
 
 ```
+relation module_impl      { id: mint, src: value } generations 3
 relation revision_request { id: mint, target: ref module_impl, diagnostics: value }
 spawn repair: for r in revision_request exists m2 in module_impl ...
 ```
 
 The repair firing is a **new node with a new generation** of the module
-implementation; the theory stays acyclic (the admission check sees the
-`generation` stratum). What looks like iteration is generations; what looks
+implementation. The loop relation declares the bounded `generation` counter
+(`Relation.stratified ~generations` in the OCaml surface, `generations` in
+the meta-catalog): at most that many engine-minted generations of it may
+exist along any one derivation chain, seeds counting as generation zero.
+Admission consumes the bound as strata in the weak-acyclicity graph — every
+dependency edge into a bounded relation places its head in a new stratum of
+a finite ladder, so no such edge can lie on a cycle, and the cycle judgment
+runs over the stratum-preserving remainder. The chase enforces the bound by
+refusing the firing that would exceed it: the loop's terminal generation is
+quiescence, never a fault. The same loop with no declared stratum is
+rejected with its cycle path — unbounded "iterate until the reviewer is
+happy" is exactly the infinite factory admission exists to refuse. What
+looks like iteration is generations; what looks
 like a backchannel is a forward relation. This ruling is what keeps squash
 precision provable (`30-channels.md` § the unidirectional law) — and it is
 a coordinate change in the lineage's exact sense (Dijkstra's half-open
