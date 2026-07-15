@@ -1128,3 +1128,250 @@ let%expect_test "shell_gate: the gate run is an Effect event carrying the \
     head tuple: {"exit_status":0,"output":"gate-ok"}
     Effect shell_gate on "printf gate-ok" (idempotent true)
     |}]
+
+(* ------------------------------------------------------------------ *)
+(* Wave 3, the provider transport surface (agent.ml § Provider). Rigged
+   [post] functions count attempts; no wire is touched. The retry
+   falsifiers sleep the lane's real bounded backoff (well under two
+   seconds total) — the one exception to this file's no-sleeps rule,
+   because the backoff IS the behavior under test. *)
+
+let putenv = (Unix.putenv [@alert "-unsafe_multidomain"])
+
+(* A minimal settled Anthropic Messages reply carrying [text]. *)
+let anthropic_settled text =
+  Yojson.Safe.to_string
+    (`Assoc
+      [
+        ( "content",
+          `List
+            [ `Assoc [ ("type", `String "text"); ("text", `String text) ] ]
+        );
+        ("stop_reason", `String "end_turn");
+        ( "usage",
+          `Assoc [ ("input_tokens", `Int 3); ("output_tokens", `Int 2) ] );
+      ])
+
+let anthropic_truncated text =
+  Yojson.Safe.to_string
+    (`Assoc
+      [
+        ( "content",
+          `List
+            [ `Assoc [ ("type", `String "text"); ("text", `String text) ] ]
+        );
+        ("stop_reason", `String "max_tokens");
+        ( "usage",
+          `Assoc [ ("input_tokens", `Int 3); ("output_tokens", `Int 2) ] );
+      ])
+
+(* A scripted transport: one canned result per attempt, in order; the
+   counter is the falsifier's witness. Exhausting the script is a test
+   bug, surfaced loudly. *)
+let scripted_post replies =
+  let calls = ref 0 in
+  let post (_ : Http.Request.t) =
+    let i = !calls in
+    incr calls;
+    match List.nth_opt replies i with
+    | Some r -> r
+    | None -> failwith "scripted post exhausted: an unexpected extra attempt"
+  in
+  (calls, post)
+
+let invoke_anthropic ~budget replies =
+  putenv "ANTHROPIC_API_KEY" "test-key-never-used-on-a-wire";
+  let e = env () in
+  let calls, post = scripted_post replies in
+  let executor =
+    Agent.agent ~stop:[] ~provider:(Agent.Provider.anthropic ~post ())
+  in
+  let r =
+    Agent.invoke ~executor ?fallback:None ~codec:verdict_codec
+      ~registry:e.registry
+      ~invocation:(invocation speculative_grant)
+      ~budget:(Agent.Repair_budget.v budget) ~ledger:e.ledger ~node:e.node
+      ~on_yield:(fun () -> [])
+  in
+  (!calls, r)
+
+(* M1 — transient transport errors retry bounded INSIDE the lane:
+   HTTP 429/5xx and curl timeouts back off and re-post (transport-level,
+   never an [Executor_error], never a Ledger event — transport, not
+   work); a non-transient status faults on the first attempt; exhaustion
+   faults with the attempt count named. Pre-fix every branch below
+   faulted permanently on the first transient failure. *)
+let%expect_test "transient provider errors retry bounded inside the lane; \
+                 non-transient errors do not retry; exhaustion names the \
+                 attempt count" =
+  let show (calls, r) =
+    Printf.printf "posts=%d " calls;
+    match r with
+    | Ok v -> Printf.printf "Ok %S\n" v
+    | Error { Ledger.Fault.origin; message } ->
+        Printf.printf "Error %s%s\n" (origin_string origin)
+          (if contains message "(attempt 3 of 3)" then
+             " naming attempt 3 of 3"
+           else "")
+  in
+  (* a 429 then a 500, then the turn settles *)
+  show
+    (invoke_anthropic ~budget:0
+       [
+         Ok (429, "rate limited");
+         Ok (500, "server hiccup");
+         Ok (200, anthropic_settled {|{"verdict": "done"}|});
+       ]);
+  (* a curl timeout, then the turn settles *)
+  show
+    (invoke_anthropic ~budget:0
+       [
+         Error { Http.code = "CURLE_OPERATION_TIMEDOUT"; message = "28" };
+         Ok (200, anthropic_settled {|{"verdict": "done"}|});
+       ]);
+  (* a 400 is the caller's bug: no retry, one post *)
+  show (invoke_anthropic ~budget:0 [ Ok (400, "bad request") ]);
+  (* bounded: three 429s exhaust the envelope, the count is named *)
+  show
+    (invoke_anthropic ~budget:0
+       [ Ok (429, "a"); Ok (429, "b"); Ok (429, "c") ]);
+  [%expect
+    {|
+    posts=3 Ok "done"
+    posts=2 Ok "done"
+    posts=1 Error Executor_error
+    posts=3 Error Executor_error naming attempt 3 of 3
+    |}]
+
+(* M2 — [stop_reason: "max_tokens"] is a typed truncation outcome that
+   faults IMMEDIATELY: an identical retry truncates identically, so the
+   repair budget is never spent on it. Pre-fix the truncated text reached
+   the codec as garbage and burned every repair attempt on identical
+   requests (the scripted post would show budget+1 posts). *)
+let%expect_test "anthropic max_tokens truncation faults immediately with \
+                 the raise-max_tokens guidance — one post, the repair \
+                 budget untouched" =
+  (let calls, r =
+     invoke_anthropic ~budget:3
+       [ Ok (200, anthropic_truncated {|{"verdict": "trunc|}) ]
+   in
+   Printf.printf "posts=%d " calls;
+   match r with
+   | Ok v -> Printf.printf "Ok %S\n" v
+   | Error { Ledger.Fault.origin; message } ->
+       Printf.printf "Error %s; guidance: %b\n" (origin_string origin)
+         (contains message "raise the pin option \"max_tokens\""));
+  [%expect {| posts=1 Error Executor_error; guidance: true |}]
+
+(* M3 — the API-rendered schema is LOWERED in the provider encoders only:
+   a ref slot's nonstandard [format: "ref:<relation>"] is stripped and
+   folded into the description (the model still sees the target relation
+   in prose); [minItems]/[maxItems] stay. One supply, two renderings —
+   the prompt keeps the full schema and the codec still judges refs and
+   windows ([Contract.Codec.by_schema]); only the provider-enforced
+   subset moves. *)
+let%expect_test "provider encoders lower the API-rendered schema: ref \
+                 formats strip into descriptions, array windows stay" =
+  putenv "ANTHROPIC_API_KEY" "test-key-never-used-on-a-wire";
+  let ref_schema_json : Yojson.Safe.t =
+    `Assoc
+      [
+        ("type", `String "object");
+        ("description", `String "A review verdict.");
+        ( "properties",
+          `Assoc
+            [
+              ( "findings",
+                `Assoc
+                  [
+                    ("type", `String "array");
+                    ("description", `String "The findings reviewed.");
+                    ("minItems", `Int 1);
+                    ("maxItems", `Int 3);
+                    ( "items",
+                      `Assoc
+                        [
+                          ("type", `String "string");
+                          ("description", `String "One finding.");
+                          ("format", `String "ref:finding");
+                        ] );
+                  ] );
+            ] );
+        ("required", `List [ `String "findings" ]);
+        ("additionalProperties", `Bool false);
+      ]
+  in
+  let schema =
+    match Contract.Wire_schema.parse ref_schema_json with
+    | Ok s -> s
+    | Error _ -> failwith "ref schema must parse"
+  in
+  let captured = ref "" in
+  let post (r : Http.Request.t) =
+    captured := r.Http.Request.body;
+    Ok (200, anthropic_settled {|{"verdict": "done"}|})
+  in
+  let e = env () in
+  let invocation =
+    {
+      Agent.Invocation.prompt =
+        Agent.Prompt.assemble ~preamble:"You judge findings." ~schema
+          ~operands:"(no witnessed operands)" ~hypotheses:[]
+          ~grant:speculative_grant;
+      schema;
+      grant = speculative_grant;
+      pin;
+      committed = (fun _ -> Witness.Committed_state.Absent);
+    }
+  in
+  (match
+     Agent.invoke
+       ~executor:
+         (Agent.agent ~stop:[] ~provider:(Agent.Provider.anthropic ~post ()))
+       ?fallback:None ~codec:verdict_codec ~registry:e.registry ~invocation
+       ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
+       ~on_yield:(fun () -> [])
+   with
+  | Ok _ -> ()
+  | Error f -> Printf.printf "unexpected fault: %s\n" f.Ledger.Fault.message);
+  (* Scope the checks to the structured-output format: the request body
+     also carries the PROMPT, whose contract section rightly still shows
+     the full schema (one supply, two renderings). *)
+  let format_schema =
+    let j = Yojson.Safe.from_string !captured in
+    match j with
+    | `Assoc fields -> (
+        match List.assoc_opt "output_config" fields with
+        | Some (`Assoc oc) -> (
+            match List.assoc_opt "format" oc with
+            | Some (`Assoc f) ->
+                Yojson.Safe.to_string
+                  (Option.value (List.assoc_opt "schema" f) ~default:`Null)
+            | _ -> "")
+        | _ -> "")
+    | _ -> ""
+  in
+  Printf.printf "format schema carries ref format: %b\n"
+    (contains format_schema "ref:finding");
+  Printf.printf "format schema documents the ref in prose: %b\n"
+    (contains format_schema "wire id of a finding tuple");
+  Printf.printf "format schema keeps the window: %b\n"
+    (contains format_schema "minItems");
+  (* The prompt's contract section carries the SAME un-lowered schema
+     value: one supply, two renderings. *)
+  Printf.printf "prompt keeps the full schema: %b\n"
+    (List.exists
+       (function
+         | Agent.Prompt.Contract_section { schema = s; _ } ->
+             contains
+               (Yojson.Safe.to_string (Contract.Wire_schema.to_json s))
+               "ref:finding"
+         | _ -> false)
+       (Agent.Prompt.parts invocation.Agent.Invocation.prompt));
+  [%expect
+    {|
+    format schema carries ref format: false
+    format schema documents the ref in prose: true
+    format schema keeps the window: true
+    prompt keeps the full schema: true
+    |}]

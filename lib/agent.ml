@@ -345,6 +345,113 @@ module Provider = struct
     Http.post_json ~headers:r.headers ~url:r.url ~body:r.body
       ~timeout_s:r.timeout_s
 
+  (* {3 Transport retry}
+
+     Transient transport failures — HTTP 429/5xx and curl timeouts —
+     retry bounded INSIDE the lane, before any [Executor_error] escapes:
+     transport noise is not the node's work, so no Ledger event is owed
+     and the repair budget is never touched; a permanent fault message
+     carries the attempt count so the exhausted retries stay visible.
+     Bounded and typed: [transport_attempts] tries, exponential backoff
+     ([Unix.sleepf]). *)
+  let transport_attempts = 3
+
+  let transient_status status = status = 429 || status / 100 = 5
+
+  (* libcurl spells the constant CURLE_OPERATION_TIMEDOUT (older
+     bindings: CURLE_OPERATION_TIMEOUTED) — match the shared stem. *)
+  let transient_error (e : Http.error) =
+    let hay = e.Http.code and needle = "TIME" in
+    let n = String.length hay and m = String.length needle in
+    let rec go i =
+      i + m <= n && (String.equal (String.sub hay i m) needle || go (i + 1))
+    in
+    go 0
+
+  (* One POST under the transient-retry envelope; failures carry the
+     attempt count for the lane's fault message. *)
+  let post_with_retry (post : post) req =
+    let rec go attempt =
+      let retry () =
+        Unix.sleepf (0.25 *. (2. ** float_of_int (attempt - 1)));
+        go (attempt + 1)
+      in
+      match post req with
+      | Error e when transient_error e && attempt < transport_attempts ->
+          retry ()
+      | Error e -> Error (`Transport (e, attempt))
+      | Ok (status, body) when transient_status status ->
+          if attempt < transport_attempts then retry ()
+          else Error (`Http (status, body, attempt))
+      | Ok (status, body) when status / 100 <> 2 ->
+          Error (`Http (status, body, attempt))
+      | Ok (_, body) -> Ok body
+    in
+    go 1
+
+  let attempts_suffix = function
+    | 1 -> ""
+    | n -> Printf.sprintf " (attempt %d of %d)" n transport_attempts
+
+  (* {3 Schema lowering for the API-rendered format}
+
+     One supply, two renderings: the SAME admitted [Wire_schema] is shown
+     in the prompt (full: ref formats, array windows) and sent as each
+     provider's structured-output format. But a ref slot renders as
+     [{"type":"string","format":"ref:<relation>"}], and "ref:*" is not a
+     format either provider's json_schema subset documents — so the
+     provider encoders lower the API rendering ONLY: a "ref:<relation>"
+     format is stripped and folded into the description, so the model
+     still sees the target relation in prose. [minItems]/[maxItems] stay:
+     Anthropic documents array bounds as supported, and the OpenAI format
+     rides [strict: false] where the schema is guidance, not a validated
+     grammar — live smoke (Phase C) is the verifier for both wire facts.
+     The decoder still judges refs and windows fully at the codec
+     ([Contract.Codec.by_schema]), so nothing semantic moves. *)
+  let rec lower_api_schema (j : Yojson.Safe.t) : Yojson.Safe.t =
+    match j with
+    | `List items -> `List (List.map lower_api_schema items)
+    | `Assoc fields ->
+        let ref_target =
+          List.find_map
+            (function
+              | "format", `String f when String.starts_with ~prefix:"ref:" f
+                ->
+                  Some (String.sub f 4 (String.length f - 4))
+              | _ -> None)
+            fields
+        in
+        let note target =
+          Printf.sprintf
+            "The wire id of a %s tuple (resolved against mint provenance \
+             at the decode boundary)."
+            target
+        in
+        let fields =
+          List.filter_map
+            (fun (k, v) ->
+              match (k, v, ref_target) with
+              | "format", `String f, Some _
+                when String.starts_with ~prefix:"ref:" f ->
+                  None
+              | "description", `String d, Some target ->
+                  Some
+                    ( "description",
+                      `String
+                        (if String.equal d "" then note target
+                         else d ^ " " ^ note target) )
+              | _ -> Some (k, lower_api_schema v))
+            fields
+        in
+        let fields =
+          match ref_target with
+          | Some target when not (List.mem_assoc "description" fields) ->
+              fields @ [ ("description", `String (note target)) ]
+          | _ -> fields
+        in
+        `Assoc fields
+    | other -> other
+
   let usage_of j =
     match jmem "usage" j with
     | Some u ->
@@ -467,7 +574,9 @@ module Provider = struct
                      `Assoc
                        [
                          ("type", `String "json_schema");
-                         ("schema", Contract.Wire_schema.to_json req.schema);
+                         ( "schema",
+                           lower_api_schema
+                             (Contract.Wire_schema.to_json req.schema) );
                        ] );
                  ] );
            ];
@@ -496,6 +605,18 @@ module Provider = struct
         match jstr "stop_reason" json with
         | Some "refusal" ->
             Ok { outcome = Refused { text }; usage = usage_of json }
+        | Some "max_tokens" ->
+            (* Truncation is a typed outcome, and it faults IMMEDIATELY:
+               the reply is not repairable by re-asking — the repair loop
+               would resend an identical request and truncate identically,
+               burning the whole budget. The operator raises the pin
+               option instead. *)
+            Error
+              (fault Ledger.Fault.Executor_error
+                 "anthropic: response truncated at max_tokens — an \
+                  identical retry would truncate identically, so this \
+                  faults without touching the repair budget; raise the \
+                  pin option \"max_tokens\" (or shrink the contract)")
         | _ -> (
             let calls =
               jlist "content" json
@@ -546,7 +667,7 @@ module Provider = struct
               (opt_int req.pin.Theory.Pin.options "timeout_s" ~default:600)
           in
           match
-            post
+            post_with_retry post
               {
                 Http.Request.headers =
                   [
@@ -559,16 +680,17 @@ module Provider = struct
                 timeout_s;
               }
           with
-          | Error (e : Http.error) ->
+          | Error (`Transport ((e : Http.error), attempts)) ->
               Error
                 (fault Ledger.Fault.Executor_error
-                   (Printf.sprintf "anthropic: %s (%s)" e.code e.message))
-          | Ok (status, body) when status / 100 <> 2 ->
+                   (Printf.sprintf "anthropic: %s (%s)%s" e.code e.message
+                      (attempts_suffix attempts)))
+          | Error (`Http (status, body, attempts)) ->
               Error
                 (fault Ledger.Fault.Executor_error
-                   (Printf.sprintf "anthropic: HTTP %d: %s" status
-                      (excerpt body)))
-          | Ok (_, body) -> decode_anthropic body)
+                   (Printf.sprintf "anthropic: HTTP %d%s: %s" status
+                      (attempts_suffix attempts) (excerpt body)))
+          | Ok body -> decode_anthropic body)
     in
     { turn }
 
@@ -685,8 +807,20 @@ module Provider = struct
                        [
                          ("type", `String "json_schema");
                          ("name", `String "head_tuples");
-                         ("schema", Contract.Wire_schema.to_json req.schema);
-                         ("strict", `Bool true);
+                         ( "schema",
+                           lower_api_schema
+                             (Contract.Wire_schema.to_json req.schema) );
+                         (* strict:false, like the tool declarations: our
+                            admitted schemas carry optional fields, and
+                            strict mode demands every property in
+                            [required]. The strict-mode growth path is a
+                            second lowering — optional becomes
+                            required-plus-nullable — worth building once
+                            live smoke shows non-strict schema drift the
+                            codec has to repair; until then the codec
+                            boundary is the enforcement
+                            (docs/architecture/70-api.md § OPEN items). *)
+                         ("strict", `Bool false);
                        ] );
                  ] );
            ];
@@ -719,9 +853,18 @@ module Provider = struct
               | Some d -> Option.value (jstr "reason" d) ~default:"unknown"
               | None -> "unknown"
             in
+            (* Truncation faults immediately, mirroring the Anthropic
+               max_tokens outcome: an identical retry truncates
+               identically, so the repair budget is never spent here. *)
+            let guidance =
+              if String.equal reason "max_output_tokens" then
+                " — an identical retry would truncate identically; raise \
+                 the pin option \"max_tokens\" (or shrink the contract)"
+              else ""
+            in
             Error
               (fault Ledger.Fault.Executor_error
-                 ("openai: response incomplete: " ^ reason))
+                 ("openai: response incomplete: " ^ reason ^ guidance))
         | _ ->
             let texts = Buffer.create 256 in
             let refused = ref false in
@@ -789,7 +932,7 @@ module Provider = struct
               (opt_int req.pin.Theory.Pin.options "timeout_s" ~default:600)
           in
           match
-            post
+            post_with_retry post
               {
                 Http.Request.headers =
                   [
@@ -801,15 +944,17 @@ module Provider = struct
                 timeout_s;
               }
           with
-          | Error (e : Http.error) ->
+          | Error (`Transport ((e : Http.error), attempts)) ->
               Error
                 (fault Ledger.Fault.Executor_error
-                   (Printf.sprintf "openai: %s (%s)" e.code e.message))
-          | Ok (status, body) when status / 100 <> 2 ->
+                   (Printf.sprintf "openai: %s (%s)%s" e.code e.message
+                      (attempts_suffix attempts)))
+          | Error (`Http (status, body, attempts)) ->
               Error
                 (fault Ledger.Fault.Executor_error
-                   (Printf.sprintf "openai: HTTP %d: %s" status (excerpt body)))
-          | Ok (_, body) -> decode_openai body)
+                   (Printf.sprintf "openai: HTTP %d%s: %s" status
+                      (attempts_suffix attempts) (excerpt body)))
+          | Ok body -> decode_openai body)
     in
     { turn }
 end

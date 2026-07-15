@@ -261,13 +261,27 @@ module Provider : sig
       [ANTHROPIC_API_KEY] from the environment at turn time; an unset key
       is an executor fault, never a crash. Fable-5 rules are encoded here:
       no [thinking] parameter, no sampling knobs, [output_config] carries
-      effort and the json_schema format. [post] defaults to
-      {!blocking_post}. *)
+      effort and the json_schema format (lowered to the provider's
+      documented subset: ref formats fold into descriptions; the prompt
+      keeps the full schema). Transient transport failures (HTTP
+      429/5xx, curl timeouts) retry bounded inside the lane with backoff
+      — transport, not work: no ledger event, no repair budget; an
+      exhausted retry faults with the attempt count named.
+      [stop_reason: "max_tokens"] is a typed truncation outcome that
+      faults immediately with raise-the-pin-option guidance — an
+      identical retry truncates identically, so it never enters the
+      repair loop. [post] defaults to {!blocking_post}. *)
 
   val openai : ?post:post -> unit -> t
   (** OpenAI Responses API, direct ([POST /v1/responses], stateless:
       [store: false], full history each turn). Reads [OPENAI_API_KEY] at
-      turn time. [post] defaults to {!blocking_post}. *)
+      turn time. The same transport-retry envelope and schema lowering as
+      {!anthropic}; [text.format] rides [strict: false] (admitted schemas
+      carry optional fields, which strict mode forbids — the strict-mode
+      lowering, optional to required-plus-nullable, is the recorded
+      growth path); a truncated response ([incomplete] /
+      [max_output_tokens]) faults immediately with the same guidance.
+      [post] defaults to {!blocking_post}. *)
 end
 
 (** Loop bounds as data, checked by the agent loop before each model turn

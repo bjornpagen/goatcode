@@ -159,6 +159,25 @@ flight on one domain (falsifier FM1 proves the overlap through the engine
 with the real Messages encoder over a rigged transport). The rigged lane
 performs nothing — scripted turns construct no request.
 
+**Transport noise is absorbed inside the lane; provider outcomes are
+typed.** A transient transport failure — HTTP 429/5xx or a curl timeout —
+retries bounded inside the provider lane with exponential backoff (three
+attempts): transport, not work, so no ledger event is owed and the repair
+budget is untouched; an exhausted envelope faults with the attempt count
+named in the message. A truncated reply (Anthropic
+`stop_reason: "max_tokens"`, OpenAI `incomplete`/`max_output_tokens`) is a
+typed truncation outcome that faults IMMEDIATELY with
+raise-the-pin-option guidance — an identical retry truncates identically,
+so truncation never enters the repair loop. And the structured-output
+format each lane sends is the admitted schema LOWERED to the provider's
+documented json_schema subset (ref formats fold into descriptions; array
+windows stay; OpenAI's format rides `strict: false` — admitted schemas
+carry optional fields, which strict mode forbids; the strict-mode
+lowering, optional to required-plus-nullable, is the recorded growth
+path): one supply, two renderings — the prompt keeps the full schema and
+the codec still judges refs and windows at the decode boundary.
+Falsifiers in `test_boundary.ml` (rigged posts counting attempts).
+
 **Decision.** The layer's shapes were audited against the Vercel AI SDK's
 agent abstractions (`ToolLoopAgent`, `tool()`, `stopWhen`, the
 `LanguageModel` provider spec, middleware, mock models) — the closest
