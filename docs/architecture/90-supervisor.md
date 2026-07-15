@@ -234,7 +234,7 @@ application points — a note at the target's next yield, a squash through
 the squash path, a tune at the next judgment that reads the tuned value.
 No dispatch ever waits on a model's answer, because the wall-clock
 objective dies the day model latency enters dispatch
-(`40-scheduling.md` § the objective). The falsifier is F17 (§ HANDOFF): a
+(`40-scheduling.md` § the objective). The falsifier is F19 (§ HANDOFF): a
 rigged supervisor with an arbitrarily slow scripted turn changes no
 unrelated node's dispatch timing — the F2 discipline, applied to the
 supervisor.
@@ -356,7 +356,7 @@ Readers of `Steered`, named: replay (which re-judges every application),
 `Report.explain` (a steered node's story shows who steered it and why),
 the operator, and the successor session's boot query. An application the
 event does not precede is not writable: the intake owns both the append
-and the call, and falsifier F16 asserts the order.
+and the call, and falsifier F18 asserts the order.
 
 **Decision — a dedicated squash cause, `Supervisor_abort of { reason :
 string }`.** The settled map's rule is that a reader sees the real cause —
@@ -437,12 +437,12 @@ unconstructible and the F15 negative-compilation probe that pins it
 6. **It cannot steer unrecorded.** The intake appends `Steered` before
    applying; the application functions are not exposed apart from it.
    This one is runtime-ordered rather than type-shaped, so its pin is a
-   falsifier, not a probe: *F16 asserts every applied steer's machinery
+   falsifier, not a probe: *F18 asserts every applied steer's machinery
    events are preceded by its `Steered` event, and replay re-judges each
    application.*
 7. **It cannot touch the dispatch path.** No synchronous surface exists
    between settlement and dispatch that consults a session (§ the cadence
-   law). *Pinned by F4's existing instrumentation plus F17.*
+   law). *Pinned by F4's existing instrumentation plus F19.*
 
 The pattern is the house pattern: the boundary's interior is compile-time
 (no constructor, no accessor), its runtime edge is a typed in-band
@@ -686,11 +686,13 @@ with the merge):
    lane (per-shape, evented, predictor-resetting; the auto-router ban
    untouched).
 8. **`docs/architecture/80-validation.md`** — F15's probe list gains P1–P4
-   (§ unforgeability); the roster gains **F16 — witnessed steering** (a
+   (§ unforgeability); the roster gains **F18 — witnessed steering** (a
+   — F16/F17 were taken by footprint escapes and the git ban while this
+   design waited, so the reservations renumbered —
    rigged session drives every `Steer` constructor; each application's
    machinery events are preceded by its `Steered` event; replay reproduces
    every application with supervisor turns substituted from the ledger) and
-   **F17 — supervision never delays dispatch** (an arbitrarily slow rigged
+   **F19 — supervision never delays dispatch** (an arbitrarily slow rigged
    supervisor turn changes no unrelated node's dispatch timing; F4's
    instrumentation extended over the feed fold).
 9. **`docs/architecture/README.md`** — the documents table gains the

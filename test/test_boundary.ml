@@ -1375,3 +1375,47 @@ let%expect_test "provider encoders lower the API-rendered schema: ref \
     format schema keeps the window: true
     prompt keeps the full schema: true
     |}]
+
+(* ------------------------------------------------------------------ *)
+(* N1 (wave 3) — effect-lock staleness. The holder file records the
+   holder's pid; a lock whose recorded pid no longer runs is a crashed
+   run's residue, removed and retaken with one warning line. Pre-fix the
+   stale lock held forever: the next effect spun the whole 30s budget
+   and failed with a spurious "effect lock busy". Only positive evidence
+   of death breaks a lock — a live or unparseable holder still waits. *)
+
+let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
+                 and the gate runs; the lock is released after" =
+  let lock_dir =
+    Filename.concat (Filename.get_temp_dir_name ()) "goatcode-effect.lock"
+  in
+  (* A crashed run's residue: the pid is far outside any live range. *)
+  Unix.mkdir lock_dir 0o755;
+  Out_channel.with_open_bin (Filename.concat lock_dir "holder") (fun oc ->
+      Out_channel.output_string oc "crashed-run pid=4194304");
+  let e = env () in
+  let grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [];
+      worktree_root = "/tmp/goat-test-worktree";
+      snoop_mounts = [];
+      shell_gates = [ [ "printf"; "gate-after-stale" ] ];
+      effects = [];
+    }
+  in
+  (match
+     Agent.shell_gate.Agent.Executor.run (invocation grant) ~ledger:e.ledger
+       ~node:e.node
+       ~on_yield:(fun () -> [])
+   with
+  | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
+      Printf.printf "head tuple: %s\n" t
+  | Ok _ -> print_endline "refusal outcome"
+  | Error f -> Printf.printf "fault: %s\n" f.Ledger.Fault.message);
+  Printf.printf "lock released: %b\n" (not (Sys.file_exists lock_dir));
+  [%expect
+    {|
+    goatcode: effect lock holder is not running (crashed-run pid=4194304); removing the stale lock
+    head tuple: {"exit_status":0,"output":"gate-after-stale"}
+    lock released: true
+    |}]

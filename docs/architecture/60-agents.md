@@ -60,9 +60,15 @@ same pair — per pair, never globally.
 
 **The fallback lane.** Constrained decoding survives as the *refusal lane*:
 when a model refuses or meta-comments instead of producing tuples
-(recognized by the codec as a non-parse with refusal markers), the retry
-routes to a constrained-decode call whose grammar is derived from the same
-schema. Rare, mechanical, and it keeps the primary lane honest about what it
+(recognized by the codec as a non-parse with refusal markers, or typed by
+the provider), the retry routes — once, without burning repair budget —
+to the invocation's `?fallback` executor (`Agent.invoke`'s routing, built
+and falsified). The constrained-decode executor itself — a grammar
+derived from the same schema — is OPEN, unbuilt: v0 binds no fallback
+(`bin/main.ml` sets `fallback = None`), so a refusal today re-enters the
+repair loop like any non-parse. *Trigger: live-smoke refusal rates on any
+(template, pin) pair, or the first repair exhaustion whose attempts are
+all refusals.* When built it keeps the primary lane honest about what it
 is: a quality choice, not a capability boundary.
 
 ## Tool grants and the effect gate

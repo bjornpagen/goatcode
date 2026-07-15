@@ -1287,28 +1287,68 @@ let contains ~needle hay = count_occurrences ~needle hay > 0
 
 (* The mkdir-atomic, holder-named machine lock every effect runs behind:
    shared machine state is outside every worktree, so effects serialize
-   machine-wide (docs/architecture/30-channels.md § event taxonomy). *)
+   machine-wide (docs/architecture/30-channels.md § event taxonomy).
+
+   The holder file carries the holder's NAME and PID: a crashed run
+   cannot release its lock, so a lock whose recorded pid no longer runs
+   is STALE — removed and retaken with one warning line instead of a 30s
+   spin into a spurious busy error. An unreadable or pid-less holder
+   file stays conservative (treated as live: only positive evidence of
+   death breaks a lock). *)
 let effect_lock_dir =
   Filename.concat (Filename.get_temp_dir_name ()) "goatcode-effect.lock"
+
+let holder_pid contents =
+  let marker = " pid=" in
+  let n = String.length contents and m = String.length marker in
+  let rec find i =
+    if i + m > n then None
+    else if String.equal (String.sub contents i m) marker then Some (i + m)
+    else find (i + 1)
+  in
+  Option.bind (find 0) (fun i ->
+      int_of_string_opt (String.trim (String.sub contents i (n - i))))
+
+let pid_alive pid =
+  match Unix.kill pid 0 with
+  | () -> true
+  | exception Unix.Unix_error (Unix.EPERM, _, _) -> true
+  | exception Unix.Unix_error (_, _, _) -> false
 
 let with_effect_lock ~holder f =
   let holder_file = Filename.concat effect_lock_dir "holder" in
   let rec acquire budget =
     match Unix.mkdir effect_lock_dir 0o755 with
     | () ->
-        write_file_bytes holder_file holder;
+        write_file_bytes holder_file
+          (Printf.sprintf "%s pid=%d" holder (Unix.getpid ()));
         Ok ()
-    | exception Unix.Unix_error (Unix.EEXIST, _, _) ->
-        if budget <= 0 then
-          Error
-            (Printf.sprintf
-               "effect lock busy (held by %s); no action was taken"
-               (try String.trim (read_file_bytes holder_file)
-                with Sys_error _ -> "unknown"))
-        else begin
-          Unix.sleepf 0.05;
-          acquire (budget - 1)
-        end
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) -> (
+        let contents =
+          try Some (String.trim (read_file_bytes holder_file))
+          with Sys_error _ -> None
+        in
+        match Option.bind contents holder_pid with
+        | Some pid when not (pid_alive pid) ->
+            Printf.eprintf
+              "goatcode: effect lock holder is not running (%s); removing \
+               the stale lock\n\
+               %!"
+              (Option.value contents ~default:"unknown");
+            remove_quietly holder_file;
+            (try Unix.rmdir effect_lock_dir
+             with Unix.Unix_error (_, _, _) -> ());
+            acquire budget
+        | _ ->
+            if budget <= 0 then
+              Error
+                (Printf.sprintf
+                   "effect lock busy (held by %s); no action was taken"
+                   (Option.value contents ~default:"unknown"))
+            else begin
+              Unix.sleepf 0.05;
+              acquire (budget - 1)
+            end)
     | exception Unix.Unix_error (_, _, _) ->
         Error "effect lock: cannot create lock directory"
   in

@@ -5,6 +5,110 @@ This is a resumption tracker, not an architecture doc. The architecture docs
 in-flight work and is deleted when the campaign lands. If this file and the
 architecture docs disagree, the architecture docs win.
 
+## WAVE 3 FIXES — the verified finding list, worked in order (2026-07-15)
+
+The fixer pass over the panel's verified findings. All three criticals,
+all seven live-path majors, and the minors landed; suite green; dry-path
+CLI verified from a terminal.
+
+- **C1 — self-witness poisoning (agent.ml).** A tool read served from
+  the node's OWN draft stamped the committed generation with the draft's
+  content hash — a triple `Witness.holds` could never accept → spurious
+  `Witness_moved` → reissues → `Reissue_loser` squash for correct work.
+  Fixed representationally: `Source.resolve` records WHERE a read is
+  served from (`Source.place` = Draft | Committed | Snooped; a worktree
+  file is Draft only when the buffer CHANGED it — `git status` against
+  the checkout base), and `load_observation` claims by place: committed
+  bytes witness the real committed pair, snooped reads stay at
+  generation zero (B7), a draft read claims NOTHING. Falsifier
+  (test_delivery.ml, red pre-fix: 2 attempts): edit a committed file,
+  read the draft back, retire on the first attempt; F6's
+  sibling-landing staleness verified still red-capable. Ruling recorded
+  in 30-channels.md § mechanized witnesses.
+- **C2 — glob_list poison triples.** Observed triples hashed the PATH
+  STRING as content. Now the listing witnesses, for each Landed path,
+  the committed (generation, content) pair straight from the lookup;
+  in-flight-only paths contribute no triple (existence-of-uncommitted is
+  not a witnessable claim in v0 — the listing-shaped witness belongs to
+  the flat-org grant rework). The wave-3 "recorded not fixed" note below
+  is CLOSED. Falsifier red pre-fix against the exact poison.
+- **C3 — goat plan's vacuous emitted run.** The emitted theory ran with
+  `seed:[]` — nothing could fire, success printed anyway. plan now stops
+  at admission: roster + bind-validation of the emission's pins + the
+  run-it-yourself guidance; exit code = the bootstrap map. The
+  plan-to-run seed surface is deliberately undesigned — 70-api.md OPEN
+  item with trigger (first operator to take an emission to a real run).
+- **M1 — transient provider errors.** 429/5xx and curl timeouts retry
+  bounded inside the lane (3 attempts, exponential backoff) before any
+  `Executor_error`; exhaustion names the attempt count; no Ledger event
+  (transport, not work). Rigged-post falsifiers count attempts.
+- **M2 — max_tokens truncation.** `stop_reason: "max_tokens"` is a typed
+  truncation outcome faulting IMMEDIATELY with raise-the-pin guidance —
+  never the repair loop (falsifier red pre-fix: the repair re-post
+  exhausted the scripted transport). OpenAI `incomplete`/
+  `max_output_tokens` carries the same guidance.
+- **M3 — schema lowering in the provider encoders only.**
+  `format:"ref:<relation>"` strips into the description (model still
+  sees the target relation); minItems/maxItems stay (Anthropic documents
+  array bounds; OpenAI rides strict:false where the schema is guidance —
+  live smoke verifies both wire facts). One shared `lower_api_schema`;
+  prompt rendering unchanged; codec still judges refs/windows.
+- **M4 — OpenAI strict:false on text.format** (tools already were);
+  the strict-mode lowering (optional → required+nullable) recorded as
+  the growth path at the encoder and in 60-agents.
+- **M5 — ledger reuse collision.** `goat plan`/`run` refuse an existing
+  ledger path with the path named (fix-forward; never truncated). CLI
+  layer only.
+- **M6 — examples/run.toml self-containment.** Everything under
+  `./.goat/`; repo at `.goat/demo-repo` (quickstart git-inits it — goat
+  never runs git for the operator); worktree_root INSIDE that repo.
+  DEVIATION from the finding's letter, deliberate: the degradation
+  warning lives at the CLI bind (both failure shapes — no repository,
+  and the WRONG repository, judged by comparing git toplevels), not
+  inside `Retire.Worktree.create` — bare-buffer mode is a designed
+  engine mode the unit suites run whole engines on, and F4 asserts a
+  silent stderr around engine steps; the create comment records both.
+- **M7 — planner admission-repair, implemented (minimal honest form).**
+  A rejected emission returns to the planner ONCE,
+  stateless-with-diagnostics (original spec + invalid emission verbatim
+  + `Theory.Admission.to_string` complaints) as a second planning run at
+  `<ledger_path>.plan.repair`; a second rejection is the typed failure.
+  Run-granular rather than a `Repair_attempt` in the settled turn:
+  admission is judged after the bootstrap run settles, and a CLI-side
+  re-entry into the turn's repair loop would be a second invocation
+  lane — the divergent copy the executor rebuild deleted. All three
+  claim sites amended to say exactly this.
+- **N1 — effect-lock staleness.** The holder file records the pid; a
+  dead-pid lock is removed and retaken with one warning line (falsifier
+  red pre-fix: 30s spin into a spurious busy fault). Only positive
+  evidence of death breaks a lock.
+- **N2 — falsifier renumber.** 90-supervisor.md's reserved F16/F17
+  collided with the taken roster (footprint escapes, the git ban);
+  reservations renumbered F18/F19 with the collision noted in place.
+
+**Recorded, NOT fixed — next-campaign items (N3):**
+
+- **Reissue priority misclassification** — `lib/chase.ml:1254`: a
+  reissued instance re-enters as `Priority.Resumed_witnessed` purely by
+  membership in `t.reissues`, even when its operands would still bind
+  speculatively — it jumps the witnessed class and bypasses the ceiling
+  gate's intent for reissues that are not in fact witnessed.
+- **Decorative port bounds** — `lib/chase.ml:841`: `Port.Bounded`'s
+  limit is judged once at binding admission (`limit >= 1`) and never
+  enforced as a concurrency ceiling at dispatch; a bounded port admits
+  unbounded overlap. Falsifier owed with the fix.
+- **Shared rx cursor** — `lib/chase.ml:171`: `rxs` is keyed by
+  STATEMENT, so every instance of one statement shares one consumer-edge
+  rx; one instance's `pull_invalidations` drain consumes invalidations
+  owed to its siblings (masked today by mostly-single-instance suites).
+- **Fallback-lane doc overclaim** — AMENDED this pass (60-agents § the
+  fallback lane): the `?fallback` routing is built and falsified; the
+  constrained-decode executor is recorded OPEN/unbuilt (v0 binds
+  `fallback = None` in bin/main.ml) with its trigger.
+- **Anthropic refusal-resilience betas** — still OPEN (Provider wire
+  facts below): `betas: ["server-side-fallback-2026-06-01"]` +
+  `fallbacks` opt-in undecided; decide at live smoke.
+
 ## WAVE 3 — enforcement rulings + verified-gap closure (2026-07-14)
 
 Landed in one pass (this commit):
@@ -80,12 +184,10 @@ Landed in one pass (this commit):
   `snoop_mounts = []` (dies in the flat-org migration, `91-flat-org.md`;
   in-engine snooping rides the body-match feed).
 
-Small finding, recorded not fixed: `glob_list`'s observed triples hash
-the path string (the listing is the observation), so a glob over a
-COMMITTED file would fail `Witness.holds`' Landed content comparison at
-retire — unexercised in the suite and unreachable until a theory grants
-a glob over landed state; the honest fix (a listing-shaped witness, or
-hashing the listed file's bytes) belongs with the flat-org grant rework.
+Small finding, recorded not fixed at the time: `glob_list`'s observed
+triples hashed the path string. CLOSED by the wave-3 fixer pass (C2,
+above): the listing witnesses committed (generation, content) pairs from
+the lookup; in-flight-only paths contribute no triple.
 
 ## WAVE 2 COMPLETE (2026-07-14)
 
