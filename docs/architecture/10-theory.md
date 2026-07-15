@@ -78,8 +78,13 @@ The window compiles into the firing plan (the node's contract asks for a
 tuple array with `minItems`/`maxItems` — `20-contracts.md`) or into the
 firing count (three refuter nodes, one tuple each — the theory author picks
 which by writing `3 nodes` vs `3..5 tuples`); either way the bound is shape,
-not a runtime check. Enforcement plan: the channel-boundary parse
-(`20-contracts.md` § failure surface), count check at retire.
+not a runtime check. Enforcement plan: the decode boundary — the
+window-lowered schema is one value serving both directions: it is what the
+invocation hands the model **and** what the reply parses against
+(`20-contracts.md` § failure surface), so an out-of-window reply is a parse
+failure routed to the repair lane, and an agent complying with the schema
+it was shown parses by construction. There is no count check downstream of
+the parse; a second check would mean the boundary returned the wrong type.
 
 **3. Inclusions (ref integrity).** Implicit in every `ref` slot: a committed
 tuple's refs resolve to committed tuples. Enforcement plan: refs are typed

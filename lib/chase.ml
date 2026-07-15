@@ -63,13 +63,13 @@ type executor_binding = {
    publishing, below). *)
 type tuple_realm
 
-(* One entry in the engine's body-match feed. [payload] is [None] only for
-   typed seed tuples, whose payloads ride the channel layer (published
-   typed at [create]) — see the deviation note in the module summary. *)
+(* One entry in the engine's body-match feed: seeds (payload rendered
+   through the relation's own codec at [create]) and codec-proven committed
+   heads alike. *)
 type tuple_entry = {
   relation : string;
   id : string;
-  payload : Yojson.Safe.t option;
+  payload : Yojson.Safe.t;
   strata : (string * int) list;
       (* Engine-minted generation counts per generation-bounded relation
          along this tuple's derivation chain — the runtime half of the
@@ -84,6 +84,9 @@ type instance = {
   binding : executor_binding;
   fired_key : string * string;
       (* (statement, consumed tuple id): the once-per-body-match guard. *)
+  provenance : Ledger.Provenance.t;
+      (* The firing record's provenance, carried so a tuple-window head's
+         late existentials append under the same firing. *)
   consumed : tuple_entry list;
   minted : (string * string) list;
       (* (relation, id) head existentials filled at firing time. *)
@@ -136,12 +139,15 @@ let addr_of (e : tuple_entry) =
   Ledger.Address.Tuple { relation = e.relation; id = e.id }
 
 let content_of (e : tuple_entry) =
-  Ledger.Content_hash.of_string
-    (match e.payload with Some p -> Yojson.Safe.to_string p | None -> e.id)
+  Ledger.Content_hash.of_string (Yojson.Safe.to_string e.payload)
 
 let operand_json (e : tuple_entry) : Yojson.Safe.t =
-  let base = [ ("relation", `String e.relation); ("id", `String e.id) ] in
-  `Assoc (match e.payload with Some p -> base @ [ ("payload", p) ] | None -> base)
+  `Assoc
+    [
+      ("relation", `String e.relation);
+      ("id", `String e.id);
+      ("payload", e.payload);
+    ]
 
 let operands_text consumed =
   Yojson.Safe.to_string (`List (List.map operand_json consumed))
@@ -195,6 +201,22 @@ let tuple_minter t relation =
       in
       Hashtbl.add t.tuple_minters relation m;
       m
+
+(* The head-existential supply: the one route to a head-relation id, and it
+   appends the firing record that carries the mint — so every minted id
+   traces to its firing in the ledger by construction (squash, dependency
+   order, and replay all walk that trace). Nodes windows mint here at fire
+   time; tuple windows mint here at the boundary parse, when the
+   data-generated width exists — their fire-time record carries no mints
+   yet ([count = 0]) and is the issue-order trace
+   (docs/architecture/10-theory.md § provenance is total). *)
+let record_firing t ~node ~provenance ~relation ~count =
+  let ids = List.init count (fun _ -> Id.mint (tuple_minter t relation)) in
+  let minted = List.map (fun id -> (relation, Id.to_string id)) ids in
+  ignore
+    (Ledger.append t.ledger ~node (Ledger.Event.Fired { provenance; minted })
+      : Ledger.Event.t);
+  (ids, minted)
 
 (* Every node settles exactly once; [seal] appends the ledger settlement
    event for the paths where no lower layer already sealed it
@@ -266,8 +288,9 @@ let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
             && String.equal e.id entry.id)
           t.tuples
       then
-        (* A run input (seed) or an uncommitted producer tuple: readable
-           now, at its pre-commit generation. *)
+        (* An uncommitted producer tuple in the feed (seeds commit at run
+           open, so they take the branch above): readable now, at its
+           pre-commit generation. *)
         Read.Witnessed
           { generation = Ledger.Generation.zero; content = content_of entry }
       else begin
@@ -294,73 +317,64 @@ let read_operand t ~consumer ~shape (entry : tuple_entry) : Read.outcome =
       end
 
 (* {2 The boundary parse}
-   Theory exposes no per-relation codec (contracts are packaged at
-   declaration; admission keeps only the parsed wire schema), so the
-   engine's reply parse runs on the raw-JSON lane: JSON extraction plus the
-   cardinality-window check — exactly the shape [Retire.head_tuple]
-   carries. Nothing invalid crosses; failures feed the repair loop. *)
+   One boundary, one supply: the head contract lowers its cardinality
+   window into the wire schema (a tuples window becomes the array root
+   with the window as [minItems]/[maxItems]), the SAME value is handed to
+   the invocation and parsed against ([Contract.Codec.by_schema] with ref
+   resolution against mint provenance) — so the bound is unwritable at the
+   decode boundary, shape and refs are codec-proven, and nothing
+   downstream re-checks either. Failures are repair diagnostics for the
+   shared lane (docs/architecture/20-contracts.md § failure surface;
+   docs/architecture/10-theory.md § statement grammar). *)
 
-let is_refusal text =
-  not (String.exists (fun c -> Char.equal c '{' || Char.equal c '[') text)
+let window_schema (window : Theory.Window.t) (ws : Contract.Wire_schema.t) :
+    Contract.Wire_schema.t =
+  match window with
+  | Theory.Window.Nodes _ -> ws
+  | Theory.Window.Tuples { min; max } ->
+      {
+        ws with
+        Contract.Wire_schema.root =
+          Contract.Wire_schema.Array
+            {
+              items = ws.Contract.Wire_schema.root;
+              min_items = Some min;
+              max_items = Some max;
+              doc = "";
+            };
+      }
 
-let parse_heads t (inst : instance) text :
-    (Retire.head_tuple list * tuple_realm Id.t list, string) result =
+(* Codec-proven payloads become head tuples; a tuple window's existentials
+   fill here, when the data-generated width exists, through the one
+   minting route ([record_firing]). *)
+let heads_of t (inst : instance) (json : Yojson.Safe.t) :
+    Retire.head_tuple list * tuple_realm Id.t list =
   let head_rel, window = inst.spawn.Theory.Spawn.exists in
-  match Yojson.Safe.from_string (String.trim text) with
-  | exception Yojson.Json_error msg -> Error ("reply is not JSON: " ^ msg)
-  | json ->
-      let payloads =
-        match (window, json) with
-        | Theory.Window.Nodes _, `List [ payload ] -> Ok [ payload ]
-        | Theory.Window.Nodes _, (`Assoc _ as payload) -> Ok [ payload ]
-        | Theory.Window.Nodes _, _ ->
-            Error "expected exactly one head tuple object"
-        | Theory.Window.Tuples { min; max }, (`Assoc _ as payload) ->
-            if min <= 1 && 1 <= max then Ok [ payload ]
-            else
-              Error
-                (Printf.sprintf
-                   "cardinality window %d..%d violated by a single tuple" min
-                   max)
-        | Theory.Window.Tuples { min; max }, `List elements ->
-            let n = List.length elements in
-            if n < min || n > max then
-              Error
-                (Printf.sprintf "cardinality window %d..%d violated: %d tuples"
-                   min max n)
-            else Ok elements
-        | Theory.Window.Tuples _, _ -> Error "expected a head tuple array"
+  match (window, json) with
+  | Theory.Window.Nodes _, payload ->
+      (* The existential was filled at firing time. *)
+      ( List.map2
+          (fun (relation, id) payload -> { Retire.relation; id; payload })
+          inst.minted [ payload ],
+        [] )
+  | Theory.Window.Tuples _, `List payloads ->
+      let ids, minted =
+        record_firing t ~node:inst.node ~provenance:inst.provenance
+          ~relation:head_rel ~count:(List.length payloads)
       in
-      Result.map
-        (fun payloads ->
-          match window with
-          | Theory.Window.Nodes _ ->
-              (* The existential was filled at firing time. *)
-              ( List.map2
-                  (fun (relation, id) payload ->
-                    { Retire.relation; id; payload })
-                  inst.minted payloads,
-                [] )
-          | Theory.Window.Tuples _ ->
-              (* Width is data-generated within the window: existentials
-                 fill when the width exists. *)
-              let ids =
-                List.map (fun _ -> Id.mint (tuple_minter t head_rel)) payloads
-              in
-              ( List.map2
-                  (fun hid payload ->
-                    { Retire.relation = head_rel; id = Id.to_string hid; payload })
-                  ids payloads,
-                ids ))
-        payloads
+      ( List.map2
+          (fun (relation, id) payload -> { Retire.relation; id; payload })
+          minted payloads,
+        ids )
+  | Theory.Window.Tuples _, _ ->
+      (* Unreachable: the array-rooted window schema admits only arrays. *)
+      assert false
 
 (* {2 The invocation lane}
    Freeform generation, boundary parse, then the repair loop — the SHARED
    lane ([Agent.invoke_parsed]): one repair-loop implementation for the
    engine and the host API alike (docs/architecture/60-agents.md § the
-   primary lane, § the fallback lane). The head parse is still the
-   engine's own [parse_heads]; its migration onto [Contract.Codec] is the
-   recorded B1 rewiring. *)
+   primary lane, § the fallback lane). *)
 
 let invoke_lane :
     type s.
@@ -370,7 +384,7 @@ let invoke_lane :
     grant:s Agent.Grant.t ->
     (Retire.head_tuple list * tuple_realm Id.t list, Ledger.Fault.t) result =
  fun t inst ~hyps ~grant ->
-  let head_rel, _window = inst.spawn.Theory.Spawn.exists in
+  let head_rel, window = inst.spawn.Theory.Spawn.exists in
   match Theory.wire_schema t.theory ~relation:head_rel with
   | None ->
       Error
@@ -378,7 +392,9 @@ let invoke_lane :
           Ledger.Fault.origin = Ledger.Fault.Executor_error;
           message = "no admitted wire schema for head relation " ^ head_rel;
         }
-  | Some schema ->
+  | Some head_schema ->
+      let schema = window_schema window head_schema in
+      let boundary = Contract.Codec.by_schema schema in
       let preamble = preamble_of inst.spawn.Theory.Spawn.by in
       let pin = pin_of inst.spawn.Theory.Spawn.by in
       let prompt =
@@ -387,22 +403,8 @@ let invoke_lane :
       in
       let invocation = { Agent.Invocation.prompt; schema; grant; pin } in
       let parse text =
-        match parse_heads t inst text with
-        | Ok heads -> Ok heads
-        | Error complaint ->
-            Error
-              {
-                Contract.Repair.raw_reply = text;
-                complaints =
-                  [
-                    {
-                      Contract.Repair.path = [];
-                      expected = "head tuples against the wire schema";
-                      got = complaint;
-                    };
-                  ];
-                refusal = is_refusal text;
-              }
+        Result.map (heads_of t inst)
+          (Contract.Codec.parse boundary ~registry:t.registry text)
       in
       Agent.invoke_parsed ~executor:inst.binding.runtime
         ?fallback:inst.binding.fallback ~parse ~invocation
@@ -595,7 +597,7 @@ let filter_satisfied t (spawn : Theory.Spawn.t) (body : tuple_entry) =
         String.equal e.relation over
         &&
         match e.payload with
-        | Some (`Assoc fields) ->
+        | `Assoc fields ->
             (match List.assoc_opt link fields with
             | Some (`String v) -> String.equal v body.id
             | _ -> false)
@@ -698,16 +700,13 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
       for _ = 1 to node_count do
         let node = Id.mint t.node_minter in
         let minted_ids, minted =
-          match window with
-          | Theory.Window.Nodes _ ->
-              let hid = Id.mint (tuple_minter t head_rel) in
-              ([ hid ], [ (head_rel, Id.to_string hid) ])
-          | Theory.Window.Tuples _ -> ([], [])
+          record_firing t ~node ~provenance ~relation:head_rel
+            ~count:
+              (match window with
+              | Theory.Window.Nodes _ -> 1
+              | Theory.Window.Tuples _ ->
+                  0 (* width is data-generated: minted at the parse *))
         in
-        ignore
-          (Ledger.append t.ledger ~node
-             (Ledger.Event.Fired { provenance; minted })
-            : Ledger.Event.t);
         t.seq <- t.seq + 1;
         let inst =
           {
@@ -715,6 +714,7 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry) =
             spawn;
             binding;
             fired_key = key;
+            provenance;
             consumed = [ entry ];
             minted;
             minted_ids;
@@ -770,7 +770,7 @@ let retire_success t (c : completed) =
           {
             relation = h.relation;
             id = h.id;
-            payload = Some h.payload;
+            payload = h.payload;
             strata = head_strata h.relation;
           })
         c.heads;
@@ -876,6 +876,49 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
       in
       reissue_or_stop t c ~action:Ledger.Decision.Serialize_reissue ~reason
 
+(* Inclusion re-judgment at retire (docs/architecture/10-theory.md
+   § inclusions): the boundary proved every ref against mint provenance,
+   and retire re-judges against final state — between the parse and this
+   commit point a referent's producer can squash, dropping the provisional
+   id the ref names, and a dangling ref must not enter committed state.
+   Unreachable in the synchronous v0 engine (a parsed ref's referent is
+   already committed by the time the parse runs); the recorded shape of
+   the mechanism for when dispatch overlaps producers. *)
+let rec ref_strings path (json : Yojson.Safe.t) =
+  match (path, json) with
+  | [], `String s -> [ s ]
+  | [], _ -> []
+  | "[]" :: rest, `List elements -> List.concat_map (ref_strings rest) elements
+  | field :: rest, `Assoc kvs -> (
+      match List.assoc_opt field kvs with
+      | Some v -> ref_strings rest v
+      | None -> [])
+  | _ :: _, _ -> []
+
+let dangling_refs t (heads : Retire.head_tuple list) =
+  List.concat_map
+    (fun (h : Retire.head_tuple) ->
+      match Theory.slots t.theory ~relation:h.relation with
+      | None -> []
+      | Some slots ->
+          List.concat_map
+            (fun (s : Theory.Slot.t) ->
+              match s.Theory.Slot.kind with
+              | Theory.Slot.Mint | Theory.Slot.Value -> []
+              | Theory.Slot.Ref target ->
+                  List.filter_map
+                    (fun v ->
+                      match
+                        Id.Registry.resolve t.registry ~realm:target v
+                      with
+                      | Ok _ -> None
+                      | Error (`Unknown_id s) -> Some s)
+                    (ref_strings
+                       (String.split_on_char '.' s.Theory.Slot.field)
+                       h.Retire.payload))
+            slots)
+    heads
+
 let try_retire t =
   match t.retire_queue with
   | [] -> false
@@ -909,16 +952,27 @@ let try_retire t =
             | (c, rejection) :: _ -> handle_rejection t c rejection
             | [] -> false)
         | c :: rest -> (
-            let witness = Witness.observed t.ledger ~node:c.inst.node in
-            match
-              Retire.step ~committed:t.committed_state ~ledger:t.ledger
-                ~registry:t.registry ~merges:t.merges ~node:c.inst.node
-                ~worktree:c.worktree ~witness ~heads:c.heads
-            with
-            | Ok () ->
-                retire_success t c;
-                true
-            | Error rejection -> go ((c, rejection) :: rejected) rest)
+            match dangling_refs t c.heads with
+            | _ :: _ as dangling ->
+                (* A referent's producer squashed after the parse: the
+                   node's output names dead identity and can never
+                   commit — reissue against the state that remains. *)
+                reissue_or_stop t c
+                  ~action:Ledger.Decision.Serialize_reissue
+                  ~reason:
+                    ("dangling ref after producer squash: "
+                    ^ String.concat ", " dangling)
+            | [] -> (
+                let witness = Witness.observed t.ledger ~node:c.inst.node in
+                match
+                  Retire.step ~committed:t.committed_state ~ledger:t.ledger
+                    ~registry:t.registry ~merges:t.merges ~node:c.inst.node
+                    ~worktree:c.worktree ~witness ~heads:c.heads
+                with
+                | Ok () ->
+                    retire_success t c;
+                    true
+                | Error rejection -> go ((c, rejection) :: rejected) rest))
       in
       go [] ordered
 
@@ -947,18 +1001,31 @@ let resolve_parked t =
 
 (* {2 The public surface} *)
 
-(* Seed tuples are typed at construction; they enter through the channel
-   layer (the engine mints their ids against the relation's realm) and
-   join the body-match feed. *)
+(* Seed tuples are typed at construction — codec-proven by construction.
+   Each one enters like any committed tuple: the engine mints its id
+   against the relation's realm (bound at once — a seed is committed
+   identity), publishes it typed on the channel layer, enters it into
+   committed state at the primordial generation, and feeds the body match
+   its codec-rendered payload, so where-filters match seed fields, agents
+   read seed data, and law judgment counts seeded referents
+   (docs/architecture/70-api.md § running). *)
 let seed_entry t (tu : Theory.Tuple.t) : tuple_entry =
   match tu with
-  | Theory.Tuple.Packed (rel, payload) ->
+  | Theory.Tuple.Packed (rel, payload) as packed ->
       let relation = Theory.Relation.name rel in
+      (* A payload-phantom minter: the id supply lives in the registry (one
+         per realm), so this shares the relation's ordinal space with
+         [tuple_minter]'s. *)
       let minter = Id.Minter.create ~registry:t.registry ~realm:relation in
       let id = Id.mint minter in
+      (match Id.Registry.bind t.registry id with
+      | Ok () | Error `Already_bound -> ());
       let tx = Channel.tx t.channels rel in
       Channel.publish tx ~id payload;
-      { relation; id = Id.to_string id; payload = None; strata = [] }
+      let json = Theory.Tuple.payload_json packed in
+      Retire.Committed.seed t.committed_state ~relation ~id:(Id.to_string id)
+        ~payload:json;
+      { relation; id = Id.to_string id; payload = json; strata = [] }
 
 let create ~theory ~ledger ~committed ~channels ~worktree_root ~ports
     ~executors ~backstops ~switches ~merges ~seed =

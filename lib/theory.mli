@@ -272,6 +272,12 @@ module Tuple : sig
 
   val v : 'a Relation.t -> 'a -> t
   val relation_name : t -> string
+
+  val payload_json : t -> Yojson.Safe.t
+  (** The payload's wire rendering through the relation's own codec — what
+      the engine feeds the body-match feed and committed state with at run
+      open. Typed at construction, so the rendering is codec-proven by
+      construction (docs/architecture/70-api.md § running). *)
 end
 
 (** A consumer edge: one statement reading one relation, with the raw

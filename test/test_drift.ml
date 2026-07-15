@@ -728,6 +728,7 @@ let%expect_test "F9: speculation on/off commits identical tuples and law \
     {|
     finding finding@0 {"desc":"unchecked error path"} g0
     finding finding@1 {"desc":"missing regression test"} g0
+    target target@0 {"goal":"review the diff"} g0
     verdict verdict@0 {"finding":"finding@0","refuted":"no"} g0
     verdict verdict@1 {"finding":"finding@1","refuted":"no"} g0
     law quorum satisfied=true offenders=[]

@@ -649,8 +649,12 @@ let plan_bootstrap ~spec ~pin =
       { name = "planner"; pin; preamble = planner_preamble; read_globs = [] }
   in
   let statement =
+    (* One theory per spec is a firing count, not a tuple array: [1 nodes]
+       keeps the planner's contract the bare meta-theory object (a tuples
+       window would lower to a one-element array schema —
+       10-theory.md § statement grammar). *)
     Theory.Spawn.v ~name:"plan" ~for_:"spec"
-      ~exists:("theory", Theory.Window.exactly 1)
+      ~exists:("theory", Theory.Window.nodes 1)
       ~by ()
   in
   match

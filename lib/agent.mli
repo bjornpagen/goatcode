@@ -410,8 +410,8 @@ val invoke_parsed :
   ('a, Ledger.Fault.t) result
 (** {!invoke} with the boundary parse supplied by the caller — the same
     single repair lane behind a different decoder. The chase engine enters
-    here while its head parse is still its own (its migration onto
-    [Contract.Codec] is the recorded B1 rewiring); when that lands, this
-    entry remains for tests that need a scripted boundary. There is exactly
-    one repair-loop implementation; {!invoke} is [invoke_parsed] applied to
+    here with [Contract.Codec.parse] over the window-lowered head schema
+    (its parse wraps the codec's to fill tuple-window existentials); tests
+    that need a scripted boundary enter here too. There is exactly one
+    repair-loop implementation; {!invoke} is [invoke_parsed] applied to
     the codec's parse. *)

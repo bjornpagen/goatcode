@@ -71,6 +71,15 @@ module Committed : sig
   val tuples : t -> tuple list
   (** The final tuple set, the object of law judgment and the settled
       map's [tuples] field. *)
+
+  val seed : t -> relation:string -> id:string -> payload:Yojson.Safe.t -> unit
+  (** Enter one run input as committed state, at the primordial generation.
+      Seeds are facts, not work product — they are committed by definition,
+      so where-filters match their fields, law judgment counts them in its
+      universe, and a consumer's read of one witnesses committed state. No
+      node wrote a seed: nothing enters the write log, and {!step} remains
+      the only writer of node-produced committed state
+      (docs/architecture/70-api.md § running). *)
 end
 
 type generation_moved = {

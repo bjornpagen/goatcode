@@ -33,22 +33,53 @@ type verdict = {
 }
 [@@deriving jsonschema ~variant_as_string, yojson]
 
+(* One catalog entry per relation packages the declaration's derived
+   artifacts once: the deriver's schema output and the ppx codec pair. *)
+let entry name schema of_json to_json =
+  Contract.v ~name ~schema ~codec:(Contract.Codec.v ~of_json ~to_json)
+
+let finder =
+  Theory.Executor.Agent_template
+    { name = "finder"; pin = Pins.finder; preamble = Prompts.finder;
+      read_globs = [ "src/**" ] }
+
+let refuter =
+  Theory.Executor.Agent_template
+    { name = "refuter"; pin = Pins.refuter; preamble = Prompts.refuter;
+      read_globs = [ "src/**" ] }
+
 let theory =
   Theory.declare
     ~relations:
       [
-        Relation.v "change" (module Change);
-        Relation.v "finding" (module Finding);
-        Relation.v "verdict" (module Verdict);
+        Theory.Relation.Packed
+          (Theory.Relation.v ~name:"change"
+             (entry "change" change_jsonschema change_of_yojson
+                yojson_of_change));
+        Theory.Relation.Packed
+          (Theory.Relation.v ~name:"finding"
+             (entry "finding" finding_jsonschema finding_of_yojson
+                yojson_of_finding));
+        Theory.Relation.Packed
+          (Theory.Relation.v ~name:"verdict"
+             (entry "verdict" verdict_jsonschema verdict_of_yojson
+                yojson_of_verdict));
       ]
     ~statements:
       [
-        Spawn.v ~name:"sweep" ~for_:"change" ~exists:("finding", Window.upto 32)
-          ~by:(Agent.template ~pin:Pin.finder ~preamble:Prompts.finder);
-        Spawn.v ~name:"review" ~for_:"finding" ~exists:("verdict", Window.nodes 3)
-          ~by:(Agent.template ~pin:Pin.refuter ~preamble:Prompts.refuter);
+        Theory.Spawn.v ~name:"sweep" ~for_:"change"
+          ~exists:("finding", Theory.Window.upto 32)
+          ~by:finder ();
+        Theory.Spawn.v ~name:"review" ~for_:"finding"
+          ~exists:("verdict", Theory.Window.nodes 3)
+          ~by:refuter ();
       ]
-    ~laws:[ Law.count ~name:"quorum" ~over:"verdict" ~group_by:"finding" ~exactly:3 ]
+    ~laws:
+      [
+        Theory.Law.Count
+          { name = "quorum"; over = "verdict"; group_by = "finding";
+            bound = Theory.Law.Exactly 3 };
+      ]
 ```
 
 `Theory.declare` runs **admission** immediately, and admission is a parse:
@@ -85,8 +116,13 @@ val Run.exec :
                                      substrate is an implementation fact *)
 ```
 
-One entry point. `config` carries every number the docs say the operator
-owns: the port table (provider ceilings), the two backstops
+One entry point. Seed tuples are facts, not work product: each one enters
+committed state at run open, at the primordial generation, with its payload
+carried into the body-match feed — so where-filters match seed fields,
+agents read seed data in their operand sections, and law judgment counts
+seeded referents in its universe (a quorum law over a seeded relation is
+never vacuously satisfied). `config` carries every number the docs say the
+operator owns: the port table (provider ceilings), the two backstops
 (`40-scheduling.md` § backstops), any per-shape off switches, paths. The
 off switch is representation-enforced: `Switch.throw` takes the churn
 evidence as an argument (`Churn.measurement`, a ledger-derived value) — a

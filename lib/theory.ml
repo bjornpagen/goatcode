@@ -155,6 +155,9 @@ module Tuple = struct
 
   let v r x = Packed (r, x)
   let relation_name (Packed (r, _)) = Relation.name r
+
+  let payload_json (Packed (r, x)) =
+    Contract.Codec.print (Contract.codec r.Relation.contract) x
 end
 
 module Edge = struct

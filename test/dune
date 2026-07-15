@@ -11,6 +11,7 @@
   test_disjoint
   test_drift
   test_boundary
+  test_heads
   test_admission
   test_report
   test_probes)

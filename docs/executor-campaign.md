@@ -230,6 +230,21 @@ B1. **Codec boundary not called (BLOCKING).** `chase.ml` `parse_heads`
     `contract.ml:804`, `let _ = registry`). Retire must also re-judge refs
     against final state. (Findings at chase.ml:291/301, contract.ml:804.)
     Kills F10/F11 violations.
+    STATUS: DONE (boundary-rewiring pass, 2026-07-14). `Contract.Codec`
+    threads the registry into the decode for real (the `let _ = registry`
+    deviation is deleted); new `Codec.by_schema` is the schema-driven
+    boundary — shape, enum membership, array windows, and ref resolution
+    against mint provenance in one walk of the admitted `Wire_schema.t`.
+    `invoke_lane` parses head replies through `Codec.parse by_schema
+    ~registry:t.registry`; the old `parse_heads`/`is_refusal` raw-JSON lane
+    is deleted. Retire re-judges refs against final state: `try_retire`
+    re-resolves every ref slot (dotted nested paths included) before
+    `Retire.step` and routes a dangling ref to serialize-reissue —
+    unreachable in the synchronous v0 engine (recorded-shape mechanism for
+    when dispatch overlaps producers). Falsifiers in test_heads.ml ("B1:
+    shape, enum membership, and ref resolution…" — invented refs,
+    out-of-enum values, and stray fields all crossed and committed
+    pre-fix).
 
 B2. **No Store/Effect events (BLOCKING, mostly fixed by Phase A).** Verify
     after A that `Witness_index.writes` is non-empty, `conflict_judgment`
@@ -257,6 +272,21 @@ B4. **Seed payloads dropped (BLOCKING).** `seed_entry` sets `payload = None`,
     so `judge_count` over a seeded relation is vacuously satisfied
     (retire.ml:801). Fix seed to carry payload and enter committed state.
     (chase.ml:933, retire.ml:801.)
+    STATUS: DONE (boundary-rewiring pass, 2026-07-14). `tuple_entry.payload`
+    is non-optional (the None sentinel is gone); seeds render through the
+    relation's own codec (`Theory.Tuple.payload_json`), publish typed on
+    the channel layer as before, and enter committed state at run open via
+    the new `Retire.Committed.seed` (primordial generation, recorded
+    content, NO write-log entry — no node wrote a seed; the id binds at
+    once). Where-filters match seed fields, operand sections carry seed
+    payloads, content hashes are real, and `judge_count`'s universe
+    includes seeded referents. 70-api.md § running amended. Falsifiers in
+    test_heads.ml ("B4: a seed's payload reaches the executor…", "B4:
+    judge_count over a seeded relation…" — both failed pre-fix). Seed
+    tuples now appear in `Run.settled.tuples`/committed prints; affected
+    expectations promoted (test_engine, test_drift F9, test_admission,
+    test_squash — whose F5 invariant checker now takes the seed keys as
+    the declared no-provenance exemption).
 
 B5. **Speculation is dead code.** Hypothesis arm of `read_operand`
     unreachable; confidence hardcoded 1.0; no store-buffer snooping;
@@ -382,12 +412,37 @@ B13. **Cardinality windows enforced as count, not shape.** `invoke_lane`
      decode boundary"). An agent that complies with the schema it was shown
      fails the parse. Fix: derive the array-window schema and hand THAT.
      (chase.ml:375.)
+     STATUS: DONE (boundary-rewiring pass, 2026-07-14). `invoke_lane`
+     lowers the window into the head schema (`window_schema`: a Tuples
+     window becomes the array root with the window as minItems/maxItems)
+     and the SAME value is handed to the invocation (prompt + structured
+     output) and parsed against (`Codec.by_schema`) — the bound is
+     unwritable at the decode boundary; the count check is deleted. Nodes
+     windows keep the bare tuple schema. `goat plan`'s bootstrap statement
+     moved from `exactly 1` to `nodes 1` (one theory per spec is a firing
+     count; the one-element-array coordinate was an artifact).
+     10-theory.md § statement grammar enforcement plan amended. Falsifiers
+     in test_heads.ml ("B13: a tuples window is handed as the array
+     schema…" — captured a bare object schema pre-fix; "B13: a reply
+     outside the window dies at the decode boundary").
 
 B14. **Provenance not total for Tuples-window heads.** `fire()` records
      `Fired{minted=[]}` for Window.Tuples; the existentials minted later in
      `parse_heads` are never evented, so the ledger has no record of which
      firing produced those tuples (breaks squash, dep-order, replay).
      (chase.ml:704.)
+     STATUS: DONE (boundary-rewiring pass, 2026-07-14). One route to a
+     head-relation id: `record_firing` mints AND appends the `Fired`
+     event carrying the mint, so an uneventedly-minted head id is not
+     writable. Nodes windows mint through it at fire time; tuple windows
+     mint through it at the boundary parse when the data-generated width
+     exists (their fire-time record carries `minted=[]` and remains the
+     issue-order trace F1/F2 judge; `instance` carries its provenance so
+     the late record appends under the same firing). All Fired readers
+     (squash walk, dependency order, replay, report) already fold over
+     every firing record per node. Falsifier: the B14 half of the window
+     test in test_heads.ml ("every committed head traces to its firing" —
+     false pre-fix).
 
 B15. **Minor cleanups (do last, batch):** port admission runs the survival
      comparator on non-hypothesis eager starts, breaking FIFO-within-class
@@ -401,7 +456,9 @@ B15. **Minor cleanups (do last, batch):** port admission runs the survival
      dependents' on-disk state (chase.ml:818); footprint escapes never
      detected/surfaced — `Channel.footprint` has zero callers
      (channel.ml:268); `70-api.md` declaration example doesn't match the
-     implemented surface (70-api.md:36); effect-grant lane unreachable /
+     implemented surface (70-api.md:36) — DONE in the boundary-rewiring
+     pass (rewritten to the real constructors: `Theory.Relation.v ~name`,
+     `Contract.v`, `Spawn.v … ()`, `Law.Count`); effect-grant lane unreachable /
      declared-idempotence why never evented (agent.mli:41 — should mostly
      resolve via Phase A).
 

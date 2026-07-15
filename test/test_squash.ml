@@ -232,7 +232,7 @@ let retire_log ~repo =
    filesystem or git bookkeeping. Checked from the ledger, the committed
    tuple set, the durability boundary (git log), and the worktree root. *)
 
-let abort_invariant_violations ~ledger ~settlements ~tuples ~repo ~wt =
+let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo ~wt =
   let violations = ref [] in
   let bad fmt = Printf.ksprintf (fun s -> violations := s :: !violations) fmt in
   let minted_by =
@@ -262,15 +262,18 @@ let abort_invariant_violations ~ledger ~settlements ~tuples ~repo ~wt =
         | _ -> Some (Id.to_string n))
       settlements
   in
-  (* 1. Every committed tuple was minted by a node that fully retired. *)
+  (* 1. Every committed tuple was minted by a node that fully retired — or
+     is one of the run's seeds, committed at run open with no minting node
+     (docs/architecture/70-api.md § running). *)
   List.iter
     (fun t ->
       let key = tuple_key t in
-      match List.assoc_opt key minted_by with
-      | None -> bad "committed tuple %s has no minting provenance" key
-      | Some n ->
-          if not (List.mem n retired) then
-            bad "committed tuple %s leaked from non-retired node %s" key n)
+      if not (List.mem key seeds) then
+        match List.assoc_opt key minted_by with
+        | None -> bad "committed tuple %s has no minting provenance" key
+        | Some n ->
+            if not (List.mem n retired) then
+              bad "committed tuple %s leaked from non-retired node %s" key n)
     tuples;
   (* 2. The durability boundary agrees: retirement commits on the committed
      branch are exactly the retired nodes. *)
@@ -576,7 +579,8 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
           in
           print_violations
             (abort_invariant_violations ~ledger:settled.ledger
-               ~settlements:nodes_settlements ~tuples:settled.tuples ~repo ~wt);
+               ~settlements:nodes_settlements ~tuples:settled.tuples
+               ~seeds:[ "task/task#0"; "task/task#1" ] ~repo ~wt);
           (* Settle order: the fault lands at dispatch, before the sibling
              reaches retirement — so node#1 settles first. *)
           [%expect
@@ -584,7 +588,7 @@ let%expect_test "F3: end-to-end sibling precision through Run.exec" =
             node#1: faulted(executor-error: injected)
             node#0: retired
             node#2: retired
-            tuples: [result/result#0; summary/summary#0]
+            tuples: [task/task#0; task/task#1; result/result#0; summary/summary#0]
             retire commits: [node#0; node#2]
             buffers left: [node#0; node#2]
             invariant: ok
@@ -654,7 +658,7 @@ let run_fault_scenario ~label ~inject =
           in
           let violations =
             abort_invariant_violations ~ledger:settled.ledger ~settlements
-              ~tuples:settled.tuples ~repo ~wt
+              ~tuples:settled.tuples ~seeds:[ "task/task#0" ] ~repo ~wt
           in
           Printf.printf "%s | %s | tuples=[%s] | %s\n" label brief
             (String.concat "; " (List.map tuple_key settled.tuples))
@@ -668,12 +672,12 @@ let%expect_test "F5: upstream fault at every yield class leaves nothing" =
     fault_scripts;
   [%expect
     {|
-    fault-at-start | node#0=faulted:executor-error | tuples=[] | ok
-    fault-after-yield | node#0=faulted:executor-error | tuples=[] | ok
-    fault-after-delay | node#0=faulted:executor-error | tuples=[] | ok
-    fault-mid-repair | node#0=faulted:executor-error | tuples=[] | ok
-    fault-after-refusal | node#0=faulted:executor-error | tuples=[] | ok
-    script-exhausted-at-yield | node#0=faulted:executor-error | tuples=[] | ok
+    fault-at-start | node#0=faulted:executor-error | tuples=[task/task#0] | ok
+    fault-after-yield | node#0=faulted:executor-error | tuples=[task/task#0] | ok
+    fault-after-delay | node#0=faulted:executor-error | tuples=[task/task#0] | ok
+    fault-mid-repair | node#0=faulted:executor-error | tuples=[task/task#0] | ok
+    fault-after-refusal | node#0=faulted:executor-error | tuples=[task/task#0] | ok
+    script-exhausted-at-yield | node#0=faulted:executor-error | tuples=[task/task#0] | ok
     |}]
 
 let%expect_test "F5: downstream fault at every yield class keeps exactly the \
@@ -683,12 +687,12 @@ let%expect_test "F5: downstream fault at every yield class keeps exactly the \
     fault_scripts;
   [%expect
     {|
-    fault-at-start | node#0=retired node#1=faulted:executor-error | tuples=[result/result#0] | ok
-    fault-after-yield | node#0=retired node#1=faulted:executor-error | tuples=[result/result#0] | ok
-    fault-after-delay | node#0=retired node#1=faulted:executor-error | tuples=[result/result#0] | ok
-    fault-mid-repair | node#0=retired node#1=faulted:executor-error | tuples=[result/result#0] | ok
-    fault-after-refusal | node#0=retired node#1=faulted:executor-error | tuples=[result/result#0] | ok
-    script-exhausted-at-yield | node#0=retired node#1=faulted:executor-error | tuples=[result/result#0] | ok
+    fault-at-start | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
+    fault-after-yield | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
+    fault-after-delay | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
+    fault-mid-repair | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
+    fault-after-refusal | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
+    script-exhausted-at-yield | node#0=retired node#1=faulted:executor-error | tuples=[task/task#0; result/result#0] | ok
     |}]
 
 (* ==================================================================== *)
@@ -742,7 +746,8 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
         let settlements = Chase.settlements chase in
         let tuples = Retire.Committed.tuples (Chase.committed chase) in
         let violations =
-          abort_invariant_violations ~ledger ~settlements ~tuples ~repo ~wt
+          abort_invariant_violations ~ledger ~settlements ~tuples
+            ~seeds:[ "task/task#0" ] ~repo ~wt
         in
         Printf.printf "kill@%d: retired=[%s] tuples=[%s] %s\n" k
           (String.concat "; "
@@ -760,11 +765,11 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
   [%expect
     {|
     steps to quiescence: 6
-    kill@0: retired=[] tuples=[] ok
-    kill@1: retired=[] tuples=[] ok
-    kill@2: retired=[] tuples=[] ok
-    kill@3: retired=[node#0] tuples=[result/result#0] ok
-    kill@4: retired=[node#0] tuples=[result/result#0] ok
-    kill@5: retired=[node#0] tuples=[result/result#0] ok
-    kill@6: retired=[node#0; node#1] tuples=[result/result#0; summary/summary#0] ok
+    kill@0: retired=[] tuples=[task/task#0] ok
+    kill@1: retired=[] tuples=[task/task#0] ok
+    kill@2: retired=[] tuples=[task/task#0] ok
+    kill@3: retired=[node#0] tuples=[task/task#0; result/result#0] ok
+    kill@4: retired=[node#0] tuples=[task/task#0; result/result#0] ok
+    kill@5: retired=[node#0] tuples=[task/task#0; result/result#0] ok
+    kill@6: retired=[node#0; node#1] tuples=[task/task#0; result/result#0; summary/summary#0] ok
     |}]

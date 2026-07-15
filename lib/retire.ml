@@ -217,6 +217,29 @@ module Committed = struct
 
   let tuples t = t.tuple_set
 
+  (* Run inputs are facts, not work product: a seed enters committed state
+     at run open, at the primordial generation, with the same recorded
+     content a retired head tuple would carry — so where-filters, law
+     universes, and consumer reads judge seeds exactly like retired
+     tuples. No node wrote it: the write log (the disjoint law's index)
+     records nothing, and retirement remains the only writer of
+     node-produced committed state
+     (docs/architecture/70-api.md § running). *)
+  let seed t ~relation ~id ~payload =
+    let address = Ledger.Address.Tuple { relation; id } in
+    t.entries <-
+      Address_map.add address
+        {
+          gen = Ledger.Generation.zero;
+          content =
+            Some (Ledger.Content_hash.of_string (Yojson.Safe.to_string payload));
+          last_delta = None;
+        }
+        t.entries;
+    t.tuple_set <-
+      t.tuple_set
+      @ [ { relation; id; payload; generation = Ledger.Generation.zero } ]
+
   (* -------- internal surface (hidden by retire.mli) -------- *)
 
   let last_delta t address =

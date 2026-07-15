@@ -278,6 +278,7 @@ let%expect_test "F13: admitted theories quiesce on rigged executors with \
     draft: draft#0 draft#1
     review: review#0 review#1 review#2 review#3
     summary: summary#0 summary#1 summary#2 summary#3
+    task: task#0 task#1
     |}]
 
 (* ------------------------------------------------------------------ *)
@@ -390,6 +391,7 @@ let%expect_test "F13: a two-statement mint loop is rejected; its acyclic \
     cycle [ping.id -> pong.id] real=true
     acyclic half quiesces: true
     settled: 1 (retired=1 faulted=0 squashed=0)
+    ping: ping#0
     pong: pong#0
     |}]
 
@@ -505,6 +507,7 @@ let%expect_test "F14: a squashed/faulted node's minted ids never appear in \
     dead ids in committed payloads: false
     draft: draft#0 draft#2
     review: review#0 review#1
+    task: task#0 task#1 task#2
     |}]
 
 let%expect_test "F14: committed id space is dense" =
@@ -544,9 +547,11 @@ let%expect_test "F14: committed id space is dense" =
     draft: [draft#0 draft#1] dense=true
     review: [review#0 review#1 review#2 review#3] dense=true
     summary: [summary#0 summary#1 summary#2 summary#3] dense=true
+    task: [task#0 task#1] dense=true
     -- interleaved-squash run --
     draft: [draft#0 draft#2] dense=false
     review: [review#0 review#1] dense=true
+    task: [task#0 task#1 task#2] dense=true
     |}]
 
 let%expect_test "F14: committed ids are replay-stable and the ledger passes \
@@ -875,7 +880,7 @@ let%expect_test "F13: an admitted feedback loop quiesces when the reviewer \
   [%expect {|
     quiescent within budget: true
     settled: 3 (retired=3 faulted=0 squashed=0)
-    module_impl: module_impl#1
+    module_impl: module_impl#0 module_impl#1
     revision_request: revision_request#0
     |}]
 
@@ -922,7 +927,7 @@ let%expect_test "F13: the stratum bound is the loop's terminal generation — \
     declared bound: 2
     quiescent within budget: true
     settled: 5 (retired=5 faulted=0 squashed=0)
-    module_impl: module_impl#1 module_impl#2
+    module_impl: module_impl#0 module_impl#1 module_impl#2
     revision_request: revision_request#0 revision_request#1 revision_request#2
     |}]
 

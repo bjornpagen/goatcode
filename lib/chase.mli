@@ -113,8 +113,12 @@ val create :
     them); every statement instance derivable from the seed starts at t=0 —
     starting is not speculating: the eager prefix consumes no operands and
     has nothing to squash on operand grounds
-    (docs/architecture/40-scheduling.md § eager start). Seed tuples pass
-    the codec boundary like any wire data. *)
+    (docs/architecture/40-scheduling.md § eager start). Seed tuples are
+    typed at construction — codec-proven by construction — and enter
+    committed state here, at the primordial generation: seeds are facts,
+    not work product, so where-filters match their fields, agents read
+    their payloads, and law judgment counts seeded referents
+    (docs/architecture/70-api.md § running). *)
 
 val step : t -> [ `Progressed | `Quiescent ]
 (** Advance the engine by one scheduling action. The dispatch path is

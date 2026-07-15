@@ -155,8 +155,8 @@ The codec boundary is a trust boundary, and **it parses, never validates** —
 King's distinction, load-bearing here: the boundary returns a typed tuple
 (the refined type carrying the proof) or a repair-lane event, never a
 "checked" blob. Downstream of the boundary no code re-checks shape,
-enum membership, or ref resolution, because the tuple's type is the record
-of the check. An agent reply that fails the parse is not an error the
+enum membership, window bounds, or ref resolution, because the tuple's
+type is the record of the check. An agent reply that fails the parse is not an error the
 engine handles — it is a **repair-lane event** (`60-agents.md`): the reply
 text and the parser's diagnostics go back to the same agent as a stateless
 repair call. The channel never admits an unparseable tuple; the theory never

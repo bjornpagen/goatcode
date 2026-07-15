@@ -764,17 +764,124 @@ let refusal_markers =
   ]
 
 module Codec = struct
+  (* Ref resolution rides inside the decode, so the decode takes the run's
+     registry: [by_schema] consumes it directly; a typed host codec wrapped
+     by [v] resolves refs by closing over its own registry (the ppx pair
+     has no registry parameter), and the threaded one passes it by. *)
   type 'a t = {
-    of_json : Yojson.Safe.t -> 'a;
+    of_json : registry:Id.Registry.t -> Yojson.Safe.t -> 'a;
     to_json : 'a -> Yojson.Safe.t;
   }
 
-  let v ~of_json ~to_json = { of_json; to_json }
+  let v ~of_json ~to_json =
+    { of_json = (fun ~registry:_ json -> of_json json); to_json }
+
+  (* The schema-driven boundary: shape, enum membership, array windows, and
+     ref resolution judged by one walk of the admitted [Wire_schema.t] —
+     the same value the model was handed, one supply. A ref slot resolves
+     through the registry against mint provenance, so an agent-invented id
+     is a complaint naming the expected relation, never a tuple
+     (docs/architecture/20-contracts.md § failure surface). *)
+  let by_schema (ws : Wire_schema.t) : Yojson.Safe.t t =
+    let open Wire_schema in
+    let complain path expected got =
+      raise (Decode_error { Repair.path; expected; got })
+    in
+    let brief json =
+      let s = Yojson.Safe.to_string json in
+      if String.length s > 60 then String.sub s 0 57 ^ "..." else s
+    in
+    let rec check ~registry path node (json : Yojson.Safe.t) =
+      match (node, json) with
+      | Prim { prim = Str; _ }, `String _
+      | Prim { prim = Int; _ }, `Int _
+      | Prim { prim = Num; _ }, (`Int _ | `Float _)
+      | Prim { prim = Bool; _ }, `Bool _ ->
+          ()
+      | Prim { prim; _ }, other ->
+          let expected =
+            match prim with
+            | Str -> "a string"
+            | Int -> "an integer"
+            | Num -> "a number"
+            | Bool -> "a boolean"
+          in
+          complain path expected (brief other)
+      | Str_enum { cases; _ }, `String s when List.mem s cases -> ()
+      | Str_enum { cases; _ }, other ->
+          complain path ("one of " ^ String.concat " | " cases) (brief other)
+      | Record { fields; _ }, `Assoc kvs ->
+          List.iter
+            (fun (k, _) ->
+              if not (List.exists (fun f -> String.equal f.name k) fields)
+              then
+                complain (path @ [ k ]) "no fields beyond the contract's"
+                  ("unexpected field \"" ^ k ^ "\""))
+            kvs;
+          List.iter
+            (fun f ->
+              match List.assoc_opt f.name kvs with
+              | Some v -> check ~registry (path @ [ f.name ]) f.schema v
+              | None ->
+                  if f.required then
+                    complain (path @ [ f.name ]) "the field to be present"
+                      "no field")
+            fields
+      | Record _, other -> complain path "an object" (brief other)
+      | Array { items; min_items; max_items; _ }, `List elements ->
+          let n = List.length elements in
+          (match min_items with
+          | Some m when n < m ->
+              complain path
+                (Printf.sprintf "at least %d tuples in this window" m)
+                (Printf.sprintf "%d" n)
+          | Some _ | None -> ());
+          (match max_items with
+          | Some m when n > m ->
+              complain path
+                (Printf.sprintf "at most %d tuples in this window" m)
+                (Printf.sprintf "%d" n)
+          | Some _ | None -> ());
+          List.iteri
+            (fun i el ->
+              check ~registry (path @ [ string_of_int i ]) items el)
+            elements
+      | Array _, other -> complain path "an array" (brief other)
+      | Nullable _, `Null -> ()
+      | Nullable inner, json -> check ~registry path inner json
+      | Ref_id { relation; _ }, `String s -> (
+          match Id.Registry.resolve registry ~realm:relation s with
+          | Ok _ -> ()
+          | Error (`Unknown_id _) ->
+              complain path
+                (Printf.sprintf
+                   "a %s id this run minted (a ref echoes an operand's id)"
+                   relation)
+                s)
+      | Ref_id { relation; _ }, other ->
+          complain path
+            (Printf.sprintf "a %s ref id string" relation)
+            (brief other)
+      | Def_ref d, json -> (
+          match List.assoc_opt d ws.defs with
+          | Some n -> check ~registry path n json
+          | None ->
+              (* Unreachable for admitted schemas: admission proved every
+                 $ref resolves ([check_def_refs]). *)
+              complain path ("$defs." ^ d) "an unresolvable $ref")
+    in
+    {
+      of_json =
+        (fun ~registry json ->
+          check ~registry [] ws.root json;
+          json);
+      to_json = Fun.id;
+    }
 
   (* The one place decode exceptions become data. Asynchronous-resource
      exceptions are re-raised: they are not wire data. *)
-  let decode c ~raw_reply json =
-    match c.of_json json with
+  let decode c ~registry ~raw_reply json =
+    match c.of_json ~registry json with
     | value -> Ok value
     | exception Decode_error complaint ->
         Error { Repair.raw_reply; complaints = [ complaint ]; refusal = false }
@@ -795,14 +902,8 @@ module Codec = struct
           }
 
   let parse c ~registry raw =
-    (* Ref resolution rides inside [of_json] (the party that knows which
-       fields are ref slots and their realms); the registry is threaded to
-       this boundary for it — see the recorded deviation: [Id]'s mli
-       exposes no wire decoder for hosts to build such an [of_json] from
-       yet, so today the parameter is accepted and unused. *)
-    let _ = (registry : Id.Registry.t) in
     match extract_json raw with
-    | Some json -> decode c ~raw_reply:raw json
+    | Some json -> decode c ~registry ~raw_reply:raw json
     | None ->
         let lowered = String.lowercase_ascii raw in
         let refused =
@@ -841,8 +942,7 @@ module Codec = struct
             }
 
   let parse_json c ~registry json =
-    let _ = (registry : Id.Registry.t) in
-    decode c ~raw_reply:(Yojson.Safe.to_string json) json
+    decode c ~registry ~raw_reply:(Yojson.Safe.to_string json) json
 
   let print c value = c.to_json value
   let render c value = Yojson.Safe.pretty_to_string (c.to_json value)

@@ -303,7 +303,7 @@ let%expect_test "F1 max-of-legs: the dependency structure is the schedule" =
     both legs issued before any settlement: true
     the joining statement issued only after its producer settled: true
     every node retired: true
-    committed relations: left right wrap
+    committed relations: left right task wrap
     wall clock bounded by the legs, never their 7200s sum: true
     |}]
 
@@ -401,10 +401,10 @@ let%expect_test "F2 no head-of-line blocking on an open port" =
     {|
     unrelated ready node ran before the slow occupant settled: true
     both nodes retired: true
-    committed relations: fast_out slow_out
+    committed relations: fast_out slow_out task
     dead occupant settled: faulted
     unrelated ready node settled: retired
-    committed relations: fast_out
+    committed relations: fast_out task
     |}]
 
 (* ------------------------------------------------------------------ *)

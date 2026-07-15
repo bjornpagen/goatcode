@@ -172,12 +172,25 @@ module Codec : sig
     of_json:(Yojson.Safe.t -> 'a) -> to_json:('a -> Yojson.Safe.t) -> 'a t
   (** Wrap the ppx-derived pair ([payload_of_yojson], [yojson_of_payload]).
       Schema and codec agree by construction because both derive from the
-      same declaration. *)
+      same declaration. A typed [of_json] that reads ref slots resolves
+      them by closing over its run's registry ({!Id.Registry.resolve} is
+      the only wire-string-to-id conversion). *)
+
+  val by_schema : Wire_schema.t -> Yojson.Safe.t t
+  (** The schema-driven boundary for schema-typed payloads (the engine's
+      head lane, dynamic relations): shape, enum membership, array windows
+      ([minItems]/[maxItems]), and ref resolution against mint provenance
+      are all one walk of the admitted schema — the same value the model
+      was handed, one supply. The parsed value is the codec-proven payload;
+      an escape at any path (an invented ref id included) is a repair
+      complaint naming that path
+      (docs/architecture/20-contracts.md § failure surface). *)
 
   val parse :
     'a t -> registry:Id.Registry.t -> string -> ('a, Repair.diagnostics) result
   (** Parse a raw agent reply: JSON extraction, shape decode, and ref
-      resolution against mint provenance, one boundary crossing. *)
+      resolution against mint provenance ([registry]), one boundary
+      crossing. *)
 
   val parse_json :
     'a t ->
