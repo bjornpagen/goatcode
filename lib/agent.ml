@@ -279,6 +279,21 @@ module Invocation = struct
       Ledger.Event.kind list;
         (* The tracked-hypothesis mint for reads served from another
            node's in-flight store (agent.mli; falsifier FL2). *)
+    in_flight :
+      unit ->
+      (Ledger.Address.t * Ledger.node Id.t * Ledger.Content_hash.t) list;
+        (* Every address whose frontier top is in flight, with its writer
+           and uncommitted content — the effect snapshot's universe: a
+           [run_command] observes the whole tree exactly like a gate, so
+           its execution is charged with every in-flight top it could see
+           (agent.mli; 30-scheduling.md § gates on the shared tree). *)
+    undischarged : unit -> bool;
+        (* The node currently carries undischarged hypotheses — the
+           runtime edge of the speculation-indexed grant: the index is
+           fixed at dispatch, but ambient snooping can make a
+           committed-granted node speculative MID-TURN, and a
+           non-idempotent effect must refuse rather than run under
+           speculation (agent.mli; 20-medium.md § event taxonomy). *)
     gate_resource : string option;
         (* The declared build-artifact resource a shell-gate run's effect
            lock scopes to — [Some] exactly for gate dispatches (agent.mli;
@@ -1193,6 +1208,13 @@ module Source = struct
       producer:Ledger.node Id.t ->
       content:Ledger.Content_hash.t ->
       Ledger.Event.kind list;
+    in_flight :
+      unit ->
+      (Ledger.Address.t * Ledger.node Id.t * Ledger.Content_hash.t) list;
+        (* the effect snapshot's universe (Invocation.in_flight) *)
+    undischarged : unit -> bool;
+        (* the node carries undischarged hypotheses now
+           (Invocation.undischarged) *)
   }
 
   type place =
@@ -1340,6 +1362,10 @@ let pid_alive pid =
   | exception Unix.Unix_error (Unix.EPERM, _, _) -> true
   | exception Unix.Unix_error (_, _, _) -> false
 
+(* Tombstone names for broken stale locks: unique per break, so a failed
+   cleanup can never wedge the next break's rename. *)
+let break_count = ref 0
+
 let with_effect_lock ~resource ~holder f =
   let effect_lock_dir = effect_lock_dir ~resource in
   let holder_file = Filename.concat effect_lock_dir "holder" in
@@ -1361,10 +1387,62 @@ let with_effect_lock ~resource ~holder f =
                the stale lock\n\
                %!"
               (Option.value contents ~default:"unknown");
-            remove_quietly holder_file;
-            (try Unix.rmdir effect_lock_dir
-             with Unix.Unix_error (_, _, _) -> ());
-            acquire budget
+            (* Break by CLAIM, verify inside the claim. Rename the whole
+               lock directory to a fresh tombstone — atomic, so exactly
+               one contender wins the break (a loser's rename fails and
+               it re-runs acquire against whatever now stands) — then
+               RE-READ the claimed holder: the stale judgment above is a
+               separate earlier read, and a winner that already broke,
+               retook, and wrote a fresh live holder must get its lock
+               back, not lose it to our stale decision. Pre-fix two
+               contenders past the same dead-pid read each removed
+               holder+dir unconditionally: the second destroyed the
+               first's freshly retaken live lock and both entered one
+               critical section (the lock serializes effects per
+               resource — 30-scheduling.md § the machine lock's scope).
+               Giving a live claim back has its own losing window (a
+               third contender's mkdir between our rename and the
+               give-back), bounded-retried; like the git ban's token
+               screen this is a tripwire-honest boundary, not a proof,
+               and the recorded growth path is a kernel-arbitrated lock
+               (flock) under the same holder protocol. *)
+            incr break_count;
+            let tombstone =
+              Printf.sprintf "%s.broke-%d-%d" effect_lock_dir (Unix.getpid ())
+                !break_count
+            in
+            (match Unix.rename effect_lock_dir tombstone with
+            | exception Unix.Unix_error (_, _, _) ->
+                (* another contender claimed the break first *)
+                acquire budget
+            | () -> (
+                let claimed =
+                  try
+                    Some
+                      (String.trim
+                         (read_file_bytes (Filename.concat tombstone "holder")))
+                  with Sys_error _ -> None
+                in
+                match Option.bind claimed holder_pid with
+                | Some pid when not (pid_alive pid) ->
+                    (* verified: the claim holds exactly the dead holder *)
+                    remove_quietly (Filename.concat tombstone "holder");
+                    (try Unix.rmdir tombstone
+                     with Unix.Unix_error (_, _, _) -> ());
+                    acquire budget
+                | _ ->
+                    (* the claim outran a live retake: give it back *)
+                    let rec give_back attempts =
+                      match Unix.rename tombstone effect_lock_dir with
+                      | () -> ()
+                      | exception Unix.Unix_error (_, _, _) ->
+                          if attempts > 0 then begin
+                            Unix.sleepf 0.01;
+                            give_back (attempts - 1)
+                          end
+                    in
+                    give_back 100;
+                    acquire budget))
         | _ ->
             if budget <= 0 then
               Error
@@ -1570,6 +1648,31 @@ let store_path_arg ~tool (grant : _ Grant.t) name input :
   else
     Error (Tool.Refused { Grant.Refusal.requested = tool ^ " " ^ rel; boundary })
 
+(* No store path may resolve through a symlink. The write_globs judgment
+   is a judgment on the path STRING; a symlinked component (creatable by
+   any granted run_command, or present in seeds) would carry an in-glob
+   address outside the shared tree — the store's bytes, and every later
+   hygiene/recovery write of the same address, landing where no grant
+   ranges (40-agents.md § tool grants: absolute paths and '..' hops are
+   unconstructible at the parse; the symlink was the third vector). Only
+   EXISTING components are judged — the components mkdirs will create are
+   real directories by construction. *)
+let symlinked_component ~repo rel =
+  let rec walk prefix = function
+    | [] -> None
+    | seg :: rest -> (
+        let here =
+          match prefix with None -> seg | Some p -> p ^ "/" ^ seg
+        in
+        match Unix.lstat (Filename.concat repo here) with
+        | { Unix.st_kind = Unix.S_LNK; _ } -> Some here
+        | _ -> walk (Some here) rest
+        | exception Unix.Unix_error (_, _, _) ->
+            (* nothing further exists: mkdirs creates real directories *)
+            None)
+  in
+  walk None (String.split_on_char '/' rel)
+
 (* Every file store lands through this one site, three obligations,
    ordered (docs/architecture/20-medium.md § event taxonomy): blob first —
    the full content into the object database at the shared tree's repo,
@@ -1585,6 +1688,22 @@ let store_file ~tool (view : Source.view) rel content :
     (Ledger.Event.kind, Tool.failure) result =
   let errored m = Error (Tool.Errored (tool ^ ": " ^ m)) in
   let target = Filename.concat view.Source.repo rel in
+  let* () =
+    match symlinked_component ~repo:view.Source.repo rel with
+    | None -> Ok ()
+    | Some link ->
+        Error
+          (Tool.Refused
+             {
+               Grant.Refusal.requested = tool ^ " " ^ rel;
+               boundary =
+                 Printf.sprintf
+                   "stores land on real paths in the shared tree; %S is a \
+                    symlink, and a store through it would land outside \
+                    every write_glob"
+                   link;
+             })
+  in
   match
     mkdirs (Filename.dirname target);
     Filename.temp_file ~temp_dir:(Filename.dirname target) ".goat-store" ".tmp"
@@ -1913,6 +2032,46 @@ let names_git command =
   in
   scan true tokens
 
+(* The effect snapshot: a [run_command] subprocess observes the whole
+   shared tree exactly like a gate, so its execution takes the gate's
+   honesty snapshot (30-scheduling.md § gates on the shared tree;
+   falsifier FL6) — every in-flight top by ANOTHER writer becomes a
+   tracked [Store_buffer] hypothesis (via the chase's registering [snoop]
+   closure, which dedupes) plus a witness triple at the uncommitted
+   coordinate, so the node's verdict is speculative evidence until every
+   observed writer lands as observed. Pre-fix the agent-granted
+   run_command read neighbors' drafts with no hypothesis and no triple:
+   the one tree-observing effect the gate law did not cover. *)
+let effect_snapshot_boundary =
+  "non-idempotent effects run on witnessed state only: the node holds \
+   undischarged hypotheses (or the shared tree holds neighbors' in-flight \
+   drafts the run would observe) — an unsquashable effect may not run \
+   under speculation; retry after the in-flight state lands"
+
+let effect_snapshot (view : Source.view) =
+  let tops =
+    List.filter
+      (fun (_, writer, _) -> not (Id.equal writer view.Source.me))
+      (view.Source.in_flight ())
+  in
+  let hypothesis_events =
+    List.concat_map
+      (fun (address, producer, content) ->
+        view.Source.snoop ~address ~producer ~content)
+      tops
+  in
+  let observed =
+    List.map
+      (fun (address, _, content) ->
+        (address, Ledger.Generation.zero, content))
+      tops
+  in
+  match observed with
+  | [] -> hypothesis_events
+  | _ :: _ ->
+      hypothesis_events
+      @ [ Ledger.Event.Load { tool = "run_command.snapshot"; observed } ]
+
 let run_command_tool ~idempotent (view : Source.view) : Tool.t =
   {
     decl =
@@ -1935,6 +2094,32 @@ let run_command_tool ~idempotent (view : Source.view) : Tool.t =
                  })
           else Ok ()
         in
+        (* The runtime edge of the speculation-indexed grant: the index
+           was fixed at dispatch, but ambient snooping (or the in-flight
+           drafts this very run would observe) makes the node speculative
+           NOW — and a non-idempotent effect is the one event class
+           squash cannot undo, so it refuses instead of running under
+           speculation (20-medium.md § event taxonomy; 40-agents.md
+           § tool grants). Idempotent effects proceed and carry the
+           snapshot like any gate. *)
+        let* () =
+          if
+            (not idempotent)
+            && (view.Source.undischarged ()
+               || List.exists
+                    (fun (_, writer, _) ->
+                      not (Id.equal writer view.Source.me))
+                    (view.Source.in_flight ()))
+          then
+            Error
+              (Tool.Refused
+                 {
+                   Grant.Refusal.requested = "run_command " ^ command;
+                   boundary = effect_snapshot_boundary;
+                 })
+          else Ok ()
+        in
+        let snapshot = if idempotent then effect_snapshot view else [] in
         let out_file = Filename.temp_file "goat-cmd-" ".txt" in
         let run () =
           Fun.protect
@@ -1964,14 +2149,15 @@ let run_command_tool ~idempotent (view : Source.view) : Tool.t =
                         ("output", `String output);
                       ]);
                 events =
-                  [
-                    Ledger.Event.Effect
-                      {
-                        tool = "run_command";
-                        resource = "machine";
-                        idempotent;
-                      };
-                  ];
+                  snapshot
+                  @ [
+                      Ledger.Event.Effect
+                        {
+                          tool = "run_command";
+                          resource = "machine";
+                          idempotent;
+                        };
+                    ];
               });
   }
 
@@ -2077,6 +2263,8 @@ let agent ~stop ~provider =
             repo = inv.Invocation.repo;
             frontier = inv.Invocation.frontier;
             snoop = inv.Invocation.snoop;
+            in_flight = inv.Invocation.in_flight;
+            undischarged = inv.Invocation.undischarged;
           }
         inv.Invocation.grant
     in

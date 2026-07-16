@@ -103,10 +103,15 @@ from the grant; an ungranted action has no entry to dispatch to, so there
 is no runtime permission check to forget. A store path outside
 `write_globs` fails the `Relpath` parse at the argument boundary and
 returns the typed in-band `Grant.Refusal` (absolute paths and `..` hops
-already unconstructible). An agent requesting an action outside its grant
-gets a typed refusal it can read, never a silent no-op — agents route
-around obstacles they can see; the refusal is the runtime *edge* of a
-boundary whose interior is compile-time.
+already unconstructible). The parse is a judgment on the path *string*,
+so the store site additionally refuses any path that resolves through a
+symlink — the third out-of-tree vector, creatable by any granted
+`run_command` or present in seeds; without the refusal an in-glob
+address would land its bytes (and every later hygiene/recovery write of
+the same address) outside the shared tree. An agent requesting an action
+outside its grant gets a typed refusal it can read, never a silent
+no-op — agents route around obstacles they can see; the refusal is the
+runtime *edge* of a boundary whose interior is compile-time.
 
 **The grant is a type indexed by speculation status, and the forbidden
 combination has no constructor**: effect-capable tools enter a grant only
@@ -115,7 +120,12 @@ speculative grant type simply lacks the case for non-idempotent effects —
 so "a speculative node ran a non-idempotent effect" is not a policy
 violation the dispatcher catches, it is a grant nobody can build
 (`20-medium.md` § event taxonomy owns the taxonomy; F12/F15 in
-`50-api.md` assert the unconstructibility).
+`50-api.md` assert the unconstructibility). The index is fixed at
+dispatch, and ambient snooping can make a committed-granted node
+speculative mid-turn — that residue is the boundary's runtime edge: the
+non-idempotent tool refuses (typed, in-band) while the node carries
+undischarged hypotheses or the tree holds in-flight neighbors its run
+would observe (`20-medium.md` § event taxonomy).
 
 A shell gate runs under the same event discipline as any effect: behind
 the mkdir-atomic, holder-named machine lock scoped to its declared

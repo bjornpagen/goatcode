@@ -478,12 +478,17 @@ let%expect_test "delivery: the invalidation and the typed drift note reach \
    so correct ambient sensing costs zero reconcile events.
 
    This re-aims the pre-flat-org "moved witness at the rejection site"
-   pair: with one tree there is no stale checkout to read — a sibling's
-   bytes are either committed-current or tracked-in-flight, so the old
-   stale-committed-read scripts are unwritable through the engine. The
-   rejection-site classification table keeps its unit coverage (the
-   exhaustive landing judgment below; test_witness law-3 drives
-   Retire.step's content-judged refusal directly). *)
+   pair's READ-time half: with one tree there is no stale checkout to
+   read — a sibling's bytes are committed-current or tracked-in-flight
+   at the moment of the read. Stale-at-RETIRE is still live: a consumer
+   whose committed read a sibling lands over during the consumer's own
+   in-flight turn arrives at Retire.step with a moved witness, and the
+   rejection site is one of the drift table's four consumers
+   (30-scheduling.md § drift routing; falsifier F8). The engine-level
+   rejection-site falsifiers live below ("the rejection site routes the
+   drift table"), on the overlap harness — the interleave needs a
+   provider turn suspended on the transport, which the rigged
+   run-to-completion scripts cannot express. *)
 
 let%expect_test "FL2 tracked arm: a tool read of a sibling's in-flight \
                  store is a tracked hypothesis that gates retirement and \
@@ -1812,5 +1817,525 @@ let%expect_test "FL6 arm B: the observed writer dies and the stale gate \
     reissued writer settled: retired
     no law consults the stale verdict at final state (it never became a committed tuple): true
     committed content is single-writer coherent: true
+    replay: coherent
+    |}]
+
+(* ================================================================== *)
+(* The overlap harness: a scripted transport plus a provider whose turn *)
+(* can PARK on the transport mid-invocation ([Fiber.http_post]).  This  *)
+(* is the window the run-to-completion rigged scripts cannot express:   *)
+(* a node that has already read (or stored) and is still in flight      *)
+(* while a sibling completes and retires.  Deterministic — submissions  *)
+(* queue, each pump delivers the oldest — and no network: the request   *)
+(* never leaves the process.                                            *)
+(* ================================================================== *)
+
+let queue_transport () =
+  let pending = ref [] in
+  let next = ref 0 in
+  {
+    Fiber.Transport.submit =
+      (fun (_ : Http.Request.t) ->
+        let token = !next in
+        incr next;
+        pending := !pending @ [ token ];
+        token);
+    poll =
+      (fun ~block:_ ->
+        match !pending with
+        | [] -> []
+        | token :: rest ->
+            pending := rest;
+            [ (token, Ok (200, "held")) ]);
+  }
+
+(* One provider step: a tool-call turn, a park on the transport (the
+   turn continues with the next step at completion delivery), or the
+   settled final text. Steps are consumed in order across turns AND
+   across reissue re-invocations of the same binding, like [R.provider]. *)
+type post_step =
+  | P_tool of string * Yojson.Safe.t
+  | P_park
+  | P_done of string
+
+let posting_provider ~script =
+  let remaining = ref script in
+  let rec turn (req : Agent.Provider.request) =
+    match !remaining with
+    | [] ->
+        Error
+          {
+            Ledger.Fault.origin = Ledger.Fault.Executor_error;
+            message = "posting script exhausted";
+          }
+    | step :: rest -> (
+        remaining := rest;
+        match step with
+        | P_park ->
+            ignore
+              (Fiber.http_post
+                 {
+                   Http.Request.headers = [];
+                   url = "rig://held";
+                   body = "";
+                   timeout_s = 1.0;
+                 });
+            turn req
+        | P_tool (name, input) ->
+            Ok
+              {
+                Agent.Provider.outcome =
+                  Agent.Provider.Calls
+                    {
+                      text = "";
+                      first = { Agent.Provider.Call.id = "c1"; name; input };
+                      rest = [];
+                    };
+                usage = Ledger.Usage.zero;
+              }
+        | P_done text ->
+            Ok
+              {
+                Agent.Provider.outcome = Agent.Provider.Settled { text };
+                usage = Ledger.Usage.zero;
+              })
+  in
+  { Agent.Provider.turn }
+
+let posting_binding ~by ~script =
+  {
+    Chase.executor = Theory.Executor.id by;
+    runtime = Agent.agent ~stop:[] ~provider:(posting_provider ~script);
+    fallback = None;
+    repair_budget = Agent.Repair_budget.v 1;
+    port = "main";
+  }
+
+let p_read path =
+  P_tool ("read_file", `Assoc [ ("path", `String path) ])
+
+let p_write path content =
+  P_tool
+    ( "write_file",
+      `Assoc [ ("path", `String path); ("content", `String content) ] )
+
+(* [Run.start]'s open path over a scripted transport (Run.config carries
+   no transport seam; the chase does). *)
+let overlap_run ~theory ~seed ~repo ~ledger_path ~executors =
+  let ledger = Ledger.create ~path:ledger_path in
+  let committed =
+    Retire.Committed.open_ ~repo ~branch:"goat-committed"
+  in
+  Retire.Frontier.materialize
+    (Retire.Frontier.of_ledger ledger ~committed)
+    ~repo;
+  let channels = Channel.open_all theory in
+  let chase =
+    Chase.create ~theory ~ledger ~committed ~channels
+      ~transport:(queue_transport ())
+      ~ports:[ Chase.Port.open_ ~name:"main" ]
+      ~executors ~backstops:Speculate.Backstops.default ~switches:[]
+      ~merges:Retire.Merge_registry.empty ~seed ()
+  in
+  Chase.run_to_quiescence chase;
+  (ledger, chase)
+
+let chase_settlement chase node =
+  List.find_map
+    (fun (n, s) -> if Id.equal n node then Some (settlement_str s) else None)
+    (Chase.settlements chase)
+  |> Option.value ~default:"unsettled"
+
+(* ================================================================== *)
+(* The rejection site routes the drift table (30-scheduling.md § drift  *)
+(* routing: the table's third consumer; § generation-witness law 3;     *)
+(* falsifier F8's engine-level rejection-site arm).  A consumer reads   *)
+(* committed state, parks mid-invocation, and a sibling lands over the  *)
+(* read address before it completes: Retire.step ships Witness_moved,   *)
+(* and the rejection site must classify the move PER CONSUMER and route *)
+(* by the table — breaking-broad (every witnessed path moved) flushes   *)
+(* the subtree; breaking-narrow (a minority moved) reissues with the    *)
+(* delta.  Swapping the flush and reissue branches at the rejection     *)
+(* site, or breaking the classifier, turns exactly these assertions     *)
+(* red.  Both arms reissue against the moved state and retire — the     *)
+(* repair is forward, bounded, and recorded.                            *)
+(* ================================================================== *)
+
+let%expect_test "the rejection site routes the drift table: broad flushes, \
+                 narrow serialize-reissues, both per consumer" =
+  let task = json_relation "task" in
+  let rb = json_relation "rb" in
+  let rn = json_relation "rn" in
+  let mv = json_relation "mv" in
+  let broad_reader = template "broad-reader" in
+  let narrow_reader = template "narrow-reader" in
+  let mover = template "rejection-mover" in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed rb;
+          Theory.Relation.Packed rn;
+          Theory.Relation.Packed mv;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"read_broad" ~for_:"task"
+            ~exists:("rb", Theory.Window.nodes 1)
+            ~by:broad_reader ();
+          Theory.Spawn.v ~name:"read_narrow" ~for_:"task"
+            ~exists:("rn", Theory.Window.nodes 1)
+            ~by:narrow_reader ();
+          Theory.Spawn.v ~name:"move" ~for_:"task"
+            ~exists:("mv", Theory.Window.nodes 1)
+            ~by:mover ();
+        ]
+  in
+  let repo, ledger_path =
+    sandbox
+      ~files:[ ("shared.txt", "base\n"); ("other.txt", "steady\n") ]
+      "goat_rejection_site_"
+  in
+  let executors =
+    [
+      (* reads ONLY the moved address: every witnessed path moved ->
+         breaking-broad -> flush the subtree *)
+      posting_binding ~by:broad_reader
+        ~script:
+          [
+            p_read "shared.txt";
+            P_park;
+            P_done {|{"msg":"b1"}|};
+            p_read "shared.txt";
+            P_done {|{"msg":"b2"}|};
+          ];
+      (* reads the moved address AND a steady one: a minority of its
+         witnessed paths moved -> breaking-narrow -> reissue with the
+         delta *)
+      posting_binding ~by:narrow_reader
+        ~script:
+          [
+            p_read "other.txt";
+            p_read "shared.txt";
+            P_park;
+            P_done {|{"msg":"n1"}|};
+            p_read "other.txt";
+            p_read "shared.txt";
+            P_done {|{"msg":"n2"}|};
+          ];
+      binding ~by:mover
+        ~script:
+          [ write_tool "shared.txt" "moved v1"; R.Reply {|{"msg":"m"}|} ];
+    ]
+  in
+  let ledger, chase =
+    overlap_run ~theory ~seed:(seed_task task) ~repo ~ledger_path ~executors
+  in
+  let events = Ledger.Replay.events ledger in
+  (match
+     ( nodes_of_stmt events "read_broad",
+       nodes_of_stmt events "read_narrow",
+       nodes_of_stmt events "move" )
+   with
+  | [ b1; b2 ], [ n1; n2 ], [ m ] ->
+      Printf.printf "mover settled: %s\n" (chase_settlement chase m);
+      Printf.printf "broad reader, first attempt: %s\n"
+        (chase_settlement chase b1);
+      List.iter
+        (fun d -> Printf.printf "broad drift note: %s\n" d)
+        (drift_notes events b1);
+      Printf.printf "broad route decision: %s\n"
+        (if List.mem "flush-subtree" (decisions events b1) then
+           "flush-subtree"
+         else if List.mem "serialize-reissue" (decisions events b1) then
+           "serialize-reissue (TABLE MISROUTED)"
+         else "none recorded");
+      Printf.printf "broad reader, reissued against the moved state: %s\n"
+        (chase_settlement chase b2);
+      Printf.printf "narrow reader, first attempt: %s\n"
+        (chase_settlement chase n1);
+      List.iter
+        (fun d -> Printf.printf "narrow drift note: %s\n" d)
+        (drift_notes events n1);
+      Printf.printf "narrow route decision: %s\n"
+        (if List.mem "serialize-reissue" (decisions events n1) then
+           "serialize-reissue"
+         else if List.mem "flush-subtree" (decisions events n1) then
+           "flush-subtree (TABLE MISROUTED)"
+         else "none recorded");
+      Printf.printf "narrow reader, reissued against the moved state: %s\n"
+        (chase_settlement chase n2)
+  | bs, ns, ms ->
+      Printf.printf "!! expected 2/2/1 attempts, saw %d/%d/%d\n"
+        (List.length bs) (List.length ns) (List.length ms));
+  Printf.printf "replay: %s\n" (replay_verdict ledger);
+  [%expect
+    {|
+    mover settled: retired
+    broad reader, first attempt: squashed(reissue-loser)
+    broad drift note: file:shared.txt: breaking_broad -> flush_subtree
+    broad route decision: flush-subtree
+    broad reader, reissued against the moved state: retired
+    narrow reader, first attempt: squashed(reissue-loser)
+    narrow drift note: file:shared.txt: breaking_narrow -> reconcile_delta
+    narrow route decision: serialize-reissue
+    narrow reader, reissued against the moved state: retired
+    replay: coherent
+    |}]
+
+(* ================================================================== *)
+(* FL6 arm B as 50-api.md specifies it: THE PRODUCER LANDS DIFFERENTLY  *)
+(* (the writer-killed variant above keeps the provenance-cascade         *)
+(* coverage).  A gate dispatches while the producer's draft-one is in    *)
+(* flight (the snapshot hypothesis); the producer then stores draft-two  *)
+(* and retires.  Two laws under test at once:                            *)
+(*                                                                       *)
+(* - no premature kill: while the producer is parked on the transport,   *)
+(*   the gate's undischarged hypothesis is NOT a stall — the refresher   *)
+(*   discharges-or-drifts at the producer's landing, no quiesce point    *)
+(*   (30-scheduling.md § gates on the shared tree); pre-fix the          *)
+(*   rejection loop squashed the gate as Dead_hypothesis with the        *)
+(*   landing one transport pump away, and the verdict was permanently    *)
+(*   lost;                                                               *)
+(* - the divergent landing routes per the table: the verdict flushes     *)
+(*   (breaking against everything the gate observed), the gate reissues, *)
+(*   and only a verdict of the landed world reaches final state.         *)
+(* ================================================================== *)
+
+let%expect_test "FL6 arm B: the producer lands differently — the stale \
+                 verdict flushes per the table and the reissued gate \
+                 judges the landed world" =
+  let task = json_relation "task" in
+  let impl = json_relation "impl" in
+  let verdict = gate_relation "verdict" in
+  let producer = template "landing-producer" in
+  let gate =
+    Theory.Executor.Shell_gate
+      {
+        name = "check";
+        command = [ "cat"; "f.txt" ];
+        resource = "_build";
+      }
+  in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed impl;
+          Theory.Relation.Packed verdict;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"produce" ~for_:"task"
+            ~exists:("impl", Theory.Window.nodes 1)
+            ~by:producer ();
+          Theory.Spawn.v ~name:"gate_check" ~for_:"task"
+            ~exists:("verdict", Theory.Window.nodes 1)
+            ~by:gate ();
+        ]
+  in
+  let repo, ledger_path = sandbox "goat_fl6_b_lands_differently_" in
+  let executors =
+    [
+      posting_binding ~by:producer
+        ~script:
+          [
+            p_write "f.txt" "draft-one";
+            P_park;
+            p_write "f.txt" "draft-two";
+            P_done {|{"msg":"built"}|};
+          ];
+      gate_binding ~by:gate;
+    ]
+  in
+  let ledger, chase =
+    overlap_run ~theory ~seed:(seed_task task) ~repo ~ledger_path ~executors
+  in
+  let events = Ledger.Replay.events ledger in
+  (match (nodes_of_stmt events "produce", nodes_of_stmt events "gate_check") with
+  | [ p_node ], [ g1; g2 ] ->
+      check "the gate's snapshot hypothesized on the in-flight draft-one"
+        (List.exists
+           (fun (_, path, source) ->
+             String.equal path "f.txt"
+             && String.equal source ("store-buffer:" ^ Id.to_string p_node))
+           (snapshot_hypotheses events g1));
+      Printf.printf "producer settled: %s\n" (chase_settlement chase p_node);
+      List.iter
+        (fun d -> Printf.printf "gate drift note: %s\n" d)
+        (drift_notes events g1);
+      Printf.printf "stale gate verdict settled: %s\n"
+        (chase_settlement chase g1);
+      Printf.printf "reissued gate settled: %s\n" (chase_settlement chase g2);
+      let verdict_outputs =
+        List.filter_map
+          (fun (tu : Retire.Committed.tuple) ->
+            if String.equal tu.Retire.Committed.relation "verdict" then
+              match tu.Retire.Committed.payload with
+              | `Assoc fields -> (
+                  match List.assoc_opt "output" fields with
+                  | Some (`String out) -> Some out
+                  | _ -> None)
+              | _ -> None
+            else None)
+          (Retire.Committed.tuples (Chase.committed chase))
+      in
+      Printf.printf
+        "final state holds one verdict, of the landed world: [%s]\n"
+        (String.concat "; " verdict_outputs)
+  | ps, gs ->
+      Printf.printf "!! expected 1 produce and 2 gate attempts, saw %d and %d\n"
+        (List.length ps) (List.length gs));
+  Printf.printf "replay: %s\n" (replay_verdict ledger);
+  [%expect
+    {|
+    the gate's snapshot hypothesized on the in-flight draft-one: true
+    producer settled: retired
+    gate drift note: file:f.txt: breaking_broad -> flush_subtree
+    stale gate verdict settled: squashed(dead-hypothesis)
+    reissued gate settled: retired
+    final state holds one verdict, of the landed world: [draft-two]
+    replay: coherent
+    |}]
+
+(* ================================================================== *)
+(* The effect-side FL6 arm (30-scheduling.md § gates on the shared      *)
+(* tree; 20-medium.md § mechanized witnesses): a template's granted      *)
+(* run_command observes the whole tree exactly like a gate, so its       *)
+(* EXECUTION takes the same honesty snapshot — every in-flight top by    *)
+(* another writer becomes a tracked store-buffer hypothesis plus a       *)
+(* witness triple at the uncommitted coordinate, minted through the      *)
+(* chase's registering snoop closure.  Pre-fix the snapshot fired only   *)
+(* for Shell_gate executors: an agent's build/test subprocess read       *)
+(* neighbors' drafts with no hypothesis and no triple, and its verdict   *)
+(* committed with no link to the writer.  The identical landing is the   *)
+(* free discharge, exactly like arm A.                                   *)
+(* ================================================================== *)
+
+let%expect_test "an agent's run_command over an in-flight draft takes the \
+                 tracked snapshot hypothesis and discharges free on the \
+                 identical landing" =
+  let task = json_relation "task" in
+  let impl = json_relation "impl" in
+  let out = json_relation "out" in
+  let producer = template "snapshot-producer" in
+  let prober =
+    Theory.Executor.Agent_template
+      {
+        name = "prober";
+        pin;
+        preamble = "prober: runs its own tests";
+        read_globs = [];
+        write_globs = [ "**" ];
+        effects =
+          [
+            Theory.Executor.Effect.Idempotent
+              { tool = "run_command"; why = "freely re-runnable test command" };
+          ];
+      }
+  in
+  let theory =
+    admit
+      ~relations:
+        [
+          Theory.Relation.Packed task;
+          Theory.Relation.Packed impl;
+          Theory.Relation.Packed out;
+        ]
+      ~statements:
+        [
+          Theory.Spawn.v ~name:"produce" ~for_:"task"
+            ~exists:("impl", Theory.Window.nodes 1)
+            ~by:producer ();
+          Theory.Spawn.v ~name:"probe" ~for_:"task"
+            ~exists:("out", Theory.Window.nodes 1)
+            ~by:prober ();
+        ]
+  in
+  let repo, ledger_path = sandbox "goat_effect_snapshot_" in
+  let executors =
+    [
+      posting_binding ~by:producer
+        ~script:
+          [
+            p_write "lib/x.ml" "let x = 1\n";
+            P_park;
+            P_done {|{"msg":"landed"}|};
+          ];
+      binding ~by:prober
+        ~script:
+          [
+            R.Call_tool
+              {
+                name = "run_command";
+                input = `Assoc [ ("command", `String "true") ];
+              };
+            R.Reply {|{"msg":"tests pass"}|};
+          ];
+    ]
+  in
+  let ledger, chase =
+    overlap_run ~theory ~seed:(seed_task task) ~repo ~ledger_path ~executors
+  in
+  let events = Ledger.Replay.events ledger in
+  (match (nodes_of_stmt events "produce", nodes_of_stmt events "probe") with
+  | [ p_node ], [ t_node ] ->
+      let taken =
+        List.find_map
+          (fun (e : Ledger.Event.t) ->
+            match e.kind with
+            | Ledger.Event.Hypothesis_taken { hypothesis; source; _ }
+              when of_node t_node e ->
+                Some (hypothesis, source)
+            | _ -> None)
+          events
+      in
+      (match taken with
+      | None -> print_endline "!! the effect took no snapshot hypothesis"
+      | Some (h, source) ->
+          check "the effect snapshot is tracked on exactly the writer"
+            (String.equal source ("store-buffer:" ^ Id.to_string p_node));
+          check
+            "the snapshot entered the observed witness at the uncommitted \
+             coordinate (run_command.snapshot @ g0)"
+            (List.exists
+               (fun (e : Ledger.Event.t) ->
+                 match e.kind with
+                 | Ledger.Event.Load
+                     { tool = "run_command.snapshot"; observed }
+                   when of_node t_node e ->
+                     List.exists
+                       (fun (a, g, _) ->
+                         Ledger.Address.equal a (Ledger.Address.File "lib/x.ml")
+                         && Ledger.Generation.equal g Ledger.Generation.zero)
+                       observed
+                 | _ -> false)
+               events);
+          check "the refresher discharged it at the producer's landing"
+            (List.exists
+               (fun (e : Ledger.Event.t) ->
+                 match e.kind with
+                 | Ledger.Event.Hypothesis_discharged { hypothesis } ->
+                     Id.equal hypothesis h
+                 | _ -> false)
+               events));
+      Printf.printf "producer settled: %s\n" (chase_settlement chase p_node);
+      Printf.printf "prober settled: %s\n" (chase_settlement chase t_node);
+      check "one prober attempt, zero reconcile"
+        (List.is_empty (drift_notes events t_node))
+  | ps, ts ->
+      Printf.printf "!! expected 1 produce and 1 probe, saw %d and %d\n"
+        (List.length ps) (List.length ts));
+  Printf.printf "replay: %s\n" (replay_verdict ledger);
+  [%expect
+    {|
+    the effect snapshot is tracked on exactly the writer: true
+    the snapshot entered the observed witness at the uncommitted coordinate (run_command.snapshot @ g0): true
+    the refresher discharged it at the producer's landing: true
+    producer settled: retired
+    prober settled: retired
+    one prober attempt, zero reconcile: true
     replay: coherent
     |}]

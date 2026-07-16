@@ -346,6 +346,20 @@ let%expect_test "row 7: bytes only an effect explains surface as the \
                 `Assoc
                   [ ("command", `String "printf 'stray bytes\\n' > stray.txt") ];
             };
+          (* A stray whose name git's newline porcelain would C-quote:
+             the sweep parses -z records, so no filename class escapes
+             it (pre-fix the quoted rendering failed Sys.file_exists and
+             the path silently dropped from the diff). *)
+          R.Call_tool
+            {
+              name = "run_command";
+              input =
+                `Assoc
+                  [
+                    ( "command",
+                      `String "printf 'spaced stray\\n' > 'stray notes.md'" );
+                  ];
+            };
           ok_reply "done";
         ]
       in
@@ -367,6 +381,8 @@ let%expect_test "row 7: bytes only an effect explains surface as the \
           Printf.printf "stray bytes stay in the tree (a witness, never \
                          deleted): %b\n"
             (Sys.file_exists (Filename.concat repo "stray.txt"));
+          Printf.printf "the space-named stray stays too: %b\n"
+            (Sys.file_exists (Filename.concat repo "stray notes.md"));
           Printf.printf "the covered sibling is committed content: %s\n"
             (match
                sh_out
@@ -382,8 +398,9 @@ let%expect_test "row 7: bytes only an effect explains surface as the \
           [%expect
             {|
             node#0: retired
-            law unexplained_bytes satisfied=false offenders=[file:stray.txt unexplained; effect window: node#0 run_command(machine)]
+            law unexplained_bytes satisfied=false offenders=[file:stray notes.md unexplained; effect window: node#0 run_command(machine); file:stray.txt unexplained; effect window: node#0 run_command(machine)]
             stray bytes stay in the tree (a witness, never deleted): true
+            the space-named stray stays too: true
             the covered sibling is committed content: "granted store\n"
             replay: coherent
             |}])
@@ -430,4 +447,178 @@ let%expect_test "row 7: a dead writer's bytes are hygiene at quiescence — \
             laws: none
             dead bytes converged away at quiescence: true
             tuples: [task/task#0]
+            |}])
+
+(* ==================================================================== *)
+(* Boot = crash recovery, the READ/JUDGE half (20-medium.md § the crash  *)
+(* story: one recovery path, no special cases; migration rows 4 and 7).  *)
+(* The convergence falsifier above pins the tree; this one pins the      *)
+(* commit point: a post-boot consumer of pre-crash committed state at a  *)
+(* nonzero generation must RETIRE.  Reads stamp the recovered coordinate *)
+(* (branch tip + invalidation-trail floor, B7), so the retire judge must *)
+(* consult the same recovered lookup — pre-fix it judged against the     *)
+(* boot-amnesiac in-memory map, every such witness came back stale with  *)
+(* zero routable moves, and the consumer squashed [Reissue_loser] after  *)
+(* the bounded reissues: recovered runs could never retire readers of    *)
+(* pre-crash committed files.                                            *)
+(* ==================================================================== *)
+
+let read_tool path =
+  R.Call_tool { name = "read_file"; input = `Assoc [ ("path", `String path) ] }
+
+let%expect_test "row 7: a post-boot consumer of pre-crash committed state \
+                 witnesses the recovered generation and retires" =
+  with_fixture (fun ~repo ~ledger_path ->
+      (* Run 1, hand-laid: f.txt lands twice, so the committed coordinate
+         is g1 and the ledger holds its Invalidation_sent.  Two throwaway
+         ids first: run 2's chase mints its own node ids from zero, and
+         one journal must never carry two nodes under one name. *)
+      let ledger = Ledger.create ~path:ledger_path in
+      let registry = Id.Registry.create () in
+      let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+      let nodes : Ledger.node Id.Minter.t =
+        Id.Minter.create ~registry ~realm:"node"
+      in
+      let _spare0 = Id.mint nodes in
+      let _spare1 = Id.mint nodes in
+      let c0 = Id.mint nodes in
+      let c1 = Id.mint nodes in
+      let retire node =
+        match
+          Retire.step ~committed ~ledger ~registry
+            ~merges:Retire.Merge_registry.empty ~node
+            ~witness:(Witness.observed ledger ~node)
+            ~heads:[]
+        with
+        | Ok () -> "ok"
+        | Error _ -> "rejected"
+      in
+      store ~ledger ~repo ~node:c0 "f.txt" "v1\n";
+      Printf.printf "run 1 first landing: %s\n" (retire c0);
+      ignore
+        (Ledger.append ledger ~node:c1
+           (Ledger.Event.Load
+              {
+                tool = "read_file";
+                observed =
+                  [
+                    ( Ledger.Address.File "f.txt",
+                      Ledger.Generation.zero,
+                      Ledger.Content_hash.of_string "v1\n" );
+                  ];
+              })
+          : Ledger.Event.t);
+      store ~ledger ~repo ~node:c1 "f.txt" "v2\n";
+      Printf.printf "run 1 second landing: %s\n" (retire c1);
+      (* THE CRASH.  Run 2 is the ordinary open path over the same
+         journal, with a consumer that reads the pre-crash committed
+         file. *)
+      let script = [ read_tool "f.txt"; ok_reply "post-boot" ] in
+      let config =
+        config ~repo ~ledger_path ~executors:[ binding ~effects:[] script ]
+      in
+      match
+        Run.exec ~theory:(theory ~effects:[]) ~seed:[ task_seed "t-boot" ]
+          ~config
+      with
+      | Error _ -> print_endline "unexpected host misuse"
+      | Ok settled ->
+          let events = Ledger.Replay.events settled.Run.ledger in
+          let consumer =
+            List.find_map
+              (fun (e : Ledger.Event.t) ->
+                match e.kind with
+                | Ledger.Event.Fired _ -> e.node
+                | _ -> None)
+              events
+          in
+          (match consumer with
+          | None -> print_endline "!! no post-boot node fired"
+          | Some n ->
+              List.iter
+                (fun (e : Ledger.Event.t) ->
+                  match (e.node, e.kind) with
+                  | Some m, Ledger.Event.Load { tool = "read_file"; observed }
+                    when Id.equal m n ->
+                      List.iter
+                        (fun (a, g, _) ->
+                          Format.printf
+                            "post-boot read witnessed %a @@ %a@." 
+                            Ledger.Address.pp a Ledger.Generation.pp g)
+                        observed
+                  | _ -> ())
+                events;
+              Printf.printf "post-boot consumer settled: %s\n"
+                (match
+                   List.find_map
+                     (fun (m, (r : Run.node_report)) ->
+                       if Id.equal m n then Some r.Run.settlement else None)
+                     settled.Run.nodes
+                 with
+                | Some Ledger.Settlement.Retired -> "retired"
+                | Some (Ledger.Settlement.Squashed _) ->
+                    "squashed (RECOVERY BROKE THE JUDGE)"
+                | Some (Ledger.Settlement.Faulted _) -> "faulted"
+                | None -> "unsettled"));
+          Printf.printf "replay: %s\n"
+            (match Run.replay settled.ledger with
+            | Ok () -> "coherent"
+            | Error ds -> Printf.sprintf "%d divergences" (List.length ds));
+          [%expect
+            {|
+            run 1 first landing: ok
+            run 1 second landing: ok
+            post-boot read witnessed file:f.txt @ g1
+            post-boot consumer settled: retired
+            replay: coherent
+            |}])
+
+(* ==================================================================== *)
+(* The sweep vs the witness (20-medium.md § the escape surfaces): effect *)
+(* residue stays in the tree — the witness the declaration must grow to  *)
+(* cover, never deleted — EVEN at a path some dead store once named.     *)
+(* Pre-fix materialize's universe was every store-named path, so the     *)
+(* same quiescence pass that surfaced the offender destroyed it (top     *)
+(* Absent -> the file was removed).  The stray-path arm above is the     *)
+(* disjoint control; this arm makes the store universe and the residue   *)
+(* overlap.                                                              *)
+(* ==================================================================== *)
+
+let%expect_test "row 7: effect residue at a store-named path survives the \
+                 quiescence sweep and is surfaced, not destroyed" =
+  with_fixture (fun ~repo ~ledger_path ->
+      let effects = [ run_command_effect ] in
+      let script =
+        [
+          (* the store names gen.txt, then the effect strays over it,
+             then the node dies: the store is provenance-dead (top
+             Absent) while the on-disk bytes are the effect's *)
+          write_tool "gen.txt" "store draft\n";
+          R.Call_tool
+            {
+              name = "run_command";
+              input =
+                `Assoc
+                  [ ("command", `String "printf 'effect bytes\\n' > gen.txt") ];
+            };
+          R.Fault "injected";
+        ]
+      in
+      let config =
+        config ~repo ~ledger_path ~executors:[ binding ~effects script ]
+      in
+      match
+        Run.exec ~theory:(theory ~effects) ~seed:[ task_seed "t1" ] ~config
+      with
+      | Error _ -> print_endline "unexpected host misuse"
+      | Ok settled ->
+          print_laws settled.laws;
+          Printf.printf "effect residue survives at the store-named path: %s\n"
+            (if Sys.file_exists (Filename.concat repo "gen.txt") then
+               Printf.sprintf "%S" (read_file (Filename.concat repo "gen.txt"))
+             else "<destroyed>");
+          [%expect
+            {|
+            law unexplained_bytes satisfied=false offenders=[file:gen.txt unexplained; effect window: node#0 run_command(machine)]
+            effect residue survives at the store-named path: "effect bytes\n"
             |}])

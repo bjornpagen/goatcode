@@ -214,6 +214,33 @@ module Invocation : sig
             falsifier FL2). The chase supplies the registering closure;
             direct callers outside any engine supply
             [fun ~address:_ ~producer:_ ~content:_ -> []]. *)
+    in_flight :
+      unit ->
+      (Ledger.Address.t * Ledger.node Id.t * Ledger.Content_hash.t) list;
+        (** Every address whose frontier top is in flight, with its
+            writer and uncommitted content — the effect snapshot's
+            universe. A [run_command] subprocess observes the whole
+            shared tree exactly like a gate, so its execution takes the
+            same honesty snapshot gate dispatch takes: each in-flight
+            top (another writer's) becomes a tracked [Store_buffer]
+            hypothesis via [snoop] plus a witness triple at the
+            uncommitted coordinate, and the node's verdict is
+            speculative evidence until every observed writer lands as
+            observed (docs/architecture/30-scheduling.md § gates on the
+            shared tree; falsifier FL6). The chase supplies
+            [Retire.Frontier.in_flight_tops]; direct callers outside any
+            engine supply [fun () -> []]. *)
+    undischarged : unit -> bool;
+        (** The node currently carries undischarged hypotheses. The
+            grant's speculation index is fixed at dispatch, but ambient
+            snooping can make a committed-granted node speculative
+            mid-turn — this closure is the runtime edge of that boundary:
+            a non-idempotent effect tool refuses (typed, in-band) while
+            it answers [true], because effects are the one event class
+            squash cannot undo (docs/architecture/20-medium.md § event
+            taxonomy; docs/architecture/40-agents.md § tool grants). The
+            chase supplies the live tracker lookup; direct callers
+            outside any engine supply [fun () -> false]. *)
     gate_resource : string option;
         (** The declared build-artifact resource a shell-gate run's
             effect lock scopes to — [Some] exactly for gate dispatches,

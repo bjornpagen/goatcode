@@ -140,9 +140,9 @@ to forget:
 | tool | class | notes |
 |---|---|---|
 | `read_file` | load | resolves through the frontier over the one shared tree; a read of an in-flight top witnesses at the producer's uncommitted generation |
-| `glob_list`, `grep` | load | same three-place resolution; every match enters the observed witness with its content hash |
+| `glob_list`, `grep` | load | same three-place resolution; a match whose committed state is Landed enters the observed witness at the committed (generation, content) — in-flight and never-committed matches contribute no triple (existence-of-uncommitted is not a witnessable claim in v0) |
 | `write_file`, `str_replace_edit` | store | land in the shared tree within granted write globs, bytes content-addressed into git's object database first — retirement commits from those blobs |
-| `run_command` | effect | exists only when the template declares it: an idempotence argument makes it grantable under speculation; without one it reaches only hypothesis-free dispatches — the forbidden combination has no constructor. Machine-locked; git in command position is a typed refusal (the harness owns the commit substrate) |
+| `run_command` | effect | exists only when the template declares it: an idempotence argument makes it grantable under speculation; without one it reaches only hypothesis-free dispatches — the forbidden combination has no constructor, and a node made speculative mid-turn hits the runtime edge (the non-idempotent tool refuses in-band). Execution takes the gate's honesty snapshot: every in-flight top becomes a tracked hypothesis. Machine-locked; git in command position is a typed refusal (the harness owns the commit substrate) |
 
 Prompts are assembled, never authored per node: template preamble (the one
 hand-written artifact — stance and method, never shape), contract section
@@ -206,10 +206,13 @@ branch, never by exit codes alone.
 
 ## Validation
 
-- **Falsifiers, not tests**: the suite (F1–F17, FB1–FB7, FM1–FM4) drives
-  rigged provider lanes at engine laws and tries to kill them — repair-lane
-  boundedness, effect gating under speculation, squash precision, the git
-  ban, delivery filtering. No live model call anywhere in CI.
+- **Falsifiers, not tests**: the suite (F1–F17, FL1–FL7, FB1–FB7,
+  FM1–FM4) drives rigged provider lanes at engine laws and tries to kill
+  them — repair-lane boundedness, effect gating under speculation, squash
+  precision, the git ban, delivery filtering, and the flat-org roster
+  (squash-revert counterfactual, dead-witness refusal, frontier
+  liveness, generation monotonicity, clobber conviction, gate-hypothesis
+  discharge, torn-read impossibility). No live model call anywhere in CI.
 - **Negative compiles**: the forbidden states are unconstructible, and
   probes assert it — an unadmitted theory reaching the engine, a
   non-idempotent effect in a speculative grant, a wrongly-typed channel end.

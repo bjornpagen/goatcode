@@ -632,8 +632,12 @@ let footprint_escapes t (inst : instance) =
              in-flight top the snapshot witnessed is in-footprint by
              construction, and there is no finer declaration for the
              author to grow (30-scheduling.md § gates on the shared
-             tree). *)
-          | Some _, Ledger.Event.Load { tool = "chase.gate-snapshot"; _ } ->
+             tree). The run_command effect snapshot is the same
+             conservative charge at effect-execution time. *)
+          | ( Some _,
+              Ledger.Event.Load
+                { tool = "chase.gate-snapshot" | "run_command.snapshot"; _ } )
+            ->
               escapes
           | Some n, Ledger.Event.Load { tool; observed }
             when Id.equal n inst.node ->
@@ -788,6 +792,31 @@ let invoke_lane :
         Agent.Prompt.assemble ~preamble ~schema
           ~operands:(operands_text inst.consumed) ~hypotheses:hyps ~grant
       in
+      (* One frontier derivation per ledger state, not per lookup.
+         Settlements move tops, and every settlement (like every event)
+         is a ledger append — so the append count is exactly the
+         freshness key: within one tool call nothing appends and every
+         lookup shares one derivation; across turns any append
+         re-derives. Per-lookup re-derivation replayed the whole event
+         list plus one git subprocess per live draft for EVERY matched
+         file of a glob or grep — wall clock burned on the single
+         blocking domain, against the constitutional objective
+         (30-scheduling.md § the objective; retire.mli § Frontier:
+         re-derive after settlements, never per lookup). *)
+      let derived_frontier =
+        let memo = ref None in
+        fun () ->
+          let key = List.length (Ledger.Replay.events t.ledger) in
+          match !memo with
+          | Some (k, frontier) when k = key -> frontier
+          | Some _ | None ->
+              let frontier =
+                Retire.Frontier.of_ledger t.ledger
+                  ~committed:t.committed_state
+              in
+              memo := Some (key, frontier);
+              frontier
+      in
       let invocation =
         {
           Agent.Invocation.prompt;
@@ -799,17 +828,12 @@ let invoke_lane :
              § Invocation). *)
           repo = Retire.Committed.root t.committed_state;
           (* The resolver consults the frontier — files join the
-             vocabulary the chase already speaks for tuples: a fresh
-             derivation per lookup, since settlements move tops
+             vocabulary the chase already speaks for tuples
              (20-medium.md § store-to-load forwarding; retire.mli
              § Frontier). Tool loads of committed tops witness the real
              committed generation (B7). *)
           frontier =
-            (fun address ->
-              Retire.Frontier.top
-                (Retire.Frontier.of_ledger t.ledger
-                   ~committed:t.committed_state)
-                address);
+            (fun address -> Retire.Frontier.top (derived_frontier ()) address);
           (* A read served from another node's in-flight store is a
              tracked store-buffer hypothesis on exactly that writer — the
              tracker, not any mount, is what makes ambient sensing honest
@@ -853,6 +877,30 @@ let invoke_lane :
                     };
                 ]
               end);
+          (* The effect snapshot's universe: every in-flight top, from
+             the same memoized derivation the resolver reads. A
+             run_command observes the whole tree exactly like a gate, so
+             its execution charges the node with every in-flight address
+             it could see — through the SAME registering snoop closure,
+             so the hypotheses are tracked, deduped, and block
+             retirement like any snoop's (30-scheduling.md § gates on
+             the shared tree; falsifier FL6). *)
+          in_flight =
+            (fun () ->
+              List.map
+                (fun (address, (d : Retire.Frontier.in_flight)) ->
+                  (address, d.Retire.Frontier.writer, d.Retire.Frontier.content))
+                (Retire.Frontier.in_flight_tops (derived_frontier ())));
+          (* The live undischarged lookup — the runtime edge of the
+             speculation-indexed grant: a committed-granted node that
+             snooped mid-turn is speculative NOW, and its non-idempotent
+             effects refuse (20-medium.md § event taxonomy). *)
+          undischarged =
+            (fun () ->
+              List.exists
+                (fun ((h : Speculate.Hypothesis.t), _) ->
+                  Id.equal h.Speculate.Hypothesis.consumer inst.node)
+                t.undischarged);
           (* The gate's effect-lock scope, threaded from the declaration
              (30-scheduling.md § gates on the shared tree: the lock
              serializes gates per build-artifact resource). *)
@@ -1843,12 +1891,26 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
             ~reason:"undischarged-hypotheses signal carried no hypotheses"
             ~cause:Ledger.Squash_cause.Operator_abort ~count:0 ~refire:false;
           true
+      | h :: _ when not (Fiber.quiescent t.sched) ->
+          (* NOT a stall: transfers are in flight, and the hypothesis's
+             producer may be parked on one — its landing is exactly what
+             the refresher discharges-or-drifts this hypothesis with, so
+             the stall verdict is unearned. Refuse to route (the step
+             loop falls through to [pump_transport], which delivers the
+             pending completions) instead of squashing live work as
+             [Dead_hypothesis]: the discharge happens at the producer's
+             landing, no quiesce point, no premature kill
+             (30-scheduling.md § gates on the shared tree; falsifier
+             FL6 arm B). The stall route below fires only once the
+             transport is drained. *)
+          ignore (h : Ledger.hypothesis Id.t);
+          false
       | h :: _ ->
-          (* Reached only at stall: nothing can fire or dispatch, so the
-             hypothesis's producer can never land — the hypothesis is dead
-             and exactly its derivation subtree squashes: the settlement
-             append, nothing filesystem-shaped (dead tree bytes are
-             hygiene's). *)
+          (* Reached only at stall: nothing can fire, dispatch, or land
+             off the transport, so the hypothesis's producer can never
+             land — the hypothesis is dead and exactly its derivation
+             subtree squashes: the settlement append, nothing
+             filesystem-shaped (dead tree bytes are hygiene's). *)
           let cause = Ledger.Squash_cause.Dead_hypothesis h in
           decide t ~node:c.inst.node Ledger.Decision.Flush_subtree
             ~reason:"undischarged hypothesis has no remaining producer"
@@ -1894,12 +1956,22 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
           classified
       in
       let reason =
-        "witness moved: "
-        ^ String.concat ", "
-            (List.map
-               (fun (m : Retire.generation_moved) ->
-                 Ledger.Address.to_string m.address)
-               moves)
+        match moves with
+        | [] ->
+            (* every stale's current state is Absent or an unrecoverable
+               deletion: no generation to have moved to, no delta to
+               pull — dead or never-landed state refused by the
+               content-judged witness (the typed per-address evidence
+               for this arm is a recorded OPEN item,
+               30-scheduling.md) *)
+            "witness moved: no live coordinate (dead or never-landed state)"
+        | _ :: _ ->
+            "witness moved: "
+            ^ String.concat ", "
+                (List.map
+                   (fun (m : Retire.generation_moved) ->
+                     Ledger.Address.to_string m.address)
+                   moves)
       in
       if flush then
         reissue_or_stop t c ~action:Ledger.Decision.Flush_subtree
@@ -2266,7 +2338,23 @@ let unexplained_bytes_verdict t =
     Retire.Frontier.of_ledger t.ledger ~committed:t.committed_state
   in
   let stray = Retire.Frontier.unexplained frontier ~repo in
-  Retire.Frontier.materialize frontier ~repo;
+  (* Effect residue is the witness the declaration must grow to cover —
+     surfaced, never deleted — so when the run holds any effect event the
+     offenders are exempted from the convergence, even at paths some
+     store event once named (materialize's universe is store-named
+     paths). An effect-free run has no residue to attribute: what the
+     diff caught is tamper/torn garbage, and the sweep repairs it. *)
+  let effects_ran =
+    List.exists
+      (fun (e : Ledger.Event.t) ->
+        match e.Ledger.Event.kind with
+        | Ledger.Event.Effect _ -> true
+        | _ -> false)
+      (Ledger.Replay.events t.ledger)
+  in
+  Retire.Frontier.materialize
+    ~keep:(if effects_ran then stray else [])
+    frontier ~repo;
   match stray with
   | [] -> []
   | stray ->

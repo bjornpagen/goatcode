@@ -117,7 +117,7 @@ module Frontier : sig
       the uncommitted coordinate (docs/architecture/30-scheduling.md
       § gates on the shared tree; falsifier FL6). *)
 
-  val materialize : t -> repo:string -> unit
+  val materialize : ?keep:string list -> t -> repo:string -> unit
   (** Converge the tree to the frontier: write each address's live top,
       delete files whose top is [Absent] or [Deleted]. Idempotent;
       appends nothing; moves no coordinate. Checkout semantics — it runs
@@ -125,7 +125,11 @@ module Frontier : sig
       ({!Chase.judge}'s sweep), and never on any per-node path
       (docs/architecture/20-medium.md § squash without isolation:
       overwrite-on-reissue primary, lazy convergence backstop; § the
-      crash story). *)
+      crash story). [keep] (default none) exempts paths: the quiescence
+      sweep passes its {!unexplained} offenders so effect residue — the
+      witness the declaration must grow to cover — survives the pass
+      even at a path some store event once named (§ the escape
+      surfaces). *)
 
   val unexplained : t -> repo:string -> string list
   (** The unexplained-bytes diff — the flat org's second escape surface

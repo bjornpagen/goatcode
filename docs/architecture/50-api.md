@@ -407,7 +407,11 @@ doc:
   hypothesis discharges silently, the verdict retires with zero reconcile
   events (the gate-shaped F7). Arm B: the producer lands differently — the
   verdict is squashed or reissued per the table, and no law consults the
-  stale verdict at final state.
+  stale verdict at final state; the writer-killed variant beside it pins
+  the provenance cascade. The effect-side arm re-aims both at the
+  tree-observing subprocess the gate law also binds: an agent's granted
+  `run_command` takes the same snapshot at execution
+  (`30-scheduling.md` § gates on the shared tree).
 - **FL7 — torn-read impossibility.** A rigged gate subprocess reads the
   target path in a tight loop while stores land through the tool path;
   assert every observed read is a whole former-or-latter content, never an
@@ -500,6 +504,16 @@ promissory notes made auditable.
 ## OPEN items
 
 - **Config defaulting.** Which config fields get defaults vs stay required.
+- **The CLI has no falsifier.** § the CLI's laws — the retired
+  `worktree_root` key refused by name, the typed bind-time complaints,
+  the fresh-ledger refusal — are held by code review alone:
+  `Config_file` is private to `bin/main.ml`, no dune rule invokes the
+  `goat` binary, and the falsifier discipline's "a named test that tries
+  to kill it" does not yet reach this surface. A regression to silently
+  ignoring `worktree_root` would keep the suite green. *Trigger: the
+  first CLI-surface regression, or the config parser's next refactor —
+  whichever lands first extracts the parser where a falsifier can reach
+  it.*
 - **Streaming report surface.** `scoreboard` polls; a push surface (SSE or
   a TUI) is presentation-layer and waits for a consumer. *Trigger: the
   first operator who runs a >30-minute pipeline and asks for a progress

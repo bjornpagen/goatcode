@@ -108,7 +108,13 @@ Every tool call classifies as exactly one of:
   **cannot contain** a non-idempotent effect tool: the grant type is indexed
   by speculation status and has no constructor for that combination
   (`40-agents.md` § tool grants) — the forbidden grant is unrepresentable,
-  not refused at dispatch. This asymmetry is the honest price of
+  not refused at dispatch. The grant index is fixed at dispatch, and the
+  flat org's ambient snooping can make a committed-granted node
+  speculative **mid-turn** — that residue of the guarantee is a runtime
+  edge, stated honestly: a non-idempotent effect tool refuses (typed,
+  in-band) while the node carries undischarged hypotheses or the tree
+  holds in-flight neighbors its run would observe, exactly as an
+  out-of-grant store refuses. This asymmetry is the honest price of
   speculation, stated once.
 
 **The blob store is git's object database.** Every store tool writes its
@@ -473,9 +479,14 @@ Two escape classes, two mechanisms:
   ledger window covers them and surfaced exactly like footprint escapes —
   a violated `unexplained_bytes` verdict on the settled map, path and
   effect candidates named, never a fault; the stray bytes stay in the
-  tree, a witness the declaration must grow to cover. Dead store residue
-  is not an escape: it is the hygiene class, converged by the same pass's
-  materialization (§ squash without isolation).
+  tree, a witness the declaration must grow to cover — the sweep's
+  materialization exempts the offenders, even at paths some dead store
+  once named, so surfacing a witness never destroys it. Dead store
+  residue is not an escape: it is the hygiene class, converged by the
+  same pass's materialization (§ squash without isolation). In a run
+  that appended no effect event there is no declaration to grow and no
+  candidate to name: unexplained bytes there are tamper, and the sweep
+  repairs them.
 
 ## Store-to-load forwarding: ambient sensing
 
@@ -618,6 +629,16 @@ update-flooding floods a bus.
   whether long runs want a mid-run sweep (port-idle moments) is unmeasured.
   *Trigger: FL-suite or live evidence of agents reading dead bytes in the
   squash-to-reissue window.*
+- **Cache-miss reads.** The read resolver's existence judgment is still a
+  filesystem fact: a committed-`Landed` address whose cache bytes were
+  removed mid-run (an effect's `rm`, an external process) reads as
+  `Missing` — no triple recorded, no refill from the blob the coordinate
+  names — and `Frontier.unexplained` filters through `Sys.file_exists`,
+  so the deletion never surfaces. The fix shape is serving the miss from
+  the committed coordinate (the cache refill the frontier already knows
+  how to do) and witnessing it. *Trigger: the first live trace of a
+  consumer proceeding on "no such file" for an address whose frontier
+  top is Landed.*
 - **File-grain gate footprints** — owned with gates (`30-scheduling.md`
   § gates on the shared tree).
 - **Cross-machine ledger.** Single-writer append-only file in v0. *Trigger:

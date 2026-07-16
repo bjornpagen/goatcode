@@ -500,7 +500,12 @@ hypothesis on that writer (source and content hash) and a witness triple
 at the uncommitted coordinate. v0's footprint grain is the gate's whole
 grant — conservative: a gate is charged with having read every in-flight
 address it *could* see (the OPEN item below records the file-level tracing
-upgrade).
+upgrade). The law binds every tree-observing subprocess, not the
+`Shell_gate` executor class: an agent template's granted `run_command`
+takes the same snapshot at effect execution (each in-flight top a tracked
+hypothesis plus the g0 witness triple, discharged-or-drifted at the
+writer's landing), so a "tests pass" verdict built over a neighbor's
+draft is speculative evidence there too.
 
 **Decision — gates run optimistically and discharge like any hypothesis;
 no quiesce point.** A gate verdict is **speculative evidence** while its
@@ -622,3 +627,21 @@ anyway.
   commit trailers / notes on the one ref for human archaeology.
   *Trigger: the first post-mortem that had to correlate ledger and git by
   hand.*
+- **`Address.Resource` is a dead constructor.** The effect lock and the
+  `Effect` event carry raw resource strings; nothing mints the typed
+  address, so it never appears in a footprint, a conflict intersection,
+  or a subscription row — five match sites carry it as dead arms while
+  § the machine lock's scope names it normatively. Either route effect
+  footprints through the typed address or delete the constructor and
+  amend that section (doc rule 2/8). *Trigger: the first effect-footprint
+  consumer beyond the diagnostic string — subscription rows or conflict
+  intersection over resources.*
+- **Typed evidence for dead-state rejections.** `Witness_moved` carries
+  law 3's `Generation_moved` list, but a stale whose current committed
+  state is Absent (a dead fresh file, refused by the content-judged
+  backstop) has no generation to have moved to and no delta to pull, so
+  the rejection ships with zero moves and the drift-route audit has
+  nothing per-address to re-judge; the scheduler records a named reason
+  in its decision instead. The upgrade is a typed dead-state arm beside
+  `Generation_moved`. *Trigger: the first post-mortem that needed the
+  per-address evidence for a zero-move rejection.*

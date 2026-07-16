@@ -121,8 +121,9 @@ let speculative_grant : Agent.Grant.speculative Agent.Grant.t =
    tool-free lanes; tool-driving tests pass their fixture repo. *)
 let invocation ?(repo = ".") ?gate_resource
     ?(frontier =
-      fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent) grant
-    =
+      fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent)
+    ?(snoop = fun ~address:_ ~producer:_ ~content:_ -> [])
+    ?(in_flight = fun () -> []) ?(undischarged = fun () -> false) grant =
   {
     Agent.Invocation.prompt =
       Agent.Prompt.assemble ~preamble:"You judge findings." ~schema:wire_schema
@@ -132,7 +133,9 @@ let invocation ?(repo = ".") ?gate_resource
     pin;
     repo;
     frontier;
-    snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
+    snoop;
+    in_flight;
+    undischarged;
     gate_resource;
   }
 
@@ -1394,6 +1397,8 @@ let%expect_test "anthropic sends no structured-output format; openai \
       frontier =
         (fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent);
       snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
+      in_flight = (fun () -> []);
+      undischarged = (fun () -> false);
       gate_resource = None;
     }
   in
@@ -1548,11 +1553,23 @@ let%expect_test "a dead-pid effect lock is stale: removed, warned once, \
   | Ok _ -> print_endline "refusal outcome"
   | Error f -> Printf.printf "fault: %s\n" f.Ledger.Fault.message);
   Printf.printf "lock released: %b\n" (not (Sys.file_exists lock_dir));
+  (* The break is a CLAIM: the stale directory is renamed to a tombstone
+     (atomic — exactly one contender can win it, so a second breaker can
+     never destroy the winner's freshly retaken live lock) and the
+     tombstone is verified and removed; none may linger. *)
+  Printf.printf "no break tombstone left behind: %b\n"
+    (Array.for_all
+       (fun entry ->
+         not
+           (String.starts_with
+              ~prefix:"goatcode-effect-stale-scope.lock.broke-" entry))
+       (Sys.readdir (Filename.get_temp_dir_name ())));
   [%expect
     {|
     goatcode: effect lock holder is not running (crashed-run pid=4194304); removing the stale lock
     head tuple: {"exit_status":0,"output":"gate-after-stale"}
     lock released: true
+    no break tombstone left behind: true
     |}]
 
 (* ------------------------------------------------------------------ *)
@@ -1811,4 +1828,258 @@ let%expect_test "FL7: torn-read impossibility — an out-of-domain reader \
     every event oid materializes whole stored bytes: true
     both contents live in the object store: true
     tmp litter in the shared tree after stores: 0
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* The speculation index's RUNTIME edge (20-medium.md § event taxonomy;
+   40-agents.md § tool grants; F12's dynamic half). The grant index is
+   fixed at dispatch, but ambient snooping mints hypotheses mid-turn —
+   so a committed-granted node can become speculative AFTER its toolset
+   was derived, and a non-idempotent effect (the one event class squash
+   cannot undo) must refuse rather than run under that speculation.
+   And a run_command observes the whole shared tree exactly like a
+   gate, so an idempotent one takes the gate's honesty snapshot at
+   execution: every in-flight top by another writer becomes a tracked
+   store-buffer hypothesis plus a witness triple at the uncommitted
+   coordinate (30-scheduling.md § gates on the shared tree; FL6's
+   effect-side arm). *)
+
+let%expect_test "runtime edge of the speculation index: non-idempotent \
+                 run_command refuses under speculation; idempotent \
+                 run_command takes the effect snapshot" =
+  let result_probe () =
+    (* one tool call, then the tool result handed back as final text:
+       the refusal the agent READS is the asserted value *)
+    let step = ref 0 in
+    let turn (req : Agent.Provider.request) =
+      incr step;
+      if !step = 1 then
+        Ok
+          {
+            Agent.Provider.outcome =
+              Agent.Provider.Calls
+                {
+                  text = "";
+                  first =
+                    {
+                      Agent.Provider.Call.id = "c1";
+                      name = "run_command";
+                      input = `Assoc [ ("command", `String "true") ];
+                    };
+                  rest = [];
+                };
+            usage = Ledger.Usage.zero;
+          }
+      else
+        let text =
+          List.concat_map
+            (function
+              | Agent.Provider.Message.Tool_results rs ->
+                  List.map
+                    (fun (r : Agent.Provider.Tool_result.t) ->
+                      (if r.is_error then "ERR " else "OK ") ^ r.output)
+                    rs
+              | _ -> [])
+            req.Agent.Provider.messages
+          |> String.concat "\n"
+        in
+        Ok
+          {
+            Agent.Provider.outcome = Agent.Provider.Settled { text };
+            usage = Ledger.Usage.zero;
+          }
+    in
+    { Agent.Provider.turn }
+  in
+  let nonidem_grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [ "**" ];
+      write_globs = [];
+      shell_gates = [];
+      effects = [ Agent.Grant.Effect_tool.non_idempotent ~name:"run_command" ];
+    }
+  in
+  let idem_grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [ "**" ];
+      write_globs = [];
+      shell_gates = [];
+      effects =
+        [
+          Agent.Grant.Effect_tool.idempotent ~name:"run_command"
+            (Agent.Grant.Idempotence.declare ~tool:"run_command"
+               ~why:"test lane");
+        ];
+    }
+  in
+  let drive label grant ~in_flight ~undischarged =
+    let e = env () in
+    let writer = Id.mint (Id.Minter.create ~registry:e.registry ~realm:"node") in
+    let hyp_minter : Ledger.hypothesis Id.Minter.t =
+      Id.Minter.create ~registry:e.registry ~realm:"hypothesis"
+    in
+    let draft = Ledger.Content_hash.of_string "neighbor draft\n" in
+    let tops =
+      match in_flight with
+      | `Neighbor -> [ (Ledger.Address.File "lib/x.ml", writer, draft) ]
+      | `Own_draft -> [ (Ledger.Address.File "lib/x.ml", e.node, draft) ]
+      | `None -> []
+    in
+    (* The registering snoop, as the chase supplies it: a tracked
+       Hypothesis_taken riding the tool outcome. *)
+    let snoop ~address ~producer ~content =
+      [
+        Ledger.Event.Hypothesis_taken
+          {
+            hypothesis = Id.mint hyp_minter;
+            address;
+            source = "store-buffer:" ^ Id.to_string producer;
+            content;
+            confidence = 0.93;
+          };
+      ]
+    in
+    let exec = Agent.agent ~stop:[] ~provider:(result_probe ()) in
+    (match
+       exec.Agent.Executor.run
+         (invocation ~snoop
+            ~in_flight:(fun () -> tops)
+            ~undischarged:(fun () -> undischarged)
+            grant)
+         ~ledger:e.ledger ~node:e.node
+         ~on_yield:(fun () -> [])
+     with
+    | Ok { Agent.Executor.outcome = Agent.Executor.Text t; _ } ->
+        let refused =
+          String.length t >= 4 && String.equal (String.sub t 0 4) "ERR "
+        in
+        Printf.printf "%-36s -> %s (speculation boundary named: %b)\n" label
+          (if refused then "refused in-band" else "ran")
+          (contains t "non-idempotent effects run on witnessed state only")
+    | Ok _ -> Printf.printf "%-36s -> refusal outcome\n" label
+    | Error f ->
+        Printf.printf "%-36s -> fault: %s\n" label f.Ledger.Fault.message);
+    let count pred =
+      List.length
+        (List.filter
+           (fun (ev : Ledger.Event.t) -> pred ev.Ledger.Event.kind)
+           (Ledger.Replay.events e.ledger))
+    in
+    Printf.printf
+      "  effects: %d; tracked snapshot hypotheses: %d; snapshot witness \
+       loads: %d\n"
+      (count (function Ledger.Event.Effect _ -> true | _ -> false))
+      (count (function Ledger.Event.Hypothesis_taken _ -> true | _ -> false))
+      (count (function
+        | Ledger.Event.Load { tool = "run_command.snapshot"; _ } -> true
+        | _ -> false))
+  in
+  drive "non-idem, neighbor draft in flight" nonidem_grant ~in_flight:`Neighbor
+    ~undischarged:false;
+  drive "non-idem, snooped mid-turn" nonidem_grant ~in_flight:`None
+    ~undischarged:true;
+  drive "non-idem, witnessed state" nonidem_grant ~in_flight:`None
+    ~undischarged:false;
+  drive "idempotent, neighbor draft in flight" idem_grant ~in_flight:`Neighbor
+    ~undischarged:false;
+  drive "idempotent, own draft only" idem_grant ~in_flight:`Own_draft
+    ~undischarged:false;
+  [%expect
+    {|
+    non-idem, neighbor draft in flight   -> refused in-band (speculation boundary named: true)
+      effects: 0; tracked snapshot hypotheses: 0; snapshot witness loads: 0
+    non-idem, snooped mid-turn           -> refused in-band (speculation boundary named: true)
+      effects: 0; tracked snapshot hypotheses: 0; snapshot witness loads: 0
+    non-idem, witnessed state            -> ran (speculation boundary named: false)
+      effects: 1; tracked snapshot hypotheses: 0; snapshot witness loads: 0
+    idempotent, neighbor draft in flight -> ran (speculation boundary named: false)
+      effects: 1; tracked snapshot hypotheses: 1; snapshot witness loads: 1
+    idempotent, own draft only           -> ran (speculation boundary named: false)
+      effects: 1; tracked snapshot hypotheses: 0; snapshot witness loads: 0
+    |}]
+
+(* ------------------------------------------------------------------ *)
+(* The store boundary is symlink-proof (40-agents.md § tool grants).
+   write_globs is a judgment on the path STRING; a symlinked component —
+   creatable by any granted run_command, or present in seeds — would
+   carry an in-glob address outside the shared tree, and every later
+   hygiene/recovery write of the same address would follow it out.
+   Absolute paths and '..' hops die at the Relpath parse; the symlink is
+   the third vector, refused at the store site with the typed in-band
+   refusal. Reads are unwalled as ever (a filter, never a wall). *)
+
+let%expect_test "a store path resolving through a symlink is refused \
+                 in-band: no bytes escape the shared tree" =
+  let e = env () in
+  let fresh_dir prefix =
+    let d = Filename.temp_file prefix "" in
+    Sys.remove d;
+    Unix.mkdir d 0o755;
+    d
+  in
+  let repo = fresh_dir "goat-symlink-repo-" in
+  let outside = fresh_dir "goat-symlink-outside-" in
+  ignore
+    (Sys.command
+       (Printf.sprintf "git -C %s init -q >/dev/null 2>&1"
+          (Filename.quote repo)));
+  Unix.symlink outside (Filename.concat repo "escape");
+  Unix.symlink
+    (Filename.concat outside "portal-target.txt")
+    (Filename.concat repo "portal.txt");
+  let grant : Agent.Grant.committed Agent.Grant.t =
+    {
+      Agent.Grant.read_globs = [ "**" ];
+      write_globs = [ "**" ];
+      shell_gates = [];
+      effects = [];
+    }
+  in
+  let write path =
+    Agent.Rigged.Call_tool
+      {
+        name = "write_file";
+        input =
+          `Assoc [ ("path", `String path); ("content", `String "escapee\n") ];
+      }
+  in
+  show_result
+    (Agent.invoke
+       ~executor:
+         (Agent.Rigged.executor
+            ~script:
+              [
+                (* through a symlinked directory: refused *)
+                write "escape/x.txt";
+                (* onto a symlinked file: refused *)
+                write "portal.txt";
+                (* the control: a real path lands *)
+                write "real/x.txt";
+                Agent.Rigged.Reply "{\"verdict\": \"done\"}";
+              ])
+       ?fallback:None ~codec:verdict_codec ~registry:e.registry
+       ~invocation:(invocation ~repo grant)
+       ~budget:(Agent.Repair_budget.v 0) ~ledger:e.ledger ~node:e.node
+       ~on_yield:(fun () -> []));
+  Printf.printf "no bytes escaped through the symlinked directory: %b\n"
+    (not (Sys.file_exists (Filename.concat outside "x.txt")));
+  Printf.printf "no bytes escaped through the symlinked file: %b\n"
+    (not (Sys.file_exists (Filename.concat outside "portal-target.txt")));
+  Printf.printf "the real-path control landed in the tree: %b\n"
+    (Sys.file_exists (Filename.concat repo "real/x.txt"));
+  Printf.printf "store events appended (the control's only): %d\n"
+    (List.length
+       (List.filter
+          (fun (ev : Ledger.Event.t) ->
+            match ev.Ledger.Event.kind with
+            | Ledger.Event.Store _ -> true
+            | _ -> false)
+          (Ledger.Replay.events e.ledger)));
+  [%expect
+    {|
+    Ok "done"
+    no bytes escaped through the symlinked directory: true
+    no bytes escaped through the symlinked file: true
+    the real-path control landed in the tree: true
+    store events appended (the control's only): 1
     |}]

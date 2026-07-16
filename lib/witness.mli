@@ -49,7 +49,10 @@ val observed_content :
     derived from — the base coordinate of its committed writes, from which
     the disjoint law detects clobbers by construction
     (docs/architecture/30-scheduling.md § retirement order and the landing).
-    [None]: the node never read the address (a blind write's base). *)
+    "Latest" is ledger append order: a node that read an evolving draft
+    twice derived from the later read, whatever the two contents' hash
+    order. [None]: the node never read the address (a blind write's
+    base). *)
 
 (** {2 The commit-point check} *)
 
@@ -81,16 +84,24 @@ type stale = {
 val holds :
   t ->
   committed:(Ledger.Address.t -> Committed_state.t) ->
+  dead:(Ledger.Address.t -> Ledger.Content_hash.t -> bool) ->
   (unit, stale list) result
 (** Commit iff the witness holds: every witnessed triple still describes
     the committed state. The judged thing is the artifact (law 1) — the
     committed content is the content the triple carries; generation
     equality is that comparison's shadow under law 2, never the check
     itself. A triple witnessed at the primordial generation holds against
-    [Absent] (a pre-commit read of state nothing has landed over). [Error
-    stales] is the raw material of [Retire.Generation_moved] — the engine
-    performs no retry, no merge heroics, no silent re-read; routing is the
-    scheduler's (docs/architecture/30-scheduling.md § law 3).
+    [Absent] (a pre-commit read of state nothing has landed over) — unless
+    [dead address content] answers true: the content resolves only to a
+    provenance-dead store coordinate, and a squashed producer's fresh-file
+    bytes share the pre-commit read's coordinates exactly, so the
+    content-judged backstop is the only thing standing between dead bytes
+    and committed state (docs/architecture/20-medium.md § squash without
+    isolation, step 2; falsifiers FL1/FL2). Callers outside any ledger
+    supply [fun _ _ -> false]. [Error stales] is the raw material of
+    [Retire.Generation_moved] — the engine performs no retry, no merge
+    heroics, no silent re-read; routing is the scheduler's
+    (docs/architecture/30-scheduling.md § law 3).
 
     Soundness, never freshness: a held witness proves the node's outputs
     were derived from the state they claim — it does not prove no better

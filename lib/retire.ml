@@ -26,10 +26,21 @@ let rec mkdirs dir =
     try Sys.mkdir dir 0o755 with Sys_error _ -> ()
   end
 
+(* Every engine write into the shared tree is tmp+rename, exactly like the
+   tool path's store site: the retire step's cache fill and materialize's
+   convergence rewrite files the domain does not schedule readers of —
+   gate subprocesses, external tools, the operator's editor — and a
+   truncate-in-place write would make the torn observation representable
+   on precisely those paths (20-medium.md § event taxonomy: torn reads
+   are unrepresentable at the file grain; falsifier FL7). *)
 let write_file path contents =
-  mkdirs (Filename.dirname path);
-  Out_channel.with_open_bin path (fun oc ->
-      Out_channel.output_string oc contents)
+  let dir = Filename.dirname path in
+  mkdirs dir;
+  let tmp = Filename.temp_file ~temp_dir:dir ".goat-retire" ".tmp" in
+  Out_channel.with_open_bin tmp (fun oc ->
+      Out_channel.output_string oc contents);
+  (try Unix.chmod tmp 0o644 with Unix.Unix_error _ -> ());
+  Sys.rename tmp path
 
 (* ------------------------------------------------------------------ *)
 (* Generic helpers.                                                    *)
@@ -73,6 +84,11 @@ module Committed = struct
   type t = {
     repo : string;
     branch : string;
+    git : bool;
+        (* [repo] is a real git repository. False is the bare committed
+           mode the unit suites run on (tuple-only state, no branch, no
+           blobs); in a real repository a failed checkout is refused
+           loudly, never swallowed. *)
     mutable entries : entry Address_map.t;
     mutable tuple_set : tuple list;
     mutable write_log :
@@ -89,19 +105,38 @@ module Committed = struct
 
   let open_ ~repo ~branch =
     (* The committed branch stays checked out in [repo]; the engine holds
-       the only writer lock, so this checkout is uncontended. *)
-    if
-      not
-        (sh_ok
-           (Printf.sprintf "git -C %s checkout -q %s" (Filename.quote repo)
-              (Filename.quote branch)))
-    then
-      sh_quiet
-        (Printf.sprintf "git -C %s checkout -q -b %s" (Filename.quote repo)
-           (Filename.quote branch));
+       the only writer lock, so this checkout is uncontended. A directory
+       that is not a git repository at all is the bare committed mode the
+       unit suites run on. A REAL repository whose branch cannot be
+       checked out — a conflicting dirty tree, HEAD parked on another
+       branch with clobber-refusing edits — must refuse loudly here:
+       swallowing the failure would land every retirement commit on
+       whatever HEAD names while [branch_content] keeps reading the stale
+       committed tip, splitting the one ref this module is the only
+       writer of (30-scheduling.md § one ref, § durability boundary). *)
+    let git =
+      sh_ok
+        (Printf.sprintf "git -C %s rev-parse --git-dir" (Filename.quote repo))
+    in
+    let checked_out =
+      sh_ok
+        (Printf.sprintf "git -C %s checkout -q %s" (Filename.quote repo)
+           (Filename.quote branch))
+      || sh_ok
+           (Printf.sprintf "git -C %s checkout -q -b %s" (Filename.quote repo)
+              (Filename.quote branch))
+    in
+    if git && not checked_out then
+      failwith
+        (Printf.sprintf
+           "goatcode: cannot check out committed branch %S in %s (a \
+            conflicting working tree?) — the engine holds the only writer \
+            of the committed branch and refuses to write anywhere else"
+           branch repo);
     {
       repo;
       branch;
+      git;
       entries = Address_map.empty;
       tuple_set = [];
       write_log = [];
@@ -239,11 +274,23 @@ module Committed = struct
          (Filename.quote t.repo) (Filename.quote rel_path))
 
   (* One retirement = one commit on the committed branch, message = node
-     provenance (30-scheduling.md § durability boundary). *)
+     provenance (30-scheduling.md § durability boundary). The per-commit
+     checkout is belt over [open_]'s suspenders; in a real repository its
+     failure means the branch was moved out from under the engine —
+     refused loudly, never a commit on the wrong ref. *)
   let commit_retirement t ~message =
-    sh_quiet
-      (Printf.sprintf "git -C %s checkout -q %s" (Filename.quote t.repo)
-         (Filename.quote t.branch));
+    if
+      (not
+         (sh_ok
+            (Printf.sprintf "git -C %s checkout -q %s" (Filename.quote t.repo)
+               (Filename.quote t.branch))))
+      && t.git
+    then
+      failwith
+        (Printf.sprintf
+           "goatcode: committed branch %S is no longer checkout-able in %s \
+            — refusing to commit a retirement on any other ref"
+           t.branch t.repo);
     sh_quiet
       (Printf.sprintf
          "git -C %s -c user.name=goatcode -c user.email=goatcode@localhost \
@@ -271,6 +318,86 @@ let recovered_floor ledger address =
           | Some _ | None -> Some new_generation)
       | _ -> acc)
     None (events ledger)
+
+(* The committed state of one address as the ledger and the one ref
+   remember it — ONE lookup shared by the frontier's committed half and
+   the retire step's witness judgment, so the coordinate a read stamps
+   and the coordinate the commit point judges cannot diverge. In-run
+   {!Committed.state} carries the exact coordinate; when it answers
+   [Absent] the one ref's tip and the ledger's invalidation trail are
+   consulted — the committed state survives as ledger coordinates plus
+   git objects (30-scheduling.md § one ref), so a boot-opened (amnesiac)
+   map still yields the true top: boot IS crash recovery, and recovery
+   that fixed only the write path (advance's [recovered_floor]) while the
+   judge stayed amnesiac squashed every post-boot consumer of pre-crash
+   committed state (20-medium.md § the crash story: one recovery path,
+   no special cases). *)
+let committed_state_of ~ledger ~committed address =
+  match Committed.state committed address with
+  | Witness.Committed_state.Absent -> (
+      match address with
+      | Ledger.Address.File rel -> (
+          match Committed.branch_content committed rel with
+          | Some bytes ->
+              Witness.Committed_state.Landed
+                {
+                  generation =
+                    Option.value
+                      (recovered_floor ledger address)
+                      ~default:Ledger.Generation.zero;
+                  content = Ledger.Content_hash.of_string bytes;
+                }
+          | None -> (
+              match recovered_floor ledger address with
+              | Some generation ->
+                  (* the branch does not hold the path but the address
+                     has a published coordinate: a committed deletion *)
+                  Witness.Committed_state.Deleted { generation }
+              | None -> Witness.Committed_state.Absent))
+      | Ledger.Address.Tuple _ | Ledger.Address.Contract _
+      | Ledger.Address.Resource _ ->
+          Witness.Committed_state.Absent)
+  | state -> state
+
+(* Content that resolves only to a dead coordinate: some squashed or
+   faulted node's store blob at this address hashes to exactly the
+   witnessed bytes. This is the content-judged backstop behind FL1/FL2's
+   untracked arm — a squashed producer's fresh file tops [Absent] and its
+   on-disk residue reads at generation zero, coordinate-indistinguishable
+   from a legitimate pre-commit read; only the content can convict it
+   (20-medium.md § squash without isolation, step 2: "a triple whose
+   content resolves only to a dead coordinate cannot describe committed
+   state — Witness.holds refuses"). Consulted only for triples the Absent
+   arm would otherwise hold, so the scan is off every common path. *)
+let dead_store_content ~committed ledger address content =
+  let evs = events ledger in
+  let dead_nodes =
+    List.filter_map
+      (fun (e : E.t) ->
+        match e.kind with
+        | E.Settled (Ledger.Settlement.Squashed _)
+        | E.Settled (Ledger.Settlement.Faulted _) ->
+            e.node
+        | _ -> None)
+      evs
+  in
+  List.exists
+    (fun (e : E.t) ->
+      match (e.kind, e.node) with
+      | E.Store { address = a; delta; _ }, Some n
+        when Ledger.Address.equal a address
+             && List.exists (Id.equal n) dead_nodes -> (
+          match
+            Option.bind (Ledger.Delta_ref.oid delta) (fun oid ->
+                Committed.blob_content committed oid)
+          with
+          | Some bytes ->
+              Ledger.Content_hash.equal
+                (Ledger.Content_hash.of_string bytes)
+                content
+          | None -> false)
+      | _ -> false)
+    evs
 
 module Frontier = struct
   (* The ledger's derived view of every address's live top, composed over
@@ -394,39 +521,13 @@ module Frontier = struct
     in
     { ledger; committed; drafts; swept = List.sort_uniq String.compare swept }
 
-  (* The committed half of one address's top. In-run {!Committed.state}
-     carries the exact coordinate; when it answers [Absent] the one ref's
-     tip and the ledger's invalidation trail are consulted — the committed
-     state survives as ledger coordinates plus git objects
-     (30-scheduling.md § one ref), so a boot-opened (amnesiac) map still
-     yields the true top, and a seeded tree file no landing ever moved
-     tops as its own committed bytes rather than [Absent]. *)
+  (* The committed half of one address's top: the shared lookup
+     ([committed_state_of], above) — the same coordinate the retire step
+     judges, so a seeded tree file no landing ever moved tops as its own
+     committed bytes rather than [Absent], and a boot-opened (amnesiac)
+     map still yields the true top. *)
   let committed_state t address =
-    match Committed.state t.committed address with
-    | Witness.Committed_state.Absent -> (
-        match address with
-        | Ledger.Address.File rel -> (
-            match Committed.branch_content t.committed rel with
-            | Some bytes ->
-                Witness.Committed_state.Landed
-                  {
-                    generation =
-                      Option.value
-                        (recovered_floor t.ledger address)
-                        ~default:Ledger.Generation.zero;
-                    content = Ledger.Content_hash.of_string bytes;
-                  }
-            | None -> (
-                match recovered_floor t.ledger address with
-                | Some generation ->
-                    (* the branch does not hold the path but the address
-                       has a published coordinate: a committed deletion *)
-                    Witness.Committed_state.Deleted { generation }
-                | None -> Witness.Committed_state.Absent))
-        | Ledger.Address.Tuple _ | Ledger.Address.Contract _
-        | Ledger.Address.Resource _ ->
-            Witness.Committed_state.Absent)
-    | state -> state
+    committed_state_of ~ledger:t.ledger ~committed:t.committed address
 
   let top t address =
     match
@@ -451,10 +552,17 @@ module Frontier = struct
      as the hygiene sweep (20-medium.md § squash without isolation:
      overwrite-on-reissue primary, this lazy convergence the backstop).
      Byte-compare before every write keeps the converged tree untouched —
-     idempotence observable, not asserted. *)
-  let materialize t ~repo =
+     idempotence observable, not asserted. [keep] exempts paths from the
+     convergence: the quiescence sweep passes its unexplained-bytes
+     offenders, because effect residue is the witness the declaration
+     must grow to cover — surfaced, never deleted — even when a store
+     event once named the same path (20-medium.md § the escape
+     surfaces). *)
+  let materialize ?(keep = []) t ~repo =
     List.iter
       (fun rel ->
+        if List.exists (String.equal rel) keep then ()
+        else
         let target = Filename.concat repo rel in
         let current =
           if Sys.file_exists target then
@@ -506,19 +614,26 @@ module Frontier = struct
      bytes to stray. *)
   let unexplained t ~repo =
     let dirty =
+      (* -z: NUL-terminated records with verbatim paths — the newline
+         rendering C-quotes any path with spaces or non-ASCII bytes into
+         a name no filesystem holds, silently dropping that whole
+         filename class from the sweep. --no-renames keeps every record
+         one path. *)
       match
         Committed.sh_bytes
-          (Printf.sprintf "git -C %s status --porcelain --untracked-files=all"
+          (Printf.sprintf
+             "git -C %s status --porcelain -z --no-renames \
+              --untracked-files=all"
              (Filename.quote repo))
       with
       | None -> []
       | Some out ->
           List.filter_map
-            (fun line ->
-              if String.length line > 3 then
-                Some (String.sub line 3 (String.length line - 3))
+            (fun record ->
+              if String.length record > 3 then
+                Some (String.sub record 3 (String.length record - 3))
               else None)
-            (String.split_on_char '\n' out)
+            (String.split_on_char '\000' out)
     in
     let store_blob_explains address hash =
       List.exists
@@ -826,6 +941,32 @@ let write_set ledger node =
       | _ -> acc)
     [] (events ledger)
 
+(* A live sibling's draft on this path: an unsettled OTHER writer stored
+   it, so the frontier's top is (or may be, pending event order) in-flight
+   work — and the checkout cache fill must not clobber it: a live draft IS
+   the top, and hygiene never clobbers in-flight work
+   ([Frontier.materialize] holds the same law). The COMMIT is unaffected
+   either way — its tree entry is the store event's oid — so withholding
+   the cache fill loses nothing: the next materialize converges the path
+   once the sibling settles. *)
+let live_sibling_draft ledger ~node address =
+  let evs = events ledger in
+  let settled_nodes =
+    List.filter_map
+      (fun (e : E.t) ->
+        match e.kind with E.Settled _ -> e.node | _ -> None)
+      evs
+  in
+  List.exists
+    (fun (e : E.t) ->
+      match (e.kind, e.node) with
+      | E.Store { address = a; _ }, Some n ->
+          Ledger.Address.equal a address
+          && (not (Id.equal n node))
+          && not (List.exists (Id.equal n) settled_nodes)
+      | _ -> false)
+    evs
+
 (* Phase 3a: the landing. The node's write set comes from its Store
    events, its bytes from the ledger's blobs, never from the tree
    (30-scheduling.md § retirement order and the landing, step 3): a blob
@@ -861,8 +1002,10 @@ let apply_stores ~committed ~ledger ~node ~witness =
                     None
                 | _ ->
                     (* checkout write = cache fill; the commit's entry is
-                       the oid, staged below *)
-                    write_file repo_file landed;
+                       the oid, staged below — and a live sibling's later
+                       draft on the path is never clobbered by the fill *)
+                    if not (live_sibling_draft ledger ~node address) then
+                      write_file repo_file landed;
                     Committed.stage_blob committed ~rel_path ~oid;
                     let fresh =
                       Option.is_none prior && Option.is_none floor
@@ -877,7 +1020,8 @@ let apply_stores ~committed ~ledger ~node ~witness =
             match prior with
             | None -> None
             | Some _ ->
-                (try Sys.remove repo_file with Sys_error _ -> ());
+                if not (live_sibling_draft ledger ~node address) then (
+                  try Sys.remove repo_file with Sys_error _ -> ());
                 Committed.stage_removal committed ~rel_path;
                 let gen =
                   Committed.advance committed ~node ~address ~fresh:false
@@ -975,11 +1119,21 @@ let bind_provisional ~registry ~ledger ~node ~heads =
     pairs
 
 let step ~committed ~ledger ~registry ~merges ~node ~witness ~heads =
-  (* (1) discharge check: hypotheses first, then the witness (law 3). *)
+  (* (1) discharge check: hypotheses first, then the witness (law 3).
+     The committed lookup is the SHARED one ([committed_state_of]) — the
+     same coordinate the read resolver stamps generations from, so a
+     boot-recovered read of pre-crash committed state is judged against
+     the recovered coordinate, never the amnesiac in-run map (20-medium.md
+     § the crash story); the dead-content judge is the untracked-read
+     backstop (§ squash without isolation, step 2; falsifier FL2). *)
   match undischarged_hypotheses ledger node with
   | _ :: _ as undischarged -> Error (Undischarged undischarged)
   | [] -> (
-      match Witness.holds witness ~committed:(Committed.state committed) with
+      match
+        Witness.holds witness
+          ~committed:(committed_state_of ~ledger ~committed)
+          ~dead:(dead_store_content ~committed ledger)
+      with
       | Error stales -> Error (Witness_moved (moves_of ~committed ~ledger stales))
       | Ok () -> (
           (* (2) conflict judgment *)

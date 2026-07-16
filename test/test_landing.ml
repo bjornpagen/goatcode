@@ -431,3 +431,137 @@ let%expect_test "row 2: a deletion is a locator-ref store event, derived \
     retire commit files: f.txt
     invalidations: 1
     |}]
+
+(* ================================================================== *)
+(* Row 2, the cache-fill half of the one-tree discipline: the checkout  *)
+(* write at retire is CACHE FILL, and a live sibling's later in-flight   *)
+(* draft on the same path is the frontier's top — the fill must not      *)
+(* clobber it (the same law materialize holds: hygiene never clobbers    *)
+(* in-flight work).  The COMMIT is unaffected either way: its tree entry *)
+(* is the store event's oid.  Pre-fix the fill wrote unconditionally, so *)
+(* the sibling's read-back of "its own draft" silently served the        *)
+(* retiring node's bytes while the frontier still topped the draft.      *)
+(* ================================================================== *)
+
+let%expect_test "row 2: the retire cache fill never clobbers a live \
+                 sibling's draft on the same path" =
+  let repo, scratch, ledger, registry = fixture "goat_r2_draft" in
+  let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+  let node_minter : Ledger.node Id.Minter.t =
+    Id.Minter.create ~registry ~realm:"node"
+  in
+  let n = Id.mint node_minter in
+  let s = Id.mint node_minter in
+  let oid = store ~ledger ~repo ~node:n "f.txt" "landed n\n" in
+  (* The sibling's LIVE draft lands in the shared tree after n's store —
+     an evented store by an unsettled writer, so the frontier tops the
+     draft (unlike the un-evented tamper above, which the fill repairs). *)
+  ignore (store ~ledger ~repo ~node:s "f.txt" "s draft\n");
+  write_file (repo // "f.txt") "s draft\n";
+  Printf.printf "retire n: %s\n" (retire ~committed ~ledger ~registry ~node:n);
+  Printf.printf "committed content is n's landing: %s\n"
+    (branch_content repo "f.txt");
+  Printf.printf "tree entry oid = n's store event oid: %b\n"
+    (String.equal (branch_entry_oid repo "f.txt") oid);
+  Printf.printf "the live draft still tops the tree (no clobber): %b\n"
+    (String.equal (read_file (repo // "f.txt")) "s draft\n");
+  (match
+     Retire.Frontier.top
+       (Retire.Frontier.of_ledger ledger ~committed)
+       (Ledger.Address.File "f.txt")
+   with
+  | Retire.Frontier.In_flight { writer; _ } ->
+      Printf.printf "frontier top is still the sibling's draft: %b\n"
+        (Id.equal writer s)
+  | Retire.Frontier.Committed _ ->
+      print_endline "frontier top is still the sibling's draft: false");
+  (* Once the sibling dies, its residue is hygiene's: the sweep converges
+     the path to the committed landing — the fill withheld nothing the
+     backstop does not repair. *)
+  ignore
+    (Ledger.append ledger ~node:s
+       (Ledger.Event.Settled
+          (Ledger.Settlement.Squashed Ledger.Squash_cause.Reissue_loser)));
+  Retire.Frontier.materialize
+    (Retire.Frontier.of_ledger ledger ~committed)
+    ~repo;
+  Printf.printf "post-squash sweep converges to the landing: %b\n"
+    (String.equal (read_file (repo // "f.txt")) "landed n\n");
+  sh
+    (Printf.sprintf "rm -rf %s %s" (Filename.quote repo)
+       (Filename.quote scratch));
+  [%expect
+    {|
+    retire n: ok
+    committed content is n's landing: "landed n\n"
+    tree entry oid = n's store event oid: true
+    the live draft still tops the tree (no clobber): true
+    frontier top is still the sibling's draft: true
+    post-squash sweep converges to the landing: true
+    |}]
+
+(* ================================================================== *)
+(* The one-ref refusal (30-scheduling.md § one ref, § durability        *)
+(* boundary; retire.ml is "the only writer of the committed branch").   *)
+(* A REAL repository whose committed branch cannot be checked out — the  *)
+(* operator's conflicting dirty tree on another branch — must refuse at  *)
+(* open, loudly: pre-fix both checkout failures were swallowed, every    *)
+(* retirement commit landed on whatever HEAD named, and branch_content   *)
+(* kept reading the stale committed tip — a split ref.  The bare         *)
+(* committed mode (no git repository at all) stays open: tuple-only      *)
+(* unit suites run on it.                                                *)
+(* ================================================================== *)
+
+let%expect_test "open_ refuses a committed branch it cannot check out; the \
+                 bare mode still opens" =
+  let repo = temp_dir "goat_openref_repo" in
+  seed_repo repo ~file:"f.txt" ~contents:"main v1\n";
+  let default_branch =
+    match
+      sh_out
+        (Printf.sprintf "git -C %s symbolic-ref --short HEAD"
+           (Filename.quote repo))
+    with
+    | Some s -> String.trim s
+    | None -> "master"
+  in
+  (* A committed branch whose f.txt conflicts with a dirty main tree. *)
+  sh (Printf.sprintf "git -C %s checkout -q -b goat" (Filename.quote repo));
+  write_file (repo // "f.txt") "goat v2\n";
+  sh (Printf.sprintf "git -C %s add -A" (Filename.quote repo));
+  sh
+    (Printf.sprintf
+       "git -C %s -c user.name=test -c user.email=test@localhost commit -q \
+        -m goat-tip"
+       (Filename.quote repo));
+  sh
+    (Printf.sprintf "git -C %s checkout -q %s" (Filename.quote repo)
+       (Filename.quote default_branch));
+  (* The operator's uncommitted edit, clobber-conflicting with goat. *)
+  write_file (repo // "f.txt") "operator edit\n";
+  (match Retire.Committed.open_ ~repo ~branch:"goat" with
+  | exception Failure m ->
+      Printf.printf "open refused: %b (names the branch: %b)\n"
+        (String.length m > 0)
+        (let rec find i =
+           i + 6 <= String.length m
+           && (String.equal (String.sub m i 6) "\"goat\"" || find (i + 1))
+         in
+         find 0)
+  | _ -> print_endline "open refused: false (SPLIT REF ACCEPTED)");
+  Printf.printf "the operator's edit is untouched: %b\n"
+    (String.equal (read_file (repo // "f.txt")) "operator edit\n");
+  (* The bare committed mode: no repository, tuple-only state. *)
+  let scratch = temp_dir "goat_openref_bare" in
+  (match Retire.Committed.open_ ~repo:(scratch // "repo") ~branch:"goat" with
+  | _ -> print_endline "bare mode opens: true"
+  | exception Failure _ -> print_endline "bare mode opens: false (OVERBROAD)");
+  sh
+    (Printf.sprintf "rm -rf %s %s" (Filename.quote repo)
+       (Filename.quote scratch));
+  [%expect
+    {|
+    open refused: true (names the branch: true)
+    the operator's edit is untouched: true
+    bare mode opens: true
+    |}]

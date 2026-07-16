@@ -1098,3 +1098,115 @@ let%expect_test "FL1: a squash retreats nothing — the settlement is the \
         repair coordinate (forward, never lowered): landed@g1 "repaired v2\n"
         published generations strictly increase: true
         |}])
+
+(* ==================================================================== *)
+(* FL1, the fresh-file arm (50-api.md § the flat-org roster; 20-medium  *)
+(* § squash without isolation, step 2 — dead bytes).  The Landed arm    *)
+(* above refuses dead bytes over COMMITTED content by content mismatch; *)
+(* this arm closes the fresh-address hole: a squashed producer's fresh  *)
+(* file tops Absent, so its consumer's untracked read shares a          *)
+(* legitimate pre-commit read's coordinates exactly (Absent, g0) and    *)
+(* only the content-judged backstop can refuse it.  Pre-fix the Absent  *)
+(* arm judged generation alone and the consumer retired on garbage.     *)
+(* ==================================================================== *)
+
+let%expect_test "FL1 fresh-file arm: a consumer of a squashed writer's \
+                 fresh-file bytes is refused at retire; nothing witnesses \
+                 dead state into committed state" =
+  with_fixture (fun ~repo ~ledger_path ->
+      let ledger = Ledger.create ~path:ledger_path in
+      let registry = Id.Registry.create () in
+      let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+      let nodes : Ledger.node Id.Minter.t =
+        Id.Minter.create ~registry ~realm:"node"
+      in
+      let statement =
+        match Theory.statements (pipeline_theory ()) with
+        | (sid, _) :: _ -> sid
+        | [] -> failwith "pipeline theory has no statements"
+      in
+      let fired node seed_tuple =
+        ignore
+          (Ledger.append ledger ~node
+             (Ledger.Event.Fired
+                {
+                  provenance =
+                    {
+                      Ledger.Provenance.statement;
+                      consumed = [ ("task", seed_tuple) ];
+                      hypotheses = [];
+                    };
+                  minted = [];
+                })
+            : Ledger.Event.t)
+      in
+      let retire node =
+        match
+          Retire.step ~committed ~ledger ~registry
+            ~merges:Retire.Merge_registry.empty ~node
+            ~witness:(Witness.observed ledger ~node)
+            ~heads:[]
+        with
+        | Ok () -> "ok"
+        | Error (Retire.Witness_moved _) ->
+            "rejected (Witness_moved) — a typed forward signal"
+        | Error (Retire.Undischarged _) -> "rejected (Undischarged)"
+        | Error (Retire.Conflict _) -> "rejected (Conflict)"
+      in
+      let addr = Ledger.Address.File "notes.txt" in
+      (* The producer writes a FRESH file — no committed prior anywhere —
+         and squashes.  Its residue stays on disk until hygiene; its
+         frontier top is Absent. *)
+      let p = Id.mint nodes in
+      fired p "t0";
+      fl1_store ~ledger ~repo ~node:p "notes.txt" "dead note\n";
+      ignore
+        (Ledger.append ledger ~node:p
+           (Ledger.Event.Settled
+              (Ledger.Settlement.Squashed Ledger.Squash_cause.Reissue_loser))
+          : Ledger.Event.t);
+      Printf.printf "committed state of the fresh path: %s\n"
+        (fl1_state_str (Retire.Committed.state committed addr));
+      (* The consumer reads the residue AFTER the squash: untracked
+         (frontier says Committed Absent), witnessed at generation
+         zero. *)
+      let k = Id.mint nodes in
+      fired k "t1";
+      ignore
+        (Ledger.append ledger ~node:k
+           (Ledger.Event.Load
+              {
+                tool = "read_file";
+                observed =
+                  [
+                    ( addr,
+                      Ledger.Generation.zero,
+                      Ledger.Content_hash.of_string "dead note\n" );
+                  ];
+              })
+          : Ledger.Event.t);
+      Printf.printf "consumer retire: %s\n" (retire k);
+      (* Sensitivity control: a sibling whose pre-commit read resolves to
+         no dead coordinate — same Absent, same g0 — retires. *)
+      let c = Id.mint nodes in
+      fired c "t2";
+      ignore
+        (Ledger.append ledger ~node:c
+           (Ledger.Event.Load
+              {
+                tool = "read_file";
+                observed =
+                  [
+                    ( Ledger.Address.File "fixture.txt",
+                      Ledger.Generation.zero,
+                      Ledger.Content_hash.of_string "fixture bytes\n" );
+                  ];
+              })
+          : Ledger.Event.t);
+      Printf.printf "pre-commit control retire: %s\n" (retire c);
+      [%expect
+        {|
+        committed state of the fresh path: absent
+        consumer retire: rejected (Witness_moved) — a typed forward signal
+        pre-commit control retire: ok
+        |}])

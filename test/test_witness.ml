@@ -192,6 +192,8 @@ let invocation () =
     repo = ".";
     frontier = (fun _ -> Retire.Frontier.Committed Witness.Committed_state.Absent);
     snoop = (fun ~address:_ ~producer:_ ~content:_ -> []);
+    in_flight = (fun () -> []);
+    undischarged = (fun () -> false);
     gate_resource = None;
   }
 
@@ -275,7 +277,7 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
         { generation = g0; content = Ledger.Content_hash.of_string "real bytes" }
     else Witness.Committed_state.Absent
   in
-  (match Witness.holds w ~committed with
+  (match Witness.holds w ~committed ~dead:(fun _ _ -> false) with
   | Ok () -> print_endline "claimed address moved: witness holds (claim bought nothing)"
   | Error _ -> print_endline "claimed address moved: witness went stale (LIE ENTERED WITNESS)");
   (* Control for instrument sensitivity: when the address the node REALLY
@@ -289,7 +291,9 @@ let%expect_test "F6: a claimed-but-never-read dependency never enters the \
         }
     else Witness.Committed_state.Absent
   in
-  (match Witness.holds w ~committed:committed_real_moved with
+  (match
+     Witness.holds w ~committed:committed_real_moved ~dead:(fun _ _ -> false)
+   with
   | Ok () -> print_endline "real address moved: witness holds (INSTRUMENT BLIND)"
   | Error [ stale ] ->
       Printf.printf "real address moved: stale %s witnessed %s current %s\n"
@@ -367,7 +371,11 @@ let%expect_test "F6: a hidden-but-observed dependency convicts the node at \
   let w = Witness.observed ledger ~node:hider in
   Printf.printf "hidden read in witness: %b\n"
     (Ledger.Footprint.mem (Witness.addresses w) (Ledger.Address.File "f.txt"));
-  (match Witness.holds w ~committed:(Retire.Committed.state committed) with
+  (match
+     Witness.holds w
+       ~committed:(Retire.Committed.state committed)
+       ~dead:(fun _ _ -> false)
+   with
   | Ok () -> print_endline "holds: ok (DENIAL ERASED THE READ)"
   | Error [ stale ] ->
       Printf.printf "holds: stale %s witnessed %s current %s\n"
@@ -802,6 +810,148 @@ let%expect_test "law 3: a pre-commit witness of a fresh address is judged by \
     gen.ml committed generation: g0
     drifted retire: rejected (Witness_moved file:gen.ml witnessed g0 current g0 delta 8ff82333fa5f2870433063e24f7218e7702a078d)
     exact retire: ok (free commit)
+    |}]
+
+(* ================================================================== *)
+(* Law 3's dead-content backstop (20-medium.md § squash without         *)
+(* isolation, step 2; FL2's untracked arm).  A squashed producer's      *)
+(* FRESH file tops Absent and its residue reads at generation zero —    *)
+(* coordinate-indistinguishable from a legitimate pre-commit read; the  *)
+(* content-judged witness is the only thing standing between dead bytes *)
+(* and committed state, and pre-fix the Absent arm judged generation    *)
+(* alone, so the consumer retired on garbage.  The in-test control is a *)
+(* pre-commit read at the SAME coordinates whose content resolves to no *)
+(* dead store: absence alone convicts nothing.                          *)
+(* ================================================================== *)
+
+let%expect_test "law 3: a squashed producer's fresh-file bytes cannot be \
+                 witnessed into committed state; a pre-commit read at the \
+                 same coordinates still holds" =
+  let repo = temp_dir "goat_dead_fresh_repo" in
+  let scratch = temp_dir "goat_dead_fresh_scratch" in
+  seed_repo repo ~file:"seed.txt" ~contents:"seed\n";
+  let ledger = Ledger.create ~path:(scratch // "ledger") in
+  let registry = Id.Registry.create () in
+  let node_minter : Ledger.node Id.Minter.t =
+    Id.Minter.create ~registry ~realm:"node"
+  in
+  let producer = Id.mint node_minter in
+  let consumer = Id.mint node_minter in
+  let fixture_reader = Id.mint node_minter in
+  let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+  let merges = Retire.Merge_registry.empty in
+  let addr = Ledger.Address.File "notes.txt" in
+  let g0 = Ledger.Generation.zero in
+  (* The producer stores a FRESH file (never committed anywhere), then
+     squashes: the store event is provenance-dead, the frontier top is
+     Absent, and the bytes sit on disk until hygiene. *)
+  store ~ledger ~repo ~node:producer "notes.txt" "dead note\n";
+  ignore
+    (Ledger.append ledger ~node:producer
+       (Ledger.Event.Settled
+          (Ledger.Settlement.Squashed Ledger.Squash_cause.Reissue_loser)));
+  (* The consumer reads the residue AFTER the squash: the read is
+     untracked (no snoop hypothesis — the frontier says Committed
+     Absent), witnessed at generation zero. *)
+  ignore
+    (Ledger.append ledger ~node:consumer
+       (Ledger.Event.Load
+          {
+            tool = "read_file";
+            observed = [ (addr, g0, Ledger.Content_hash.of_string "dead note\n") ];
+          }));
+  (match
+     Retire.step ~committed ~ledger ~registry ~merges ~node:consumer
+       ~witness:(Witness.observed ledger ~node:consumer)
+       ~heads:[]
+   with
+  | Error (Retire.Witness_moved moves) ->
+      Printf.printf
+        "consumer retire: rejected (Witness_moved, %d routable move(s) — \
+         dead state has no live coordinate)\n"
+        (List.length moves)
+  | Error _ -> print_endline "consumer retire: rejected (other)"
+  | Ok () -> print_endline "consumer retire: ok (RETIRED ON DEAD BYTES)");
+  (* Control: a pre-commit read of a never-stored fixture file shares the
+     consumer's coordinates exactly (Absent, g0) — only the content
+     distinguishes them, and it must hold. *)
+  ignore
+    (Ledger.append ledger ~node:fixture_reader
+       (Ledger.Event.Load
+          {
+            tool = "read_file";
+            observed =
+              [
+                ( Ledger.Address.File "fixture.txt",
+                  g0,
+                  Ledger.Content_hash.of_string "fixture bytes\n" );
+              ];
+          }));
+  (match
+     Retire.step ~committed ~ledger ~registry ~merges ~node:fixture_reader
+       ~witness:(Witness.observed ledger ~node:fixture_reader)
+       ~heads:[]
+   with
+  | Ok () -> print_endline "pre-commit fixture read: ok (absence convicts nothing)"
+  | Error _ -> print_endline "pre-commit fixture read: rejected (INSTRUMENT OVERBROAD)");
+  sh (Printf.sprintf "rm -rf %s %s" (Filename.quote repo) (Filename.quote scratch));
+  [%expect
+    {|
+    consumer retire: rejected (Witness_moved, 0 routable move(s) — dead state has no live coordinate)
+    pre-commit fixture read: ok (absence convicts nothing)
+    |}]
+
+(* ================================================================== *)
+(* The base coordinate is the LATEST observed read — ledger order,      *)
+(* never set order (30-scheduling.md § retirement order, step 2: the    *)
+(* base is the content the writer's witness proves it derived from).    *)
+(* Two snoops of one evolving draft both enter at generation zero; the  *)
+(* set orders them by content hash, which is noise — whichever order    *)
+(* the contents hash in, the node derived from the read the ledger      *)
+(* appended LAST.                                                       *)
+(* ================================================================== *)
+
+let%expect_test "observed_content: the latest observed read wins, in ledger \
+                 order, whatever the contents' hash order" =
+  let scratch = temp_dir "goat_latest_read" in
+  let ledger = Ledger.create ~path:(scratch // "ledger") in
+  let registry = Id.Registry.create () in
+  let node_minter : Ledger.node Id.Minter.t =
+    Id.Minter.create ~registry ~realm:"node"
+  in
+  let forward = Id.mint node_minter in
+  let backward = Id.mint node_minter in
+  let addr = Ledger.Address.File "draft.ml" in
+  let g0 = Ledger.Generation.zero in
+  let c1 = Ledger.Content_hash.of_string "draft one\n" in
+  let c2 = Ledger.Content_hash.of_string "draft two\n" in
+  let load node content =
+    ignore
+      (Ledger.append ledger ~node
+         (Ledger.Event.Load { tool = "snoop"; observed = [ (addr, g0, content) ] }))
+  in
+  (* One node reads c1 then c2; its twin reads c2 then c1. If set order
+     leaked into the base, one of the two would report the EARLIER read. *)
+  load forward c1;
+  load forward c2;
+  load backward c2;
+  load backward c1;
+  let base node =
+    Witness.observed_content (Witness.observed ledger ~node) addr
+  in
+  Printf.printf "forward reader's base is its last read (c2): %b\n"
+    (match base forward with
+    | Some c -> Ledger.Content_hash.equal c c2
+    | None -> false);
+  Printf.printf "backward reader's base is its last read (c1): %b\n"
+    (match base backward with
+    | Some c -> Ledger.Content_hash.equal c c1
+    | None -> false);
+  sh (Printf.sprintf "rm -rf %s" (Filename.quote scratch));
+  [%expect
+    {|
+    forward reader's base is its last read (c2): true
+    backward reader's base is its last read (c1): true
     |}]
 
 let%expect_test "law 3, tuple-shaped: a predicted payload is judged by \
