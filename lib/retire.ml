@@ -491,6 +491,73 @@ module Frontier = struct
                 if Option.is_some current then
                   try Sys.remove target with Sys_error _ -> ()))
       t.swept
+
+  (* The unexplained-bytes diff — the flat org's second escape surface
+     (20-medium.md § the escape surfaces): an effect writing outside its
+     declared resource footprint is invisible to store events, so the
+     tree is diffed against the frontier and every byte must answer for
+     itself. The diff universe is the paths dirty against the one ref's
+     tip (git status — the index the landing keeps synced); a dirty path
+     is explained by its live top (a draft still in flight, or committed
+     content) or by any store event's blob (dead residue — the hygiene
+     class [materialize] converges, never an escape); what remains is
+     bytes only an effect could have written. File addresses only:
+     effects stray in the tree, and tuple/contract addresses have no
+     bytes to stray. *)
+  let unexplained t ~repo =
+    let dirty =
+      match
+        Committed.sh_bytes
+          (Printf.sprintf "git -C %s status --porcelain --untracked-files=all"
+             (Filename.quote repo))
+      with
+      | None -> []
+      | Some out ->
+          List.filter_map
+            (fun line ->
+              if String.length line > 3 then
+                Some (String.sub line 3 (String.length line - 3))
+              else None)
+            (String.split_on_char '\n' out)
+    in
+    let store_blob_explains address hash =
+      List.exists
+        (fun (e : E.t) ->
+          match e.kind with
+          | E.Store { address = a; delta; _ }
+            when Ledger.Address.equal a address -> (
+              match Option.bind (Ledger.Delta_ref.oid delta) (fun oid ->
+                        Committed.blob_content t.committed oid)
+              with
+              | Some bytes ->
+                  Ledger.Content_hash.equal
+                    (Ledger.Content_hash.of_string bytes)
+                    hash
+              | None -> false)
+          | _ -> false)
+        (events t.ledger)
+    in
+    List.filter
+      (fun rel ->
+        let target = Filename.concat repo rel in
+        Sys.file_exists target
+        && (not (Sys.is_directory target))
+        &&
+        let bytes = In_channel.with_open_bin target In_channel.input_all in
+        let hash = Ledger.Content_hash.of_string bytes in
+        let address = Ledger.Address.File rel in
+        let top_explains =
+          match top t address with
+          | In_flight d -> Ledger.Content_hash.equal d.content hash
+          | Committed (Witness.Committed_state.Landed { content; _ }) ->
+              Ledger.Content_hash.equal content hash
+          | Committed
+              ( Witness.Committed_state.Absent
+              | Witness.Committed_state.Deleted _ ) ->
+              false
+        in
+        (not top_explains) && not (store_blob_explains address hash))
+      dirty
 end
 
 type generation_moved = {

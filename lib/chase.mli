@@ -165,4 +165,14 @@ val judge : t -> (Theory.Law.verdict list, [ `Not_quiescent ]) result
     state, so a pre-quiescence call returns [`Not_quiescent] rather than a
     wrong-or-hedged verdict (docs/architecture/50-commit.md § final-state
     judgment). [Run.exec] calls it exactly once, after
-    {!run_to_quiescence}. *)
+    {!run_to_quiescence}.
+
+    Two run-level verdicts ride beside the declared laws, both
+    violation-only: [footprint_cover] (loads outside a consumer's compiled
+    delivery filter, folded from the retire path's escape events) and
+    [unexplained_bytes] — the quiescence sweep that diffs the tree against
+    the frontier, attributes bytes no store event explains to the effect
+    events whose ledger window covers them, and runs the hygiene
+    materialization over the dead residue
+    (docs/architecture/20-medium.md § the escape surfaces, § squash
+    without isolation). *)

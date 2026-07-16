@@ -467,12 +467,15 @@ Two escape classes, two mechanisms:
   `footprint_cover` verdict and `Report.explain`'s per-node escape list —
   what the theory author reads to grow the declaration (falsifier F16).
 - **An effect writing outside its declared resource footprint** is
-  invisible to store events, so the flat org owes the **unexplained-bytes
-  sweep**: at quiescence (and at every hygiene materialization), diff the
-  tree against the frontier; bytes no live store event explains are
-  attributed to the effect events whose ledger window covers them and
-  surfaced exactly like footprint escapes — logged, reported at retire, a
-  witness the declaration must grow to cover.
+  invisible to store events, so the flat org runs the **unexplained-bytes
+  sweep**: at quiescence, diff the tree against the frontier; bytes no
+  live store event explains are attributed to the effect events whose
+  ledger window covers them and surfaced exactly like footprint escapes —
+  a violated `unexplained_bytes` verdict on the settled map, path and
+  effect candidates named, never a fault; the stray bytes stay in the
+  tree, a witness the declaration must grow to cover. Dead store residue
+  is not an escape: it is the hygiene class, converged by the same pass's
+  materialization (§ squash without isolation).
 
 ## Store-to-load forwarding: ambient sensing
 

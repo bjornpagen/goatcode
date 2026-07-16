@@ -40,7 +40,9 @@ committed_branch = "goat-committed"
 # The append-only event ledger. Created on run open; read back by
 # `goat report`, `goat explain`, `goat replay`. One run per ledger: an
 # existing file at this path is refused (choose a fresh path — never
-# truncated).
+# truncated, and never-truncated is what recovery leans on: boot
+# re-derives the frontier from ledger + ref and converges the tree, so
+# crash recovery is re-open, not a special mode).
 ledger_path = ".goat/ledger.bin"
 
 # --- Scheduling ------------------------------------------------------

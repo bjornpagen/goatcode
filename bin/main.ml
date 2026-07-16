@@ -772,8 +772,12 @@ let plan_bootstrap ~spec ~pin =
    so a second run appended to an existing file would make [goat replay]
    report false divergences. The CLI refuses the collision up front —
    fix-forward: the operator picks a fresh path; the existing journal is
-   never truncated. CLI layer only: library callers and tests manage
-   their own paths. *)
+   never truncated, and never-truncated now carries recovery weight: the
+   ledger is boot's recovery input — [Run.start] re-derives the frontier
+   from it and converges the tree, so a crashed run's journal is exactly
+   what re-opening needs (docs/architecture/20-medium.md § the crash
+   story). CLI layer only: library callers and tests manage their own
+   paths. *)
 let refuse_existing_ledger ~command path =
   if Sys.file_exists path then begin
     Printf.eprintf

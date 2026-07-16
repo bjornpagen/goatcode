@@ -80,11 +80,15 @@ ledger below.
 
 The flat org — one tree, no branches, no worktrees, coherence by ledger —
 is the **design of record** (operator ruling), and these docs describe it
-normatively. The shipped engine now runs it: nodes dispatch against the
-one shared tree, the worktree machinery is deleted outright, and gates
-run optimistically behind per-resource locks (rows 1–6 landed). The gap,
-in full, each row struck when its change lands (suite green at every
-step):
+normatively. The gap between that ruling and the shipped engine is
+**closed**: the migration ran as the seven rows below, each landed with
+the suite green, and the ledger is kept as the struck record of what
+changed. The shipped engine runs the whole design — stores land as
+content-addressed blobs, retirement commits from the ledger, nodes
+dispatch against the one shared tree, the worktree machinery is deleted
+outright, gates run optimistically behind per-resource locks, boot is
+crash recovery, and quiescence runs the unexplained-bytes sweep. The
+rows, as they landed:
 
 1. **Blobs into git's object store** — store tools write content-addressed
    blobs at store time; `Delta_ref` carries the oid; tmp+rename lands in
@@ -106,7 +110,8 @@ step):
    hypotheses + witness triples; the effect lock re-scopes to declared
    build resources. Lands FL6. — LANDED (this commit)
 7. **Hygiene and recovery** — `materialize` at open (boot = crash
-   recovery); the unexplained-bytes sweep at quiescence; F5 re-aimed.
+   recovery); the unexplained-bytes sweep at quiescence; F5 re-aimed. —
+   LANDED (this commit)
 
 Also owed, tracked here so nothing lands silently:
 
@@ -137,8 +142,11 @@ Also owed, tracked here so nothing lands silently:
   *Trigger: the first retire-protocol bug that a falsifier misses, or the
   protocol surviving three months unchanged — whichever comes first.*
 - **Durability and resume.** v0 is one process, in-memory graph; the ledger
-  is replayable by design, and under the flat org boot IS crash recovery
-  (`20-medium.md` § the crash story) — but no resume path is built.
+  is replayable by design, and boot IS crash recovery — `Run.start`
+  re-derives the frontier from the re-opened ledger and converges the tree
+  at every open (`20-medium.md` § the crash story; migration row 7). What
+  is not built is scheduler-level resume: a re-opened run re-fires from
+  seed rather than re-deriving its fired state, so node identity re-mints.
   *Trigger: a real pipeline long enough that a crash costs more than a day
   of agent spend.*
 - **Predictor structure.** v0 is per-task-shape survival counters; anything

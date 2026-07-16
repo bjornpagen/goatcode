@@ -14,8 +14,11 @@
      (docs/architecture/30-scheduling.md § abort by construction). The
      old worktree-drop cleanliness arm is re-aimed per the flat org
      (50-api.md F5: the injection asserts committed-state purity and
-     frontier re-derivation instead of buffer-drop cleanliness; README.md
-     § design of record vs shipped engine, row 5).
+     frontier re-derivation — boot = crash recovery, 20-medium.md § the
+     crash story — instead of buffer-drop cleanliness; README.md § design
+     of record vs shipped engine, rows 5 and 7): every kill point is
+     re-booted through [Run.start]'s ordinary open path and the tree must
+     agree with the re-derived frontier.
 
    - FL1 — squash-revert counterfactual. A producer stores over committed
      content, then squashes: the committed coordinate never moves, squash
@@ -187,6 +190,13 @@ let config ~repo ~ledger_path ~executors =
 
 let task_seed note = Theory.Tuple.v task_rel (`Assoc [ ("note", `String note) ])
 let ok_reply note = Agent.Rigged.Reply (Printf.sprintf {|{"note":%S}|} note)
+
+let write_tool path content =
+  Agent.Rigged.Call_tool
+    {
+      name = "write_file";
+      input = `Assoc [ ("path", `String path); ("content", `String content) ];
+    }
 
 (* ------------------------------------------------------------------ *)
 (* Rendering helpers.                                                  *)
@@ -670,6 +680,17 @@ let%expect_test "F5: downstream fault at every yield class keeps exactly the \
 (* kill point committed state (tuples AND the committed branch's git      *)
 (* history) contains only fully-retired nodes' effects. Abandoning the    *)
 (* engine mid-run is the process-death model: nothing runs after step k.  *)
+(*                                                                        *)
+(* Re-aimed per the flat org (50-api.md F5: "the injection asserts        *)
+(* frontier re-derivation (boot = crash recovery, 20-medium.md) instead   *)
+(* of worktree-drop cleanliness"): the worker stores a real file, so a    *)
+(* kill can strand draft bytes mid-flight; after every kill the tree is   *)
+(* torn (crash residue over the stored path, when a store landed) and     *)
+(* the run is re-booted through [Run.start]'s ordinary open path — the    *)
+(* re-derived frontier must agree with the tree at every k: an in-flight  *)
+(* store is the live top (kept for the forward reissue), a retired store  *)
+(* is the committed top, and before any store the address has no          *)
+(* coordinate at all.                                                     *)
 (* ==================================================================== *)
 
 let build_engine ~repo ~ledger_path =
@@ -682,7 +703,7 @@ let build_engine ~repo ~ledger_path =
       ~ports:[ Chase.Port.open_ ~name:"main" ]
       ~executors:
         [
-          binding worker [ ok_reply "r" ];
+          binding worker [ write_tool "artifact.txt" "worker draft\n"; ok_reply "r" ];
           binding summarizer [ ok_reply "s" ];
         ]
       ~backstops:Speculate.Backstops.default ~switches:[]
@@ -691,7 +712,30 @@ let build_engine ~repo ~ledger_path =
   in
   (chase, ledger)
 
-let%expect_test "F5: killing the run after any number of steps leaks nothing" =
+(* Frontier re-derivation after boot: the tree must hold exactly what the
+   re-derived frontier (amnesiac committed map + re-opened ledger) names
+   as the live top of the worker's stored path. *)
+let frontier_agrees ~repo ~ledger_path rel =
+  let ledger = Ledger.load ~path:ledger_path in
+  let committed = Retire.Committed.open_ ~repo ~branch:"goat" in
+  let frontier = Retire.Frontier.of_ledger ledger ~committed in
+  let target = Filename.concat repo rel in
+  let tree_hash () =
+    Ledger.Content_hash.of_string
+      (In_channel.with_open_bin target In_channel.input_all)
+  in
+  match Retire.Frontier.top frontier (Ledger.Address.File rel) with
+  | Retire.Frontier.In_flight { content; _ } ->
+      Sys.file_exists target && Ledger.Content_hash.equal content (tree_hash ())
+  | Retire.Frontier.Committed
+      (Witness.Committed_state.Landed { content; _ }) ->
+      Sys.file_exists target && Ledger.Content_hash.equal content (tree_hash ())
+  | Retire.Frontier.Committed
+      (Witness.Committed_state.Absent | Witness.Committed_state.Deleted _) ->
+      not (Sys.file_exists target)
+
+let%expect_test "F5: killing the run after any number of steps leaks \
+                 nothing, and boot re-derives the frontier" =
   (* Measure the healthy run's step count once. *)
   let steps =
     with_fixture (fun ~repo ~ledger_path ->
@@ -717,7 +761,38 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
           abort_invariant_violations ~ledger ~settlements ~tuples
             ~seeds:[ "task/task#0" ] ~repo
         in
-        Printf.printf "kill@%d: retired=[%s] tuples=[%s] %s\n" k
+        (* The crash tears the cache wherever a store event named the
+           path — the coordinate exists, so boot owns converging it;
+           before any store the address has no coordinate and the sweep
+           has no universe there. *)
+        let stored =
+          List.exists
+            (fun (e : Ledger.Event.t) ->
+              match e.kind with
+              | Ledger.Event.Store { address; _ } ->
+                  Ledger.Address.equal address
+                    (Ledger.Address.File "artifact.txt")
+              | _ -> false)
+            (Ledger.Replay.events ledger)
+        in
+        if stored then
+          Out_channel.with_open_bin (Filename.concat repo "artifact.txt")
+            (fun oc -> Out_channel.output_string oc "torn crash residue");
+        (* Boot = crash recovery: the host's ordinary open path over the
+           same repo and journal (50-api.md F5, re-aimed). *)
+        let booted =
+          match
+            Run.start ~theory:(pipeline_theory ()) ~seed:[ task_seed "t1" ]
+              ~config:
+                (config ~repo ~ledger_path
+                   ~executors:[ binding worker []; binding summarizer [] ])
+          with
+          | Ok _ -> frontier_agrees ~repo ~ledger_path "artifact.txt"
+          | Error _ -> false
+        in
+        Printf.printf "kill@%d: retired=[%s] tuples=[%s] %s | boot re-derives \
+                       the frontier: %b\n"
+          k
           (String.concat "; "
              (List.filter_map
                 (fun (n, s) ->
@@ -728,18 +803,19 @@ let%expect_test "F5: killing the run after any number of steps leaks nothing" =
           (String.concat "; " (List.map tuple_key tuples))
           (match violations with
           | [] -> "ok"
-          | vs -> "VIOLATIONS: " ^ String.concat " / " vs))
+          | vs -> "VIOLATIONS: " ^ String.concat " / " vs)
+          booted)
   done;
   [%expect
     {|
     steps to quiescence: 6
-    kill@0: retired=[] tuples=[task/task#0] ok
-    kill@1: retired=[] tuples=[task/task#0] ok
-    kill@2: retired=[] tuples=[task/task#0] ok
-    kill@3: retired=[] tuples=[task/task#0] ok
-    kill@4: retired=[] tuples=[task/task#0] ok
-    kill@5: retired=[node#0] tuples=[task/task#0; result/result#0] ok
-    kill@6: retired=[node#0; node#1] tuples=[task/task#0; result/result#0; summary/summary#0] ok
+    kill@0: retired=[] tuples=[task/task#0] ok | boot re-derives the frontier: true
+    kill@1: retired=[] tuples=[task/task#0] ok | boot re-derives the frontier: true
+    kill@2: retired=[] tuples=[task/task#0] ok | boot re-derives the frontier: true
+    kill@3: retired=[] tuples=[task/task#0] ok | boot re-derives the frontier: true
+    kill@4: retired=[] tuples=[task/task#0] ok | boot re-derives the frontier: true
+    kill@5: retired=[node#0] tuples=[task/task#0; result/result#0] ok | boot re-derives the frontier: true
+    kill@6: retired=[node#0; node#1] tuples=[task/task#0; result/result#0; summary/summary#0] ok | boot re-derives the frontier: true
     |}]
 
 (* ==================================================================== *)

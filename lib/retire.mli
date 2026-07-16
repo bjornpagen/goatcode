@@ -121,10 +121,23 @@ module Frontier : sig
   (** Converge the tree to the frontier: write each address's live top,
       delete files whose top is [Absent] or [Deleted]. Idempotent;
       appends nothing; moves no coordinate. Checkout semantics — it runs
-      at boot, after a crash, and as the hygiene sweep, never on any
-      per-node path (docs/architecture/20-medium.md § squash without
-      isolation: overwrite-on-reissue primary, lazy convergence
-      backstop). *)
+      at boot ({!Run.start}: boot IS crash recovery), at quiescence
+      ({!Chase.judge}'s sweep), and never on any per-node path
+      (docs/architecture/20-medium.md § squash without isolation:
+      overwrite-on-reissue primary, lazy convergence backstop; § the
+      crash story). *)
+
+  val unexplained : t -> repo:string -> string list
+  (** The unexplained-bytes diff — the flat org's second escape surface
+      (docs/architecture/20-medium.md § the escape surfaces). Diff the
+      tree against the frontier: the repo-relative paths whose bytes
+      neither the address's live top nor any store event's blob
+      explains — bytes only an effect could have written. Dead store
+      residue is excluded: that is {!materialize}'s hygiene class,
+      converged and never surfaced. The caller ({!Chase.judge}, at
+      quiescence) attributes what remains to the effect events whose
+      ledger window covers the sweep and surfaces it exactly like a
+      footprint escape — logged, reported, never a fault. *)
 end
 
 type generation_moved = {

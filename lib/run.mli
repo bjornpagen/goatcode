@@ -70,13 +70,16 @@ val exec :
   seed:Theory.Tuple.t list ->
   config:config ->
   (settled, misuse) result
-(** Run one theory to quiescence: pre-open channels, start every derivable
-    node at t=0, chase, retire in dependency order, judge laws once
-    against final state, and return the map. Runs on the cooperative
-    fiber substrate ({!Fiber}): reads park mid-flight, provider calls
-    overlap on one domain, squash discontinues — [exec] drives the
-    scheduler to quiescence. Still one process, one domain
-    (docs/architecture/70-api.md § running;
+(** Run one theory to quiescence: converge the tree to the ledger's live
+    frontier at open (boot IS crash recovery — a clean boot converges
+    nothing, a boot over a crashed run's ledger materializes every live
+    top; docs/architecture/20-medium.md § the crash story), pre-open
+    channels, start every derivable node at t=0, chase, retire in
+    dependency order, judge laws once against final state, and return the
+    map. Runs on the cooperative fiber substrate ({!Fiber}): reads park
+    mid-flight, provider calls overlap on one domain, squash
+    discontinues — [exec] drives the scheduler to quiescence. Still one
+    process, one domain (docs/architecture/70-api.md § running;
     docs/architecture/40-scheduling.md § read-time binding). *)
 
 (** {2 In-flight observation} *)
@@ -90,6 +93,9 @@ val start :
   seed:Theory.Tuple.t list ->
   config:config ->
   (handle, misuse) result
+(** The same open path as {!exec} (boot = crash recovery: the frontier is
+    re-derived and the tree converged before any node runs), returning
+    the handle instead of driving to quiescence. *)
 
 val ledger : handle -> Ledger.t
 val wait : handle -> settled

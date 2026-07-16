@@ -2249,10 +2249,57 @@ let footprint_cover_verdict t =
   | offenders ->
       [ { Theory.Law.law = "footprint_cover"; satisfied = false; offenders } ]
 
+(* The unexplained-bytes sweep, read at quiescence — the escape surface
+   store events cannot see (docs/architecture/20-medium.md § the escape
+   surfaces): diff the tree against the frontier; bytes no live store
+   event explains are attributed to the effect events whose ledger window
+   covers them — at quiescence, every effect the run appended — and
+   surfaced exactly like footprint escapes: a violation-only verdict on
+   the settled map, never a fault, never a block. The same pass runs the
+   hygiene materialization (§ squash without isolation, lazy convergence
+   backstop): dead-event residue converges to its live tops — explained
+   garbage, not an escape — while effect residue stays in the tree: it is
+   the witness the declaration must grow to cover, never deleted. *)
+let unexplained_bytes_verdict t =
+  let repo = Retire.Committed.root t.committed_state in
+  let frontier =
+    Retire.Frontier.of_ledger t.ledger ~committed:t.committed_state
+  in
+  let stray = Retire.Frontier.unexplained frontier ~repo in
+  Retire.Frontier.materialize frontier ~repo;
+  match stray with
+  | [] -> []
+  | stray ->
+      let window =
+        match
+          List.sort_uniq String.compare
+            (List.filter_map
+               (fun (e : Ledger.Event.t) ->
+                 match (e.Ledger.Event.node, e.Ledger.Event.kind) with
+                 | Some n, Ledger.Event.Effect { tool; resource; _ } ->
+                     Some
+                       (Printf.sprintf "%s %s(%s)" (Id.to_string n) tool
+                          resource)
+                 | _ -> None)
+               (Ledger.Replay.events t.ledger))
+        with
+        | [] -> "no effect event in the run's window"
+        | candidates -> "effect window: " ^ String.concat ", " candidates
+      in
+      let offenders =
+        List.map
+          (fun rel ->
+            Ledger.Address.to_string (Ledger.Address.File rel)
+            ^ " unexplained; " ^ window)
+          stray
+      in
+      [ { Theory.Law.law = "unexplained_bytes"; satisfied = false; offenders } ]
+
 let judge t =
   if quiescent t then
     Ok
       (Retire.judge ~theory:t.theory ~committed:t.committed_state
          ~ledger:t.ledger
-      @ footprint_cover_verdict t)
+      @ footprint_cover_verdict t
+      @ unexplained_bytes_verdict t)
   else Error `Not_quiescent

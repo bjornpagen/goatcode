@@ -12,6 +12,7 @@
   test_disjoint
   test_landing
   test_frontier
+  test_recovery
   test_drift
   test_boundary
   test_heads

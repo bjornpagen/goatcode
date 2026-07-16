@@ -183,6 +183,16 @@ let start ~theory ~seed ~config =
   let committed =
     Retire.Committed.open_ ~repo:config.repo ~branch:config.committed_branch
   in
+  (* Boot IS crash recovery (docs/architecture/20-medium.md § the crash
+     story): re-derive the frontier from the ledger and converge the tree
+     before any node runs. A clean boot opens an empty ledger and
+     converges nothing; a boot over a crashed run's ledger — [Ledger.create]
+     re-opens an existing journal append-mode — writes every live top and
+     sweeps the dead residue. One recovery path, no resume mode, shared by
+     [start] and [exec]. *)
+  Retire.Frontier.materialize
+    (Retire.Frontier.of_ledger run_ledger ~committed)
+    ~repo:config.repo;
   (* Channels pre-open before any node runs — what makes eager start
      legal (docs/architecture/30-channels.md § pre-opened channels). *)
   let channels = Channel.open_all theory in

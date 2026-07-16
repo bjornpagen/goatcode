@@ -268,11 +268,14 @@ held by the falsifier suite; three live pipelines have run green
 end-to-end, including a from-scratch coding task built by parallel agents
 and verified by a test gate. The docs describe the **design of record** —
 the flat org (one tree, no branches, no worktrees) — and the shipped
-engine now runs it: stores land as content-addressed blobs, retirement
-commits from the ledger, nodes dispatch against the one shared tree, and
-the worktree machinery is deleted. The remaining gap (gates, boot-time
-recovery) is recorded in one place,
-the [migration ledger](docs/architecture/README.md#design-of-record-vs-shipped-engine-the-migration-ledger).
+engine runs all of it: stores land as content-addressed blobs, retirement
+commits from the ledger, nodes dispatch against the one shared tree with
+the worktree machinery deleted, gates run behind per-resource effect
+locks, boot is crash recovery (the frontier is re-derived and the tree
+converged at every open), and quiescence runs the unexplained-bytes
+sweep. The
+[migration ledger](docs/architecture/README.md#design-of-record-vs-shipped-engine-the-migration-ledger)
+records that gap as closed, rows kept as struck history.
 Other open seams are recorded where they live: the plan-to-run seed
 surface and the supervisor module (doc-resident until their triggers),
 issued-contract firing to widen the speculation window, and the message
