@@ -3,8 +3,8 @@
    Law: the per-shape speculation off switch is representation-enforced —
    [Speculate.Switch.throw] requires a [Churn.measurement], so a switch
    thrown without churn evidence is not rejected by the config loader, it
-   is unconstructible (docs/architecture/70-api.md § running;
-   docs/architecture/40-scheduling.md § speculation is default-on;
+   is unconstructible (docs/architecture/50-api.md § running;
+   docs/architecture/30-scheduling.md § speculation is default-on;
    lib/speculate.mli).
 
    The probe: throw with everything EXCEPT the evidence and claim the

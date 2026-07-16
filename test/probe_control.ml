@@ -6,7 +6,7 @@
    typecheck" for a spurious reason (broken include path, missing package)
    and the suite would be green on garbage. The control pins the harness:
    negative probes fail because the LIBRARY refuses them, not because the
-   compiler never saw the library (docs/architecture/80-validation.md F15).
+   compiler never saw the library (docs/architecture/50-api.md F15).
 
    Each value below is the LEGAL twin of one negative probe: the same
    boundary, approached from the permitted side. *)

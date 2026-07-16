@@ -1,23 +1,23 @@
-(* Boundary falsifiers (docs/architecture/80-validation.md § the falsifier
+(* Boundary falsifiers (docs/architecture/50-api.md § the falsifier
    discipline):
 
    - F10 — repair-lane boundedness. A permanently-invalid rigged executor
      faults after exactly the configured repair budget; nothing invalid
-     ever crosses the codec boundary (60-agents.md § the primary lane,
-     20-contracts.md § failure surface).
+     ever crosses the codec boundary (40-agents.md § the primary lane,
+     10-theory.md § failure surface).
    - F11 — unidirectionality. No API surface, tool grant, or channel
      operation lets a node write to any relation its statement doesn't
      mint into; the adversarial sweep drives planner-shaped garbage at
      admission and wire-shaped garbage at the codec, asserting no panic
-     and no write (30-channels.md, 20-contracts.md).
+     and no write (20-medium.md, 10-theory.md).
    - F12 — effect gating. A speculative node's tool surface contains no
      non-idempotent effect tool, under every template configuration this
-     suite can generate (30-channels.md § event taxonomy, 60-agents.md
+     suite can generate (20-medium.md § event taxonomy, 40-agents.md
      § tool grants).
    - F17 (tool lane) — the git ban: run_command naming git in command
      position is a typed in-band refusal with no Effect event; the
      admission lane (a declared git gate) is in test_admission.ml
-     (60-agents.md § the git ban).
+     (40-agents.md § the git ban).
    - shell_gate eventing: a gate run is an Effect event behind the
      effect lock, carrying the declared command line.
    - FL6, the lock-scope arm (50-api.md § the flat-org roster;
@@ -466,7 +466,7 @@ let%expect_test "F11: tuples flow forward only; a reader end cannot disturb \
     (List.length (Channel.pull_invalidations rx_digest));
   (* The edge's compiled delivery filter is inspectable and derived — the
      relation it reads, that relation's contract, its file-glob grant —
-     never authored routing (30-channels.md § footprint filtering). *)
+     never authored routing (20-medium.md § footprint filtering). *)
   List.iter
     (fun a -> Printf.printf "footprint: %s\n" (Ledger.Address.to_string a))
     (Ledger.Footprint.to_list (Channel.footprint rx_judge));
@@ -513,7 +513,7 @@ let%expect_test "F15 runtime edge: a same-named re-declaration obtains no \
     |}]
 
 (* The codec used for the wire-garbage sweep resolves the [finding] ref
-   slot against mint provenance, per 20-contracts.md § failure surface: an
+   slot against mint provenance, per 10-theory.md § failure surface: an
    agent-invented id must die at the boundary with a diagnostic, never
    become a tuple. *)
 let verdict_ref_codec idreg : (Yojson.Safe.t Id.t * bool) Contract.Codec.t =
@@ -618,7 +618,7 @@ let%expect_test "F11: wire-shaped garbage at the codec — no panic, no write" =
 (* Planner-shaped garbage: theories arriving as wire data through the
    meta-catalog. The codec boundary and the admission judgment are the
    only two gates, and both must answer with typed values — never a panic,
-   never an admitted garbage theory (60-agents.md § the planner). *)
+   never an admitted garbage theory (40-agents.md § the planner). *)
 let meta_codec = Contract.codec (Theory.Meta.contract ())
 
 let admission_error_name = function
@@ -1026,7 +1026,7 @@ let%expect_test "tool loop: stores and loads are evented with footprints; \
     |}]
 
 (* ------------------------------------------------------------------ *)
-(* F17, the tool lane (docs/architecture/60-agents.md § the git ban):
+(* F17, the tool lane (docs/architecture/40-agents.md § the git ban):
    run_command refuses any command whose token stream names git in
    command position — argv0, after separators, through one layer of
    quoting, behind wrapper commands — as a typed IN-BAND refusal the
@@ -1144,7 +1144,7 @@ let%expect_test "F17: run_command names git -> typed in-band refusal, no \
     |}]
 
 (* ------------------------------------------------------------------ *)
-(* The shell gate is an evented effect (docs/architecture/60-agents.md
+(* The shell gate is an evented effect (docs/architecture/40-agents.md
    § tool grants; the wave-2 OPEN item closed): it runs behind the
    machine lock and appends the Effect event carrying the declared
    command line as the resource — an unobserved gate run is not

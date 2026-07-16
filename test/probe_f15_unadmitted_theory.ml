@@ -7,7 +7,7 @@
    only spelling of "run an unadmitted theory" the language even lets us
    write down, and it is a type error — an unadmitted theory cannot reach
    the engine by any code path (docs/architecture/10-theory.md
-   § termination; docs/architecture/70-api.md § running; lib/theory.mli).
+   § termination; docs/architecture/50-api.md § running; lib/theory.mli).
 
    The other spelling — forging a [Theory.admitted] value directly — is not
    a probe file because there is literally no expression to write: the type

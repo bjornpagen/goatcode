@@ -4,8 +4,8 @@
     mechanized-witness law unimplementable through one — direct calls with
     the harness owning the tool loop are the only design where every
     load/store is an evented, observable footprint
-    (docs/architecture/30-channels.md § mechanized witnesses;
-    docs/architecture/60-agents.md § the executor transport). *)
+    (docs/architecture/20-medium.md § mechanized witnesses;
+    docs/architecture/40-agents.md § the executor transport). *)
 
 type error = {
   code : string;  (** libcurl's error constant name (e.g. CURLE_OPERATION_TIMEOUTED). *)
@@ -47,7 +47,7 @@ end
     {b caller} decides when each is called. The scheduler owns the loop
     (its ready queue and parked tables are the state the loop serves); a
     transport that ran its own loop would be a second scheduler
-    (docs/architecture/40-scheduling.md § ports and priority: the dispatch
+    (docs/architecture/30-scheduling.md § ports and priority: the dispatch
     path has one owner). *)
 module Multi : sig
   type t

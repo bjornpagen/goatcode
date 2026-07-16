@@ -5,8 +5,8 @@
    declared-idempotence witness; [Effect_tool.non_idempotent] exists only
    at the [committed] index — "a speculative node ran a non-idempotent
    effect" is not a policy violation the dispatcher catches, it is a grant
-   nobody can build (docs/architecture/60-agents.md § tool grants;
-   docs/architecture/30-channels.md § event taxonomy; falsifiers F12/F15;
+   nobody can build (docs/architecture/40-agents.md § tool grants;
+   docs/architecture/20-medium.md § event taxonomy; falsifiers F12/F15;
    lib/agent.mli).
 
    Legal twins: [speculative_idempotent] and [committed_non_idempotent] in

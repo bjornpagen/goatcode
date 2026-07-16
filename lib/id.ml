@@ -1,6 +1,6 @@
 (* Phantom-typed identifiers. The contract is id.mli; the governing docs are
-   docs/architecture/10-theory.md (mint/ref slots), 20-contracts.md (failure
-   surface: agent-invented refs die at the codec boundary), and 50-commit.md
+   docs/architecture/10-theory.md (mint/ref slots), 10-theory.md (failure
+   surface: agent-invented refs die at the codec boundary), and 30-scheduling.md
    (provisional identity: mint at firing, bind at retirement, die on squash).
 
    Representation: an id is (realm, ordinal). The wire rendering is

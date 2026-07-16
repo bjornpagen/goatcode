@@ -1,12 +1,12 @@
 (** Reading a run: pull surfaces, all ledger queries, none on any hot path
-    (docs/architecture/70-api.md § reading a run).
+    (docs/architecture/50-api.md § reading a run).
 
     [summarize] is where the success criteria are read, so its fields are
     the criteria's fields (docs/architecture/00-product.md § success
     criteria). Honest-measurement discipline applies to every number that
     leaves here: regime on every claim, fresh tasks for headlines, gross
     (never net) wasted-token accounting
-    (docs/architecture/80-validation.md § honest measurement). *)
+    (docs/architecture/50-api.md § honest measurement). *)
 
 (** The speculation account: tokens are reported, never gated. *)
 type speculation_account = {
@@ -39,7 +39,7 @@ type summary = {
 val summarize : Run.settled -> summary
 
 (** Live occupancy while running. Pull-only: polling never touches the
-    dispatch path (docs/architecture/40-scheduling.md § ports and
+    dispatch path (docs/architecture/30-scheduling.md § ports and
     priority). *)
 type scoreboard = {
   ports : (string * int * int) list;  (** (port, active, pending). *)
@@ -53,7 +53,7 @@ val scoreboard : Run.handle -> scoreboard
 (** One node's story, assembled from the ledger. The scheduler's ruling
     that every decision lands in the ledger with reasons exists so this
     function can exist; "why did this run twice" is answered here
-    (docs/architecture/40-scheduling.md § drift routing). *)
+    (docs/architecture/30-scheduling.md § drift routing). *)
 type story = {
   node : Ledger.node Id.t;
   fired_because : string;
@@ -70,7 +70,7 @@ type story = {
       (** Footprint escapes surfaced at retire: (tool, address) for each
           observed load outside the edge's compiled delivery filter — the
           witnesses the declaration must grow to cover
-          (docs/architecture/30-channels.md § footprint filtering). *)
+          (docs/architecture/20-medium.md § footprint filtering). *)
   settlement : Ledger.Settlement.t;
   timing : Ledger.Telemetry.timing;
   usage : Ledger.Usage.t;

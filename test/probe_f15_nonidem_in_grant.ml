@@ -7,7 +7,7 @@
    phantom index on [Effect_tool.t] flows through the [effects] field, so
    the record update is a type error — there is no coercion point anywhere
    between the constructor and the grant
-   (docs/architecture/60-agents.md § tool grants; lib/agent.mli).
+   (docs/architecture/40-agents.md § tool grants; lib/agent.mli).
 
    Legal twin: [speculative_grant_with_idempotent_effect] in
    probe_control.ml. *)

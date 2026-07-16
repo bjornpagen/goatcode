@@ -3,9 +3,9 @@
    Law: channels are unidirectional by construction, not by check — the
    reader end ([rx]) has no publish operation, the writer end ([tx]) has no
    pull operation, and no function converts between them
-   (docs/architecture/30-channels.md § the unidirectional law;
+   (docs/architecture/20-medium.md § the derivation law;
    lib/channel.mli). F11 sweeps the runtime surface for any backchannel;
-   this is the compile-time edge of the same law, which 80-validation.md
+   this is the compile-time edge of the same law, which 50-api.md
    F15 covers under "every state these docs declare unrepresentable has a
    negative compilation test".
 

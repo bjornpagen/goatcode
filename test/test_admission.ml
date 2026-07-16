@@ -1,5 +1,5 @@
 (* Falsifiers F13 (admission soundness) and F14 (provisional identity)
-   (docs/architecture/80-validation.md § the falsifier discipline).
+   (docs/architecture/50-api.md § the falsifier discipline).
 
    F13 — admission soundness. Every theory the weak-acyclicity check admits
    quiesces on rigged executors with bounded fanout data; every rejected
@@ -11,7 +11,7 @@
 
    F14 — provisional identity. Squashed nodes' minted ids never appear in
    committed tuples; committed id space is dense and replay-stable
-   (docs/architecture/50-commit.md § provisional identity).
+   (docs/architecture/30-scheduling.md § provisional identity).
 
    Rigged executors only ([Agent.Rigged]); no test constructs a live
    provider lane; every run is bounded by an explicit step budget so a
@@ -156,7 +156,7 @@ let ids_of (tuples : Retire.Committed.tuple list) relation =
   |> List.sort (fun a b -> Int.compare (ordinal_of a) (ordinal_of b))
 
 (* Dense committed id space: for each relation, committed ordinals are
-   exactly 0..n-1 (docs/architecture/50-commit.md § provisional identity —
+   exactly 0..n-1 (docs/architecture/30-scheduling.md § provisional identity —
    "committed id space is dense"). *)
 let print_density (tuples : Retire.Committed.tuple list) =
   List.iter
@@ -523,10 +523,10 @@ let%expect_test "F14: committed id space is dense" =
   print_density settled.Run.tuples;
   (* Run with an interleaved squash: draft#1 dies between the committed
      draft#0 and draft#2. The docs demand density unconditionally
-     (docs/architecture/50-commit.md § provisional identity: ids mint
+     (docs/architecture/30-scheduling.md § provisional identity: ids mint
      provisionally against the committed counter as of the node's
      snapshot and bind in dependency order, "so committed id space is
-     dense"); F14's roster line repeats it (80-validation.md).
+     dense"); F14's roster line repeats it (50-api.md).
 
      RECORDED DEVIATION (for the repair phase; the expectation below pins
      the implementation's actual behavior): the current [Id]
@@ -944,7 +944,7 @@ let%expect_test "F13: the stratum bound is the loop's terminal generation — \
    it — a nested ref with no slot silently loses its edge, its footprint
    subscription, and its witness obligation
    (docs/architecture/10-theory.md § relations;
-   docs/architecture/30-channels.md § footprint filtering). *)
+   docs/architecture/20-medium.md § footprint filtering). *)
 
 let summary_schema : Yojson.Safe.t =
   `Assoc
@@ -1092,7 +1092,7 @@ let%expect_test "admission audit: reserved mint field, empty windows, and \
     |}]
 
 (* ------------------------------------------------------------------ *)
-(* F17, the admission lane (docs/architecture/60-agents.md § the git
+(* F17, the admission lane (docs/architecture/40-agents.md § the git
    ban): shell-gate command lines are data in the theory, so a gate whose
    argv[0] resolves to git — bare or by path — is a typed admission error
    naming the offending statement. A git gate is unwritable, not refused

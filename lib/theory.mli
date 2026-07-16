@@ -14,11 +14,11 @@
     downstream re-checks any of it; an unadmitted theory reaching the engine
     is not an error path, it is unrepresentable
     (docs/architecture/10-theory.md § termination;
-    docs/architecture/70-api.md § declaring a theory). *)
+    docs/architecture/50-api.md § declaring a theory). *)
 
 (** A relation: a named tuple shape whose payload is a contract catalog
     entry. Relations become channels at admission
-    (docs/architecture/30-channels.md § pre-opened channels). The phantom
+    (docs/architecture/20-medium.md § channels). The phantom
     ['a] is the payload type, which is also the {!Id} realm for the
     relation's mint slot — so a ref to this relation is written ['a Id.t]. *)
 module Relation : sig
@@ -37,7 +37,7 @@ module Relation : sig
       meta-catalog, with no OCaml payload type to derive from. The payload
       is schema-checked JSON; everything else (admission, channels,
       codecs-by-schema) is identical
-      (docs/architecture/60-agents.md § the planner). *)
+      (docs/architecture/40-agents.md § the planner). *)
 
   val stratified : generations:int -> 'a t -> 'a t
   (** Mark the relation as a feedback loop's stratum carrier: at most
@@ -59,7 +59,7 @@ module Relation : sig
       [Type.Id.provably_equal] against the presented relation — so a
       channel end at the wrong payload type is unconstructible even through
       the name-keyed table: only this declaration's own value refines
-      (docs/architecture/30-channels.md § pre-opened channels). *)
+      (docs/architecture/20-medium.md § channels). *)
 
   val payload_of_json :
     'a t ->
@@ -71,8 +71,8 @@ module Relation : sig
       tuple on the relation's channel: the payload was codec-proven at the
       boundary parse against this relation's admitted schema, so the typed
       log receives a value of the very type the channel was opened for
-      (docs/architecture/50-commit.md § retirement order;
-      docs/architecture/30-channels.md § pre-opened channels). *)
+      (docs/architecture/30-scheduling.md § retirement order;
+      docs/architecture/20-medium.md § channels). *)
 
   type packed = Packed : 'a t -> packed
   (** Existential wrapper for heterogeneous relation lists. *)
@@ -125,7 +125,7 @@ end
     options), recorded in the theory. Pins move deliberately, never
     implicitly; a pin bump is a first-class ledger event and resets the
     shape's predictor counters — survival history is per pin
-    (docs/architecture/60-agents.md § model pins). *)
+    (docs/architecture/40-agents.md § model pins). *)
 module Pin : sig
   type t = {
     provider : string;
@@ -144,7 +144,7 @@ end
     (data, in the theory); the runtime behind each case is bound in the run
     config ({!Agent} owns invocation). Pure functions and shell gates exist
     so the theory never invokes an LLM to do a compiler's job
-    (docs/architecture/60-agents.md). *)
+    (docs/architecture/40-agents.md). *)
 module Executor : sig
   (** An effect tool the template grants its nodes, priced at
       declaration: [Idempotent] carries the recorded idempotence
@@ -152,7 +152,7 @@ module Executor : sig
       write) and is grantable under either speculation status;
       [Non_idempotent] reaches only hypothesis-free dispatches — the
       grant's status index polices the rest
-      (docs/architecture/60-agents.md § tool grants; {!Agent.Grant}). *)
+      (docs/architecture/40-agents.md § tool grants; {!Agent.Grant}). *)
   module Effect : sig
     type t =
       | Idempotent of { tool : string; why : string }
@@ -167,7 +167,7 @@ module Executor : sig
             (** The role text (refuter, implementer, summarizer): the one
                 hand-written artifact, owned by the theory author. It states
                 stance and method, never shape — shape derives from the
-                contract (docs/architecture/60-agents.md § prompt assembly). *)
+                contract (docs/architecture/40-agents.md § prompt assembly). *)
         read_globs : string list;
             (** The read half of the file footprint grant — ambient
                 visibility over the shared tree (readable, snoopable);
@@ -206,7 +206,7 @@ module Executor : sig
   type id
   (** Executor identity, half of a speculation shape key
       ((statement, executor) per pin —
-      docs/architecture/40-scheduling.md § the predictor). *)
+      docs/architecture/30-scheduling.md § the predictor). *)
 
   val id : t -> id
   val id_to_string : id -> string
@@ -238,7 +238,7 @@ module Filter : sig
         (** [count(x in over where x.link = body.id and where_equals) cmp
             bound] — the [publish] shape in the worked example. Used by the
             scheduler as a readiness filter; the final law judgment still
-            runs (docs/architecture/50-commit.md § final-state judgment). *)
+            runs (docs/architecture/30-scheduling.md § final-state judgment). *)
 end
 
 (** Statement identity within one admitted theory. *)
@@ -297,7 +297,7 @@ module Law : sig
         (** No two nodes commit writes to the same path in one generation:
             the EGD whose violation is the merge-conflict signal, judged
             against the footprint index
-            (docs/architecture/50-commit.md § retirement order). *)
+            (docs/architecture/30-scheduling.md § retirement order). *)
 
   val name : t -> string
 
@@ -307,7 +307,7 @@ module Law : sig
     offenders : string list;
         (** The tuples or paths that witness a violation — a quorum
             shortfall names the law and the tuples; the host decides whether
-            that is an error (docs/architecture/40-scheduling.md
+            that is an error (docs/architecture/30-scheduling.md
             § quiescence). *)
   }
   (** Law verdicts land on the settled map, never as faults of any node:
@@ -316,7 +316,7 @@ end
 
 (** A typed fact, pre-run: what seeds are made of. Seed payloads written in
     OCaml are typed at construction; JSON seeds enter through the same codec
-    boundary as agent replies (docs/architecture/70-api.md § running,
+    boundary as agent replies (docs/architecture/50-api.md § running,
     § seed tooling). *)
 module Tuple : sig
   type t = Packed : 'a Relation.t * 'a -> t
@@ -328,7 +328,7 @@ module Tuple : sig
   (** The payload's wire rendering through the relation's own codec — what
       the engine feeds the body-match feed and committed state with at run
       open. Typed at construction, so the rendering is codec-proven by
-      construction (docs/architecture/70-api.md § running). *)
+      construction (docs/architecture/50-api.md § running). *)
 end
 
 (** A consumer edge: one statement reading one relation, with the raw
@@ -336,7 +336,7 @@ end
     ref slots it reads plus the executor's file-glob grant). The theory
     author never writes routing; routing is derived from what the contract
     says the consumer depends on
-    (docs/architecture/30-channels.md § footprint filtering). *)
+    (docs/architecture/20-medium.md § footprint filtering). *)
 module Edge : sig
   type t = {
     statement : Statement.id;
@@ -356,7 +356,7 @@ end
 
 (** Admission errors: values, each carrying the offending statement and,
     for cycles, the cycle path — shaped for the planner's repair lane as
-    much as for humans (docs/architecture/70-api.md § declaring a theory).
+    much as for humans (docs/architecture/50-api.md § declaring a theory).
     The planner earns no trust the operator doesn't have: planner-emitted
     theories pass exactly this judgment. *)
 module Admission : sig
@@ -395,7 +395,7 @@ module Admission : sig
             is an unwitnessed effect plus revert and branch machinery;
             gate command lines are data in the theory, so the ban is an
             admission judgment, not a dispatch-time refusal (operator
-            ruling; docs/architecture/60-agents.md § the git ban). *)
+            ruling; docs/architecture/40-agents.md § the git ban). *)
     | Invalid_generation_bound of { relation : string; bound : int }
         (** A generation stratum that does not bound: the counter must
             admit at least one generation or the loop it carries is an
@@ -414,7 +414,7 @@ type admitted
     mentions — [Run.exec] cannot be called on anything else, so an
     unadmitted theory cannot reach the engine by any code path (falsifier
     F15 asserts the negative compile;
-    docs/architecture/80-validation.md). *)
+    docs/architecture/50-api.md). *)
 
 val declare :
   relations:Relation.packed list ->
@@ -442,12 +442,12 @@ val edges : admitted -> Edge.t list
 
 val wire_schema : admitted -> relation:string -> Contract.Wire_schema.t option
 (** The parsed, safe schema — the proof admission kept
-    (docs/architecture/20-contracts.md § the LLM-safe subset). [None] for
+    (docs/architecture/10-theory.md § the LLM-safe subset). [None] for
     names the theory doesn't declare. *)
 
 val schema_hash : admitted -> relation:string -> Contract.Schema_hash.t option
 (** The contract's generation-witness input
-    (docs/architecture/50-commit.md § law 2). *)
+    (docs/architecture/30-scheduling.md § law 2). *)
 
 val slots : admitted -> relation:string -> Slot.t list option
 (** Slot classification as parsed from the contract at admission: the
@@ -465,7 +465,7 @@ val generations : admitted -> relation:string -> int option
     one — relations, statements, templates, pins are just more catalog. A
     meta-theory admits through {!Meta.admit}, which builds dynamic relations
     and runs the {e same} admission judgment as hand-written theories
-    (docs/architecture/60-agents.md § the planner). *)
+    (docs/architecture/40-agents.md § the planner). *)
 module Meta : sig
   type t
   (** A wire-shaped theory description. *)

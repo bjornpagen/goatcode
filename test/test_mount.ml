@@ -1,5 +1,5 @@
 (* Falsifiers, group "mount" — the chase engine on the fiber substrate
-   (docs/architecture/40-scheduling.md § read-time binding;
+   (docs/architecture/30-scheduling.md § read-time binding;
    docs/effects-evaluation.md; fiber.mli):
 
    - FM1 — engine-level overlap: two nodes' provider calls are

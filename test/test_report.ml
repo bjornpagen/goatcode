@@ -1,6 +1,6 @@
 (* Falsifiers for the ledger's reader half and the report surface
-   (docs/architecture/30-channels.md § the ledger — one log, four named
-   readers; docs/architecture/40-scheduling.md § the predictor, § ports).
+   (docs/architecture/20-medium.md § the ledger — one log, five named
+   readers; docs/architecture/30-scheduling.md § the predictor, § ports).
 
    The scheduler's lifecycle and drift events are typed data
    ([Ledger.Decision], [Ledger.Drift]); these tests hand-build event

@@ -6,7 +6,7 @@
     slot in a payload is written [Finding.t Id.t] — a verdict referencing a
     [change] where a [finding] belongs is a compile error in host code and a
     parse failure at the wire boundary, never a runtime admission check in
-    between (docs/architecture/20-contracts.md § failure surface). Engine
+    between (docs/architecture/10-theory.md § failure surface). Engine
     realms ([Ledger.node], [Ledger.hypothesis]) reuse the same machinery.
 
     Minting is engine-only with respect to every untyped party: there is no
@@ -15,14 +15,14 @@
     own minters produced — an agent inventing an id is rejected at the codec
     boundary with a diagnostic naming the expected relation
     (docs/architecture/10-theory.md § inclusions;
-    docs/architecture/20-contracts.md § failure surface).
+    docs/architecture/10-theory.md § failure surface).
 
     Ids are minted {e provisionally} against the committed counter as of the
     minting node's snapshot; they bind (become committed identity) only at
     the minting node's retirement, in dependency order, so committed id
     space is dense and replay-deterministic. A squashed node's provisional
     ids die with it; nothing renumbers
-    (docs/architecture/50-commit.md § provisional identity). *)
+    (docs/architecture/30-scheduling.md § provisional identity). *)
 
 type 'realm t
 (** An identifier in realm ['realm]. Abstract; obtainable only via {!mint}
@@ -46,7 +46,7 @@ type 'realm id := 'realm t
 
     One registry exists per run; the codec boundary consults it to reject
     agent-invented ids, and retirement drives the provisional→committed
-    transition (docs/architecture/50-commit.md § provisional identity). *)
+    transition (docs/architecture/30-scheduling.md § provisional identity). *)
 module Registry : sig
   type t
   (** The mutable per-run registry. *)
@@ -64,7 +64,7 @@ module Registry : sig
       chooses ['realm]; the [realm] name it passes is that relation's name,
       so the phantom it conjures is the one the registry checked.
       [`Unknown_id] is the codec-boundary rejection of invented refs
-      (docs/architecture/20-contracts.md § failure surface). *)
+      (docs/architecture/10-theory.md § failure surface). *)
 
   val status : t -> 'realm id -> [ `Provisional | `Committed ] option
   (** [None] when the id is not from this registry (impossible for ids
@@ -73,7 +73,7 @@ module Registry : sig
   val bind : t -> 'realm id -> (unit, [ `Already_bound ]) result
   (** Bind a provisional id at its minting node's retirement. Binding order
       is retirement order, keeping committed id space dense and
-      replay-stable (falsifier F14, docs/architecture/80-validation.md). *)
+      replay-stable (falsifier F14, docs/architecture/50-api.md). *)
 
   val drop_provisional : t -> 'realm id list -> unit
   (** Squash support: forget a squashed node's provisional ids. Dropped ids

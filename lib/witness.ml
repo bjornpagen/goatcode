@@ -1,6 +1,6 @@
 (* Observed witnesses: the read-set a node can prove, assembled from its own
-   ledger events (witness.mli is the contract; docs/architecture/50-commit.md
-   § the generation-witness protocol; docs/architecture/30-channels.md
+   ledger events (witness.mli is the contract; docs/architecture/30-scheduling.md
+   § the generation-witness protocol; docs/architecture/20-medium.md
    § mechanized witnesses).
 
    Representation before control flow: a witness IS a set of observed

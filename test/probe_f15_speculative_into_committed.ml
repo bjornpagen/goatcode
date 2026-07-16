@@ -4,11 +4,11 @@
    Law: committed state is reachable only through the retire path;
    [Retire.step] is the only writer, and it refuses (as a VALUE, not a
    type error: [Undischarged]) any node with undischarged hypotheses
-   (docs/architecture/50-commit.md § abort by construction, § retirement
+   (docs/architecture/30-scheduling.md § abort by construction, § retirement
    order; lib/retire.mli).
 
    RECORDED GAP (the mode half of this falsifier, as the task and
-   80-validation.md F15 anticipate): 50-commit.md states the OxCaml
+   50-api.md F15 anticipate): 30-scheduling.md states the OxCaml
    enforcement as speculative results being [unique]-moded values,
    consumed exactly once by retire or by squash. The v0 implementation on
    this switch (5.2.0+ox) carries NO mode annotations anywhere in lib/ —

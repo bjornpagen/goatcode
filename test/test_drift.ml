@@ -1,6 +1,6 @@
-(* Falsifiers, group "drift" (docs/architecture/80-validation.md):
+(* Falsifiers, group "drift" (docs/architecture/50-api.md):
 
-   F8 — drift routing table. Each drift class in 40-scheduling.md's table,
+   F8 — drift routing table. Each drift class in 30-scheduling.md's table,
    constructed deliberately, routes as the table says — including the
    per-consumer refinement: a breaking change to a field the consumer's
    observed witness never read is additive from that consumer's
@@ -12,9 +12,9 @@
    falsifier runs the review theory both ways with rigged executors and
    diffs. "Off" is exercised through both mechanisms the docs admit: the
    confidence floor (reads suspend instead of hypothesizing,
-   40-scheduling.md § backstops) and the per-shape switch, whose
+   30-scheduling.md § backstops) and the per-shape switch, whose
    constructor requires churn evidence obtainable only from a ledger
-   (40-scheduling.md § speculation is default-on).
+   (30-scheduling.md § speculation is default-on).
 
    Rigged executors only; no live model call; no sleep longer than
    milliseconds. *)
@@ -77,7 +77,7 @@ let route_name = function
    observed reads, then assert (a) the parse produced the intended class,
    (b) [route] agrees with the policy [table] (the total-match twin cannot
    silently diverge from the data), and (c) the route is the one
-   40-scheduling.md's table writes. Any mismatch prints loudly and breaks
+   30-scheduling.md's table writes. Any mismatch prints loudly and breaks
    the expect block. *)
 let case name ~landing ~consumed ~expect_tag ~expect_route =
   let cls = Speculate.Drift.classify ~landing ~consumed in
@@ -111,7 +111,7 @@ let case name ~landing ~consumed ~expect_tag ~expect_route =
 
 let%expect_test "F8: the routing policy table is total, as data" =
   (* Five classes, five rows, each exactly once; the routes are the ones
-     40-scheduling.md § drift routing writes. *)
+     30-scheduling.md § drift routing writes. *)
   List.iter
     (fun (tag, route) ->
       Printf.printf "%s -> %s\n" (tag_name tag) (route_name route))
@@ -699,7 +699,7 @@ let%expect_test "F9: speculation on/off commits identical tuples and law \
   Printf.printf "hypotheses taken (on): %d\n" (hypotheses_taken on);
   (* off, mechanism 1: the confidence floor — a floor above any possible
      chain confidence makes every hypothesizable read suspend instead
-     (40-scheduling.md § backstops) *)
+     (30-scheduling.md § backstops) *)
   let off_floor =
     run_review ~tag:"floor"
       ~backstops:

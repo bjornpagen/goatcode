@@ -5,7 +5,7 @@
     the only bidirectional party in the system is the scheduler. Everything
     a backchannel would carry is representable forward: a question, a
     revision request, a refutation is a new fact in a new relation that
-    fires a new node (docs/architecture/30-channels.md § the unidirectional
+    fires a new node (docs/architecture/20-medium.md § the derivation
     law; docs/architecture/10-theory.md § feedback is forward).
 
     Unidirectionality is by construction, not by check: the reader end
@@ -18,13 +18,13 @@
     producers have produced, because the channel it will eventually read is
     already a real object it can hold, subscribe to, and suspend on.
     Readiness is a property of a read, never of a node
-    (docs/architecture/30-channels.md § pre-opened channels). *)
+    (docs/architecture/20-medium.md § channels). *)
 
 (** A notification: small, typed, payload-free. Consumers pull the net
     delta through [delta_ref] if and when they decide it matters — the
     scarcest resource in the system is the consumer agent's context window,
     and update-flooding fills it with other agents' play-by-play
-    (docs/architecture/30-channels.md § invalidate, don't update). *)
+    (docs/architecture/20-medium.md § invalidate, don't update). *)
 module Invalidation : sig
   type t = {
     address : Ledger.Address.t;
@@ -38,7 +38,7 @@ module Invalidation : sig
       its address intersects the edge's declared footprint. The declaration
       is a filter, never a wall — correctness comes from the observed
       witness; the declaration only tunes delivery
-      (docs/architecture/30-channels.md § footprint filtering). *)
+      (docs/architecture/20-medium.md § footprint filtering). *)
 end
 
 type 'a tx
@@ -57,7 +57,7 @@ type registry
 val open_all : Theory.admitted -> registry
 (** Pre-open every relation's channel the moment admission passes — before
     any node runs. This is what makes eager start legal
-    (docs/architecture/40-scheduling.md § eager start). *)
+    (docs/architecture/30-scheduling.md § eager start). *)
 
 val tx : registry -> 'a Theory.Relation.t -> 'a tx
 (** The unique writer end for a relation. The engine is the only caller;
@@ -76,14 +76,14 @@ val rx : registry -> 'a Theory.Relation.t -> edge:Theory.Edge.t -> 'a rx
 (** A reader end scoped to one consumer edge; deliveries are filtered by
     the footprint compiled from the edge's contract-derived ref slots and
     file-glob grant. The theory author never writes routing
-    (docs/architecture/30-channels.md § footprint filtering). The relation
+    (docs/architecture/20-medium.md § footprint filtering). The relation
     is witness-judged exactly as in {!tx}. *)
 
 (** {2 Producer side (engine-only by possession of ['a tx])} *)
 
 val publish : 'a tx -> id:'a Id.t -> 'a -> unit
 (** Insert a committed tuple: called by retirement, the only writer of
-    committed state (docs/architecture/50-commit.md § retirement order). *)
+    committed state (docs/architecture/30-scheduling.md § retirement order). *)
 
 val invalidate : 'a tx -> Invalidation.t -> unit
 (** Fan an invalidation out to every subscribed edge whose footprint it
@@ -99,7 +99,7 @@ val pull_tuples : 'a rx -> ('a Id.t * 'a) list
 
 val pull_invalidations : 'a rx -> Invalidation.t list
 (** Drain pending invalidations at a yield point — check-on-yield delivery,
-    never mid-flight interrupts (docs/architecture/30-channels.md
+    never mid-flight interrupts (docs/architecture/20-medium.md
     § delivery). The caller renders these into drift notes
     ([Speculate.Drift], [Agent.Prompt]). *)
 
@@ -117,4 +117,4 @@ val covers : footprint:Ledger.Footprint.t -> Ledger.Address.t -> bool
     footprint-escape judge — a retiring node's observed loads outside its
     edge's compiled footprint surface as [Ledger.Event.Footprint_escape]
     events and a violated [footprint_cover] verdict on the settled map
-    (docs/architecture/30-channels.md § footprint filtering). *)
+    (docs/architecture/20-medium.md § footprint filtering). *)

@@ -1,4 +1,4 @@
-(* F15 — compile-time probes (docs/architecture/80-validation.md).
+(* F15 — compile-time probes (docs/architecture/50-api.md).
 
    Every state the docs declare *unrepresentable* has a negative
    compilation test: a probe file that must NOT typecheck, compiled by a
@@ -11,24 +11,24 @@
    legal twin in probe_control.ml):
 
    - probe_f15_wrong_relation_ref.ml       wrong-relation phantom ref
-                                           (20-contracts.md § failure surface)
+                                           (10-theory.md § failure surface)
    - probe_f15_unadmitted_theory.ml        Run.exec on an unadmitted theory
                                            (10-theory.md § termination,
-                                            70-api.md § running)
+                                            50-api.md § running)
    - probe_f15_bare_switch.ml              bare Switch.throw, no evidence
-                                           (40-scheduling.md § default-on)
+                                           (30-scheduling.md § default-on)
    - probe_f15_forged_churn.ml             fabricated churn evidence
-                                           (40-scheduling.md § default-on)
+                                           (30-scheduling.md § default-on)
    - probe_f15_nonidem_speculative.ml      non-idempotent effect tool at the
                                            speculative index
-                                           (60-agents.md § tool grants)
+                                           (40-agents.md § tool grants)
    - probe_f15_nonidem_in_grant.ml         same law, attacked via the grant
                                            record's effects list
    - probe_f15_speculative_into_committed.ml
                                            speculative value into committed
-                                           structures (50-commit.md § abort
+                                           structures (30-scheduling.md § abort
                                            by construction) — carries the
-                                           RECORDED GAP: 50-commit.md words
+                                           RECORDED GAP: 30-scheduling.md words
                                            this law in terms of unique-moded
                                            values; lib/ on this switch uses
                                            no modes, so the probe asserts
@@ -38,7 +38,7 @@
                                            inexpressible against this
                                            implementation.
    - probe_f15_rx_publish.ml               publish on a reader end
-                                           (30-channels.md § unidirectional)
+                                           (20-medium.md § the derivation law)
    - probe_control.ml                      the harness control: MUST compile
                                            with the same command, so the
                                            negatives fail on the library's
@@ -165,7 +165,7 @@ let%expect_test "F15 companion: wire ids resolve only against mint provenance"
 (* Companion to probe_f15_speculative_into_committed.ml: provisional ids
    bind exactly once (at their minting node's retirement) and a squashed
    node's provisional ids die — they never resolve again, nothing
-   renumbers (50-commit.md § provisional identity). *)
+   renumbers (30-scheduling.md § provisional identity). *)
 let%expect_test "F15 companion: provisional ids bind once, dropped ids die" =
   let reg = Id.Registry.create () in
   let minter : finding_realm Id.Minter.t =
@@ -202,7 +202,7 @@ let%expect_test "F15 companion: provisional ids bind once, dropped ids die" =
 (* Companion to probe_f15_bare_switch.ml / probe_f15_forged_churn.ml: the
    only constructor of churn evidence is [Churn.measure], and on a ledger
    with no churn regime it returns [None] — no evidence exists, so no
-   switch can be built, by construction (40-scheduling.md § default-on). *)
+   switch can be built, by construction (30-scheduling.md § default-on). *)
 let%expect_test "F15 companion: no churn regime in the ledger, no evidence" =
   let admitted = admit_linear () in
   let statement, spawn =

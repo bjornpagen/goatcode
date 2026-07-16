@@ -3,7 +3,7 @@
 
    Speculation is default-on; the per-shape off switch requires a churn
    measurement obtainable only from a ledger, so a bare switch is
-   unconstructible (docs/architecture/40-scheduling.md § speculation is
+   unconstructible (docs/architecture/30-scheduling.md § speculation is
    default-on; falsifier F15). Drift routing is a policy table — data, in
    one place — per doc rule 8. *)
 
@@ -110,7 +110,7 @@ module Drift = struct
     | `Producer_squashed -> Producer_squashed
     | `Refired diff ->
         (* The producer's statement itself re-fired: broad by definition,
-           whatever the diff says (40-scheduling.md § drift routing). *)
+           whatever the diff says (30-scheduling.md § drift routing). *)
         Breaking_broad { diff; refired = true }
     | `Landed diff -> (
         if Contract.Diff.is_empty diff then Schema_identical
@@ -285,7 +285,7 @@ module Counters = struct
     in
     (* Read-suspension time: the blocked component of the shape's nodes'
        telemetry — a suspended fiber is parked at a read with no
-       hypothesis source (40-scheduling.md § read-time binding). *)
+       hypothesis source (30-scheduling.md § read-time binding). *)
     let suspended_reads_s =
       List.fold_left
         (fun acc node ->
@@ -309,7 +309,7 @@ module Predictor = struct
     if c.Counters.samples = 0 then None else Some c.Counters.survival
 
   (* Hypothesis-source selection. A snooped store buffer is later, richer
-     reality than any issued contract (30-channels.md § store-to-load
+     reality than any issued contract (20-medium.md § store-to-load
      forwarding), so it wins by default and wherever history says this
      shape's hypotheses tend to survive. A shape whose hypotheses
      predominantly die is one whose partial artifacts churn, and its reads
@@ -321,7 +321,7 @@ module Predictor = struct
     | Some _ | None -> snooped
 
   (* Higher survival first; a fresh shape ranks with the optimists so its
-     regime measurements get taken in (80-validation.md § honest
+     regime measurements get taken in (50-api.md § honest
      measurement). Ties compare 0, so the port queue's FIFO order
      stands. *)
   let compare_for_port t a b =

@@ -13,7 +13,7 @@ module Relation = struct
            registry's name-keyed table recovers the payload type by
            [Type.Id.provably_equal] against this, so a channel end at the
            wrong payload type is unconstructible
-           (docs/architecture/30-channels.md § pre-opened channels). *)
+           (docs/architecture/20-medium.md § channels). *)
     generations : int option;
         (* The feedback stratum bound: at most this many engine-minted
            generations along one derivation chain
@@ -27,7 +27,7 @@ module Relation = struct
     (* The planner lane: the payload is schema-checked JSON, so the codec is
        the identity pair — the boundary check is the schema parse plus ref
        resolution, exactly as for typed payloads
-       (docs/architecture/60-agents.md § the planner). *)
+       (docs/architecture/40-agents.md § the planner). *)
     let codec = Contract.Codec.v ~of_json:(fun j -> j) ~to_json:(fun j -> j) in
     {
       name;
@@ -524,7 +524,7 @@ let declare ~relations ~statements ~laws =
   let declared name = List.exists (String.equal name) rel_names in
   (* The schema parse into the LLM-safe subset, once per relation: the
      refined [Wire_schema.t] is kept as the proof
-     (docs/architecture/20-contracts.md § lowering). *)
+     (docs/architecture/10-theory.md § lowering). *)
   let parsed =
     List.filter_map
       (fun (Relation.Packed r) ->
@@ -614,7 +614,7 @@ let declare ~relations ~statements ~laws =
       (* The git ban's admission boundary: gate command lines are data, so
          a gate whose argv[0] resolves to git is unwritable — git is the
          harness's commit substrate (operator ruling;
-         docs/architecture/60-agents.md § the git ban). The tool-lane half
+         docs/architecture/40-agents.md § the git ban). The tool-lane half
          lives in the agent layer's [run_command] screen. *)
       (match s.Spawn.by with
       | Executor.Shell_gate { command = argv0 :: _ as command; _ }
@@ -653,7 +653,7 @@ let declare ~relations ~statements ~laws =
       match l with
       | Law.Disjoint_writes _ ->
           (* Judge: the footprint index at retire — always compilable
-             (docs/architecture/50-commit.md § retirement order). *)
+             (docs/architecture/30-scheduling.md § retirement order). *)
           ()
       | Law.Count { name; over; group_by; _ } ->
           let unjudgeable reason =
@@ -789,7 +789,7 @@ module Meta = struct
 
      Failures raise [Yojson.Safe.Util.Type_error]; the codec boundary owns
      the catch and converts to repair diagnostics
-     (docs/architecture/20-contracts.md § failure surface). *)
+     (docs/architecture/10-theory.md § failure surface). *)
 
   let typ_err msg j = raise (U.Type_error (msg, j))
 

@@ -1,5 +1,5 @@
 (* Placeholder until the falsifier roster lands (docs/architecture/
-   80-validation.md): asserts the v0 interfaces exist and link without
+   50-api.md): asserts the v0 interfaces exist and link without
    executing any stub body. Every future test drives the library through
    the public surface with rigged executors ([Agent.Rigged]); no test ever
    constructs [Agent.claude_cli]. *)

@@ -36,7 +36,7 @@
  (preprocess
   (pps ppx_expect)))
 
-; --- F15: compile-time probes (docs/architecture/80-validation.md) ---------
+; --- F15: compile-time probes (docs/architecture/50-api.md) ---------
 ;
 ; Each negative probe is a program that must NOT typecheck. The rule
 ; compiles it with the same command as the control, accepts ONLY the
@@ -67,7 +67,7 @@
  (deps probe_control.cmo)
  (action (progn)))
 
-; F15 probe: wrong-relation phantom ref (20-contracts.md § failure surface).
+; F15 probe: wrong-relation phantom ref (10-theory.md § failure surface).
 
 (rule
  (targets probe_f15_wrong_relation_ref.err)
@@ -91,7 +91,7 @@
     probe_f15_wrong_relation_ref.err)))
 
 ; F15 probe: Run.exec on an unadmitted theory (10-theory.md § termination;
-; 70-api.md § running).
+; 50-api.md § running).
 
 (rule
  (targets probe_f15_unadmitted_theory.err)
@@ -113,8 +113,8 @@
  (action
   (run grep -q "Theory.admitted" probe_f15_unadmitted_theory.err)))
 
-; F15 probe: bare Switch.throw (40-scheduling.md § speculation is
-; default-on; 70-api.md § running).
+; F15 probe: bare Switch.throw (30-scheduling.md § speculation is
+; default-on; 50-api.md § running).
 
 (rule
  (targets probe_f15_bare_switch.err)
@@ -135,7 +135,7 @@
  (deps probe_f15_bare_switch.err)
  (action (run grep -q "Churn.measurement" probe_f15_bare_switch.err)))
 
-; F15 probe: fabricated churn evidence (40-scheduling.md § default-on).
+; F15 probe: fabricated churn evidence (30-scheduling.md § default-on).
 
 (rule
  (targets probe_f15_forged_churn.err)
@@ -157,7 +157,7 @@
  (action (run grep -q "Unbound record field" probe_f15_forged_churn.err)))
 
 ; F15 probe: non-idempotent effect tool at the speculative index
-; (60-agents.md § tool grants; 30-channels.md § event taxonomy).
+; (40-agents.md § tool grants; 20-medium.md § event taxonomy).
 
 (rule
  (targets probe_f15_nonidem_speculative.err)
@@ -201,7 +201,7 @@
  (action
   (run grep -q "Agent.Grant.speculative" probe_f15_nonidem_in_grant.err)))
 
-; F15 probe: speculative value into committed structures (50-commit.md
+; F15 probe: speculative value into committed structures (30-scheduling.md
 ; § abort by construction). Carries the recorded unique-mode gap — see the
 ; probe file's header.
 
@@ -225,7 +225,7 @@
  (action
   (run grep -q "Unbound value" probe_f15_speculative_into_committed.err)))
 
-; F15 probe: publish on a reader end (30-channels.md § the unidirectional
+; F15 probe: publish on a reader end (20-medium.md § the derivation
 ; law).
 
 (rule
@@ -248,7 +248,7 @@
  (action (run grep -q "Channel.tx" probe_f15_rx_publish.err)))
 
 ; F15 probe: wrongly-typed payload through a correctly-named relation
-; (30-channels.md § pre-opened channels — the B12 witness law).
+; (20-medium.md § channels — the B12 witness law).
 
 (rule
  (targets probe_f15_wrong_payload_publish.err)

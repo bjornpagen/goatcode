@@ -45,7 +45,7 @@ module Committed : sig
       judges against. Absence is a real case: a fresh address's first
       landing is distinguishable from never-committed state, which is what
       rejects a consumer that witnessed a differing pre-commit draft
-      (docs/architecture/50-commit.md § law 3). *)
+      (docs/architecture/30-scheduling.md § law 3). *)
 
   type tuple = {
     relation : string;
@@ -65,7 +65,7 @@ module Committed : sig
       universe, and a consumer's read of one witnesses committed state. No
       node wrote a seed: nothing enters the write log, and {!step} remains
       the only writer of node-produced committed state
-      (docs/architecture/70-api.md § running). *)
+      (docs/architecture/50-api.md § running). *)
 end
 
 (** The live frontier: validity is a ledger coordinate, never a filesystem
@@ -149,8 +149,8 @@ type generation_moved = {
 (** The typed signal shipped to the scheduler when a witness fails to hold:
     the engine performs no retry, no merge heroics, no silent re-read —
     the scheduler's drift-routing table owns what happens next
-    (docs/architecture/50-commit.md § law 3;
-    docs/architecture/40-scheduling.md § drift routing). *)
+    (docs/architecture/30-scheduling.md § law 3;
+    docs/architecture/30-scheduling.md § drift routing). *)
 
 (** Write-set conflict: the [disjoint] EGD's violation, detected as a set
     intersection over logged footprints — my read-set × your write-set at a
@@ -174,7 +174,7 @@ end
 (** Merge functions, registered per address class at theory accept. v0
     ships empty — every conflict serializes — until a real pipeline shows a
     serialization hot spot with an obviously-safe merge
-    (docs/architecture/50-commit.md § OPEN items). *)
+    (docs/architecture/30-scheduling.md § OPEN items). *)
 module Merge_registry : sig
   type t
 
@@ -194,7 +194,7 @@ type rejection =
   | Witness_moved of generation_moved list
   | Undischarged of Ledger.hypothesis Id.t list
       (** Undischarged hypotheses block retirement
-          (docs/architecture/40-scheduling.md § read-time binding). *)
+          (docs/architecture/30-scheduling.md § read-time binding). *)
   | Conflict of Conflict.t
 
 type head_tuple = { relation : string; id : string; payload : Yojson.Safe.t }
@@ -206,7 +206,7 @@ val dependency_order :
 (** Order retirable nodes so every node's producers precede it — computed
     from firing provenance. Commit-as-you-go lost by ruling: it lets a
     speculative node's output become visible before its hypotheses
-    discharge (docs/architecture/50-commit.md § retirement order). *)
+    discharge (docs/architecture/30-scheduling.md § retirement order). *)
 
 val step :
   committed:Committed.t ->
@@ -263,4 +263,4 @@ val judge :
     no deferral modes. Mid-run, laws are invisible to executing nodes; a
     node never blocks on a law, only on operands and ports. Verdicts land
     on the settled map, never as faults of any node
-    (docs/architecture/50-commit.md § final-state judgment). *)
+    (docs/architecture/30-scheduling.md § final-state judgment). *)

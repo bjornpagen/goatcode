@@ -1,5 +1,5 @@
 (* Channels: pre-opened, unidirectional, invalidation-carrying.
-   Semantics: docs/architecture/30-channels.md; contract: channel.mli.
+   Semantics: docs/architecture/20-medium.md; contract: channel.mli.
 
    Unidirectionality is by construction: [_ tx] wraps only the producer
    operations, [_ rx] only one edge's cursor and queue, and nothing in this
@@ -18,7 +18,7 @@
    admission which ids its refs will name). [Invalidation.passes] is the
    pattern-cover judgment; concrete-vs-concrete degenerates to equality, so
    observed footprints work unchanged
-   (docs/architecture/30-channels.md § footprint filtering). *)
+   (docs/architecture/20-medium.md § footprint filtering). *)
 
 (* Glob matching for file paths: [*] matches within one path segment,
    [**] matches across segments ([a/**/b] also matches [a/b]), [?] matches
@@ -95,7 +95,7 @@ end
 
 (* One consumer edge's subscription: allocated at [open_all] — before any
    node runs — so deliveries buffer for a consumer that has not started
-   (the buffered-socket state; 30-channels.md § pre-opened channels). *)
+   (the buffered-socket state; 20-medium.md § channels). *)
 type sub = {
   fp : Ledger.Footprint.t; (* compiled delivery filter *)
   pending : Invalidation.t Queue.t; (* footprint-filtered, drained at yield *)
@@ -126,7 +126,7 @@ type 'a rx = Rx of { log : ('a Id.t * 'a) Dynarray.t; sub : sub }
    [any_id] (ids are minted at firing time, unknowable at admission);
    contract addresses ride along so schema drift of a consumed relation
    reaches its consumers as drift notes
-   (30-channels.md § footprint filtering). *)
+   (20-medium.md § footprint filtering). *)
 let compile_footprint theory (edge : Theory.Edge.t) =
   let file_grants =
     List.map (fun g -> Ledger.Address.File g) edge.read_globs

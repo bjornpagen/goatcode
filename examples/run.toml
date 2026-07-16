@@ -1,4 +1,4 @@
-# run.toml — the CLI's run config (docs/architecture/70-api.md § the CLI).
+# run.toml — the CLI's run config (docs/architecture/50-api.md § the CLI).
 #
 # `goat plan` and `goat run` parse this file once, at bind time: a missing
 # required key, a mistyped value, an unknown provider in a pin, or a
@@ -8,7 +8,7 @@
 # The subset is deliberate. Two knobs the docs name are absent by ruling:
 # per-shape speculation off switches (a switch requires ledger-derived
 # churn evidence and is unconstructible from config text — doc rule 8)
-# and merge functions (v0 ships the registry empty; 50-commit.md § OPEN
+# and merge functions (v0 ships the registry empty; 30-scheduling.md § OPEN
 # items).
 
 # --- Required paths --------------------------------------------------
@@ -50,7 +50,7 @@ ledger_path = ".goat/ledger.bin"
 # The default port every executor binding names. Ports are structural
 # hazards, declared, never defaulted to a bound: an undeclared port is
 # open (no concurrency limit), per the house posture
-# (40-scheduling.md § ports and priority).
+# (30-scheduling.md § ports and priority).
 port = "agents"
 
 # A bounded port requires its documented bottleneck named — a bare limit
@@ -61,7 +61,7 @@ port = "agents"
 # limit = 4
 # bottleneck = "provider concurrency ceiling, tier 2 key"
 
-# --- Backstops (40-scheduling.md § backstops) ------------------------
+# --- Backstops (30-scheduling.md § backstops) ------------------------
 
 # Per-run ceiling on tokens spent under undischarged hypotheses. At the
 # ceiling only witnessed work admits until discharges catch up. Generous
@@ -71,12 +71,12 @@ token_ceiling = 2000000
 # Chain confidence below which reads suspend instead of hypothesizing.
 confidence_floor = 0.25
 
-# --- The repair lane (60-agents.md § validate and repair) ------------
+# --- The repair lane (40-agents.md § validate and repair) ------------
 
 # Repair attempts after the initial turn: budget = initial + N repairs.
 repair_attempts = 3
 
-# --- The planner pin (goat plan; 60-agents.md § model pins) ----------
+# --- The planner pin (goat plan; 40-agents.md § model pins) ----------
 
 # The planner is judgment-heavy work and pins the strongest available
 # model. Provider must be "anthropic" or "openai"; the matching API key

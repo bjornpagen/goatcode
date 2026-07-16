@@ -7,8 +7,8 @@
     is the journal replay checks against, and the reason
     [Date.now()]-class nondeterminism is banned from the scheduler
     (timestamps enter decisions only through the ledger;
-    docs/architecture/30-channels.md § the ledger;
-    docs/architecture/80-validation.md § replay determinism).
+    docs/architecture/20-medium.md § the ledger;
+    docs/architecture/50-api.md § replay determinism).
 
     One log, four named readers — {!Replay}, {!Telemetry},
     {!Predictor_history}, {!Witness_index} — per the anti-transcription
@@ -27,7 +27,7 @@ type node
     id is [node Id.t]. *)
 
 type hypothesis
-(** The {!Id} realm of hypotheses (docs/architecture/40-scheduling.md
+(** The {!Id} realm of hypotheses (docs/architecture/30-scheduling.md
     § read-time binding). *)
 
 (** Ledger time. Timestamps are assigned at append and are the only clock
@@ -60,10 +60,10 @@ module Address : sig
         (** One committed tuple, by relation and wire id. *)
     | Contract of string
         (** A relation's contract; its generation input is the derived
-            schema hash (docs/architecture/20-contracts.md § versioning). *)
+            schema hash (docs/architecture/10-theory.md § versioning). *)
     | Resource of string
         (** Shared machine state outside the tree — the effect lock's
-            domain (docs/architecture/30-channels.md § event taxonomy). *)
+            domain (docs/architecture/20-medium.md § event taxonomy). *)
 
   val equal : t -> t -> bool
   val compare : t -> t -> int
@@ -74,7 +74,7 @@ end
 (** Per-address generations. Only semantic change advances one: byte-null
     deltas and hash-identical schema re-derivations advance nothing, which
     is why an upstream landing exactly what speculators predicted retires
-    them for free (docs/architecture/50-commit.md § law 2). *)
+    them for free (docs/architecture/30-scheduling.md § law 2). *)
 module Generation : sig
   type t
 
@@ -101,7 +101,7 @@ end
 (** A reference to an out-of-line payload (a store's net delta, a large
     artifact). Payloads live in git's object database, never inline in
     events or invalidations; consumers pull through the ref if and when
-    they decide it matters (docs/architecture/30-channels.md § invalidate,
+    they decide it matters (docs/architecture/20-medium.md § invalidate,
     don't update; docs/architecture/20-medium.md § event taxonomy — the
     blob store is git's object database). *)
 module Delta_ref : sig
@@ -134,7 +134,7 @@ end
 
 (** An address set: what a tool call touched, what an edge subscribes to,
     what conflict detection intersects
-    (docs/architecture/30-channels.md § the ledger, § footprint
+    (docs/architecture/20-medium.md § the ledger, § footprint
     filtering). *)
 module Footprint : sig
   type t
@@ -165,7 +165,7 @@ end
 
 (** A node's own failure: executor error or repair-lane exhaustion. The
     fault is the node's own throw, raw, never wrapped into a run-level
-    rejection (docs/architecture/40-scheduling.md § settlement). *)
+    rejection (docs/architecture/30-scheduling.md § settlement). *)
 module Fault : sig
   type origin = Executor_error | Repair_exhausted | Context_exhausted
 
@@ -174,7 +174,7 @@ end
 
 (** Why a node was killed from outside. Carries the cause chain: which
     hypothesis died, whose fault propagated
-    (docs/architecture/40-scheduling.md § settlement). *)
+    (docs/architecture/30-scheduling.md § settlement). *)
 module Squash_cause : sig
   type t =
     | Dead_hypothesis of hypothesis Id.t
@@ -185,7 +185,7 @@ module Squash_cause : sig
             against the state that beat it: conflict losers and
             moved-witness reconciles. The reissue is the scheduler's next
             act, recorded beside this settlement
-            (docs/architecture/40-scheduling.md § settlement). *)
+            (docs/architecture/30-scheduling.md § settlement). *)
     | No_producer
         (** A suspended read with no remaining producer: the operand can
             never be served, so the node settles and the run quiesces
@@ -195,7 +195,7 @@ end
 
 (** Precise settlement: every node settles exactly once, as one of three.
     The settled map, not an exception, is the answer the host receives
-    (docs/architecture/40-scheduling.md § settlement). *)
+    (docs/architecture/30-scheduling.md § settlement). *)
 module Settlement : sig
   type t =
     | Retired  (** Committed; head tuples inserted; stores landed. *)
@@ -208,7 +208,7 @@ end
     reads) plus the reissue/flush/abort rulings and the ceiling anomaly.
     A sum, never a string — an unknown action is unrepresentable, and
     {!Telemetry.timing} decomposes blocked/queued/run from these typed
-    markers (docs/architecture/40-scheduling.md § ports and priority,
+    markers (docs/architecture/30-scheduling.md § ports and priority,
     § settlement). Throwing the per-shape speculation off switch is not
     here: it is its own event ({!Event.kind.Switch_thrown}), with the
     churn evidence attached. *)
@@ -216,7 +216,7 @@ module Decision : sig
   type t =
     | Queued of { port : string }
         (** Entered the named port's queue (ports are structural hazards,
-            declared — docs/architecture/40-scheduling.md § ports). *)
+            declared — docs/architecture/30-scheduling.md § ports). *)
     | Admitted of { port : string }  (** Won a slot on the named port. *)
     | Dispatched  (** Execution began; the run clock starts here. *)
     | Suspended  (** A read blocked with no hypothesis source; parked. *)
@@ -224,10 +224,10 @@ module Decision : sig
     | Serialize_reissue
         (** Conflict loser reissued against the winner's state — the v0
             route for every write conflict
-            (docs/architecture/50-commit.md § conflicts). *)
+            (docs/architecture/30-scheduling.md § conflict judgment). *)
     | Flush_subtree
         (** A dead hypothesis's derivation subtree squashed
-            (docs/architecture/40-scheduling.md § drift routing). *)
+            (docs/architecture/30-scheduling.md § drift routing). *)
     | Abort_suspended
         (** A suspended read with no remaining producer settled so the
             run can quiesce. *)
@@ -235,7 +235,7 @@ module Decision : sig
         (** The token ceiling bound: only witnessed work admitted until
             discharges catch up — an anomaly with a named cause, never a
             cost-control success
-            (docs/architecture/40-scheduling.md § backstops). *)
+            (docs/architecture/30-scheduling.md § backstops). *)
 
   val to_string : t -> string
   (** The one wire rendering, for reports and replay divergence messages;
@@ -247,7 +247,7 @@ end
     live upstream in [Speculate]; events carry these compact forms because
     payloads never ride inline ({!Delta_ref}) — and replay re-judges each
     recorded route against the table without re-parsing any wire string
-    (docs/architecture/40-scheduling.md § drift routing). *)
+    (docs/architecture/30-scheduling.md § drift routing). *)
 module Drift : sig
   type cls =
     | Schema_identical
@@ -269,11 +269,11 @@ module Drift : sig
 end
 
 (** The event taxonomy. Tool calls classify as exactly one of load / store /
-    effect (docs/architecture/30-channels.md § event taxonomy); engine
+    effect (docs/architecture/20-medium.md § event taxonomy); engine
     events record firings, hypotheses, invalidations, settlements, and
     every scheduler decision with its reason — so a reader of the ledger
     can always answer "why did this run twice"
-    (docs/architecture/40-scheduling.md § drift routing). *)
+    (docs/architecture/30-scheduling.md § drift routing). *)
 module Event : sig
   type kind =
     | Load of {
@@ -281,7 +281,7 @@ module Event : sig
         observed : (Address.t * Generation.t * Content_hash.t) list;
             (** The witness triples this read contributes: captured by
                 observation, never self-report
-                (docs/architecture/30-channels.md § mechanized
+                (docs/architecture/20-medium.md § mechanized
                 witnesses). *)
       }
     | Store of { tool : string; address : Address.t; delta : Delta_ref.t }
@@ -294,7 +294,7 @@ module Event : sig
         (** Shared machine state; acquired the footprint lock; the one
             class not squashable by construction — which is why
             speculative grants cannot contain the non-idempotent case
-            (docs/architecture/60-agents.md § tool grants). *)
+            (docs/architecture/40-agents.md § tool grants). *)
     | Agent_turn of { usage : Usage.t }
         (** One model turn's token bill, for the speculation account. *)
     | Fired of { provenance : Provenance.t; minted : (string * string) list }
@@ -324,7 +324,7 @@ module Event : sig
             witness; the escape is the grow-the-declaration witness, never
             a fault. Readers: the run-level [footprint_cover] verdict the
             engine appends to the settled map's laws, and [Report.explain]
-            (docs/architecture/30-channels.md § footprint filtering). *)
+            (docs/architecture/20-medium.md § footprint filtering). *)
     | Repair_attempt of { attempt : int; refusal : bool }
     | Settled of Settlement.t
     | Decision of {
@@ -342,14 +342,14 @@ module Event : sig
       }
         (** Resets the shape's predictor counters. Carries the typed
             identities — a reader reconstructs no id from a wire string
-            (docs/architecture/60-agents.md § model pins). *)
+            (docs/architecture/40-agents.md § model pins). *)
     | Switch_thrown of {
         statement : Theory.Statement.id;
         executor : Theory.Executor.id;
         churn : float;
       }
         (** The per-shape speculation off switch, with the evidence
-            (docs/architecture/40-scheduling.md § default-on). *)
+            (docs/architecture/30-scheduling.md § default-on). *)
     | Law_verdict of { law : string; satisfied : bool }
     | Correction of { subject : string; cause : string }
         (** A regression of a doc'd number, with a named cause
@@ -366,25 +366,25 @@ end
 
 type t
 (** An open ledger: single-writer append-only file in v0
-    (docs/architecture/30-channels.md § OPEN items). *)
+    (docs/architecture/20-medium.md § OPEN items). *)
 
 val create : path:string -> t
 (** Open (creating if absent) the ledger at [path]. *)
 
 val load : path:string -> t
 (** Open an existing ledger read-only — the CLI's report/explain/replay
-    entry (docs/architecture/70-api.md § the CLI). *)
+    entry (docs/architecture/50-api.md § the CLI). *)
 
 val append : t -> ?node:node Id.t -> Event.kind -> Event.t
 (** Append one event; the ledger assigns the timestamp and returns the
     stamped event. This is the one store the dispatch path owes
-    (docs/architecture/40-scheduling.md § ports and priority). *)
+    (docs/architecture/30-scheduling.md § ports and priority). *)
 
 (** {2 The four named readers} *)
 
 (** Reader 1: resume/replay. The full stamped stream, in append order — what
     the replay-determinism falsifier re-executes decisions against
-    (docs/architecture/80-validation.md § replay determinism). *)
+    (docs/architecture/50-api.md § replay determinism). *)
 module Replay : sig
   val events : t -> Event.t list
 end
@@ -408,7 +408,7 @@ end
 
 (** Reader 3: the predictor. Contract-survival and reconcile-cost history
     per task shape, per pin — the training data for
-    [Speculate.Predictor] (docs/architecture/40-scheduling.md § the
+    [Speculate.Predictor] (docs/architecture/30-scheduling.md § the
     predictor). *)
 module Predictor_history : sig
   type sample = {
@@ -431,7 +431,7 @@ end
 
 (** Reader 4: the witness index. Read-set and write-set extraction per
     node, consumed by conflict detection at retire — memory disambiguation,
-    mechanized (docs/architecture/30-channels.md § mechanized witnesses). *)
+    mechanized (docs/architecture/20-medium.md § mechanized witnesses). *)
 module Witness_index : sig
   val reads :
     t -> node Id.t -> (Address.t * Generation.t * Content_hash.t) list

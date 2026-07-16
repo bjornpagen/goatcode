@@ -4,7 +4,7 @@
    Law: a channel end carries the payload type of the admitted relation it
    was opened for, recovered from the name-keyed registry by the relation's
    own payload witness — never by a cast
-   (docs/architecture/30-channels.md § pre-opened channels; lib/channel.mli
+   (docs/architecture/20-medium.md § channels; lib/channel.mli
    [tx]). A re-declaration that shares the NAME of an admitted relation is
    the B12 attack: before the witness, the registry handed it a channel end
    at the admitted type through an unchecked cast (heap corruption from

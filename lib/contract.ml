@@ -1,5 +1,5 @@
 (* The contract layer: one supply, everything derived
-   (docs/architecture/20-contracts.md). The signatures in contract.mli are
+   (docs/architecture/10-theory.md). The signatures in contract.mli are
    normative; this file holds the admission parse into the LLM-safe subset,
    the mechanical drift diff, the boundary codec, and the code-interface
    meta-contract. *)
@@ -9,7 +9,7 @@ module Schema_hash = struct
      schema. Canonical means order-insensitive where JSON is
      order-insensitive (record fields, $defs, enum case sets), so a pure
      reordering is generation-silent — a semantic no-op is free
-     (docs/architecture/20-contracts.md § versioning). *)
+     (docs/architecture/10-theory.md § versioning). *)
   type t = string
 
   let equal = String.equal
@@ -67,7 +67,7 @@ module Wire_schema = struct
   (* Annotation keywords carry prose or metadata the validator ignores
      harmlessly; structural keywords are the safe subset itself. Any other
      key is an escape: a constraint a provider validator would silently
-     drop is a validator that lies (docs/architecture/20-contracts.md
+     drop is a validator that lies (docs/architecture/10-theory.md
      § lowering). *)
   let annotation_keys =
     [
@@ -461,7 +461,7 @@ module Wire_schema = struct
   (* Injective canonical serialization: strings length-prefixed, one tag
      character per node kind, record fields and $defs sorted by name, enum
      cases as a sorted set. Two schemas hash equal iff [Diff.between] of
-     them is empty (docs/architecture/50-commit.md § law 2). *)
+     them is empty (docs/architecture/30-scheduling.md § law 2). *)
   let hash t =
     let buf = Buffer.create 512 in
     let str s =
@@ -712,7 +712,7 @@ let contains hay needle = Option.is_some (find_sub hay needle 0)
 
 (* Contents of ```-fenced blocks, in order: the primary lane is freeform,
    so the payload commonly arrives fenced inside prose
-   (docs/architecture/60-agents.md § the primary lane). *)
+   (docs/architecture/40-agents.md § the primary lane). *)
 let fenced_blocks s =
   let fence = "```" in
   let rec loop i acc =
@@ -755,7 +755,7 @@ let extract_json raw =
 (* Refusal markers: a non-parse carrying one of these (or carrying no JSON
    syntax at all — the model meta-commented instead of producing tuples)
    routes to the constrained-decode fallback lane rather than the repair
-   loop (docs/architecture/60-agents.md § the fallback lane). *)
+   loop (docs/architecture/40-agents.md § the fallback lane). *)
 let refusal_markers =
   [
     "i cannot"; "i can't"; "i won't"; "i will not"; "i am unable";
@@ -781,7 +781,7 @@ module Codec = struct
      the same value the model was handed, one supply. A ref slot resolves
      through the registry against mint provenance, so an agent-invented id
      is a complaint naming the expected relation, never a tuple
-     (docs/architecture/20-contracts.md § failure surface). *)
+     (docs/architecture/10-theory.md § failure surface). *)
   let by_schema (ws : Wire_schema.t) : Yojson.Safe.t t =
     let open Wire_schema in
     let complain path expected got =

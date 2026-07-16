@@ -2,7 +2,7 @@
 
     [exec] is the only way work runs, and it accepts only
     {!Theory.admitted} — an unadmitted theory cannot reach the engine by
-    any code path (docs/architecture/70-api.md § running). The answer is a
+    any code path (docs/architecture/50-api.md § running). The answer is a
     value, never an exception: a run-level failure exists only for host
     misuse (config paths that don't exist), never for node failure or law
     violation — the map is the answer. *)
@@ -20,21 +20,21 @@ type config = {
   ledger_path : string;
   ports : Chase.Port.t list;
       (** The port table: provider ceilings and other documented
-          bottlenecks (docs/architecture/40-scheduling.md § ports). *)
+          bottlenecks (docs/architecture/30-scheduling.md § ports). *)
   executors : Chase.executor_binding list;
       (** Runtime bindings for the theory's executors: rigged in tests,
           the direct provider lanes ([Agent.agent] over [Agent.Provider])
           live. *)
   backstops : Speculate.Backstops.t;
       (** Token ceiling and confidence floor
-          (docs/architecture/40-scheduling.md § backstops). *)
+          (docs/architecture/30-scheduling.md § backstops). *)
   switches : Speculate.Switch.t list;
       (** Per-shape speculation off switches. Representation-enforced: a
           switch exists only with churn evidence attached
           ({!Speculate.Switch.throw}). *)
   merges : Retire.Merge_registry.t;
       (** Merge functions, registered here — at theory accept — and never
-          improvised (docs/architecture/50-commit.md). *)
+          improvised (docs/architecture/30-scheduling.md). *)
 }
 
 type misuse =
@@ -46,7 +46,7 @@ type misuse =
     violations are entries in the settled map, never these. *)
 
 (** One node's row in the settled map: settlement, timing decomposition,
-    and speculation stamps (docs/architecture/70-api.md § the settled
+    and speculation stamps (docs/architecture/50-api.md § the settled
     map). *)
 type node_report = {
   settlement : Ledger.Settlement.t;
@@ -79,8 +79,8 @@ val exec :
     map. Runs on the cooperative fiber substrate ({!Fiber}): reads park
     mid-flight, provider calls overlap on one domain, squash
     discontinues — [exec] drives the scheduler to quiescence. Still one
-    process, one domain (docs/architecture/70-api.md § running;
-    docs/architecture/40-scheduling.md § read-time binding). *)
+    process, one domain (docs/architecture/50-api.md § running;
+    docs/architecture/30-scheduling.md § read-time binding). *)
 
 (** {2 In-flight observation} *)
 
@@ -128,4 +128,4 @@ val replay : Ledger.t -> (unit, divergence list) result
     which the ledger does not carry. Full re-execution (same theory, same
     seed, executor outputs substituted, every scheduler decision
     reproduced) is the recorded OPEN item, with its trigger
-    (docs/architecture/80-validation.md § replay determinism). *)
+    (docs/architecture/50-api.md § replay determinism). *)

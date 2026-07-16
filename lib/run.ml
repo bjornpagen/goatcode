@@ -1,11 +1,11 @@
-(* The host surface (docs/architecture/70-api.md).
+(* The host surface (docs/architecture/50-api.md).
 
    One entry point: [exec] accepts only [Theory.admitted] — admission
    already parsed the theory, so nothing here re-checks it. The only
    run-level rejection is host misuse (config paths that don't exist,
    executors the config doesn't bind, ports the table doesn't declare);
    node failures and law violations are entries in the settled map, never
-   exceptions and never [misuse] (docs/architecture/40-scheduling.md
+   exceptions and never [misuse] (docs/architecture/30-scheduling.md
    § settlement, § quiescence and completion).
 
    The chase runs on the cooperative fiber substrate ([Fiber]): reads park
@@ -125,7 +125,7 @@ type handle = {
   run_ledger : Ledger.t;
   mutable outcome : settled option;
       (* [wait] memoizes: quiescence is driven once, laws are judged
-         once (docs/architecture/50-commit.md § final-state judgment). *)
+         once (docs/architecture/30-scheduling.md § final-state judgment). *)
 }
 
 let zero_timing : Ledger.Telemetry.timing =
@@ -194,7 +194,7 @@ let start ~theory ~seed ~config =
     (Retire.Frontier.of_ledger run_ledger ~committed)
     ~repo:config.repo;
   (* Channels pre-open before any node runs — what makes eager start
-     legal (docs/architecture/30-channels.md § pre-opened channels). *)
+     legal (docs/architecture/20-medium.md § channels). *)
   let channels = Channel.open_all theory in
   let chase =
     Chase.create ~theory ~ledger:run_ledger ~committed ~channels
@@ -219,7 +219,7 @@ let exec ~theory ~seed ~config = Result.map wait (start ~theory ~seed ~config)
 
 (* {2 Replay}
 
-   The ledger-completeness audit (docs/architecture/80-validation.md
+   The ledger-completeness audit (docs/architecture/50-api.md
    § replay determinism): every scheduler decision must be reproducible
    from recorded events alone. The v0 taxonomy ([Ledger.Event.kind])
    records decisions and their inputs but not the theory value itself, so
@@ -231,7 +231,7 @@ let exec ~theory ~seed ~config = Result.map wait (start ~theory ~seed ~config)
    - settlement: every fired node settles exactly once;
    - retire order: dependency order, recomputed from firing provenance —
      a producer retires before any consumer of its minted tuples
-     (docs/architecture/50-commit.md § retirement order);
+     (docs/architecture/30-scheduling.md § retirement order);
    - drift routing: each recorded [Drift_note]'s route re-derived from
      the routing policy table ([Speculate.Drift.table]) applied to the
      recorded class.

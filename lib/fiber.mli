@@ -15,7 +15,7 @@
     settled. Continuations never substitute for that evented state — a
     captured continuation is ephemeral runtime detail, exactly as ephemeral
     as the HTTP call it wraps; the ledger, not the heap, is this project's
-    source of truth (docs/architecture/30-channels.md § the ledger).
+    source of truth (docs/architecture/20-medium.md § the ledger).
 
     Waiting happens at reads, never at issue: a parked fiber costs nothing
     and resumes on an external {!wake} — this module is the runtime
@@ -24,8 +24,8 @@
     waits on) and {!wake} resumes exactly the fibers waiting on the
     address that changed — the engine's old whole-instance parked list
     and its requeue-everything-on-any-retirement are gone
-    (docs/architecture/40-scheduling.md § read-time binding;
-    docs/architecture/30-channels.md § pre-opened channels). *)
+    (docs/architecture/30-scheduling.md § read-time binding;
+    docs/architecture/20-medium.md § channels). *)
 
 (** What a served read answers with — chase.mli's [Read.outcome], minus
     [Suspended]: suspension is not a value the fiber sees, it is the
@@ -59,7 +59,7 @@ type _ Effect.t +=
             the fiber on the address until {!wake}. *)
   | Yield : Speculate.Drift.note list Effect.t
         (** The check-on-yield suspension point
-            (docs/architecture/30-channels.md § delivery). The handler
+            (docs/architecture/20-medium.md § delivery). The handler
             answers the drift notes that passed the fiber's footprint
             filter. A [`Stop_cleanly] disposition never reaches the fiber:
             the handler discontinues instead of resuming, so squash stops
@@ -75,7 +75,7 @@ exception Squash
 (** What a squashed fiber's continuation is discontinued with. It unwinds
     the fiber's stack, so [Fun.protect] finalizers run
     — abort by construction, not compensation
-    (docs/architecture/50-commit.md § abort by construction). Catching it
+    (docs/architecture/30-scheduling.md § abort by construction). Catching it
     buys the fiber nothing: squash is scheduler state, and every
     subsequent instruction the fiber performs is discontinued again; even
     a normal return after swallowing it settles as [Stopped], never
@@ -119,7 +119,7 @@ end
     stop — an external squash carries its cause chain, a clean stop
     carries the drift note that ordered it — so "why did this fiber die"
     is answerable from the value alone
-    (docs/architecture/40-scheduling.md § settlement). *)
+    (docs/architecture/30-scheduling.md § settlement). *)
 type stop =
   | Squashed of Ledger.Squash_cause.t  (** External {!squash}. *)
   | Stopped_cleanly of Speculate.Drift.note

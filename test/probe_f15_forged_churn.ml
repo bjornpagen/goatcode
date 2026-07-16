@@ -2,7 +2,7 @@
 
    Law: a [Speculate.Churn.measurement] is obtainable only from a ledger
    ([Churn.measure]) — there is no public constructor, so the off switch
-   cannot be thrown on folklore (docs/architecture/40-scheduling.md
+   cannot be thrown on folklore (docs/architecture/30-scheduling.md
    § speculation is default-on; lib/speculate.mli).
 
    The probe writes the measurement down as if it were a record. The type

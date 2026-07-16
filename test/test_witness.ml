@@ -1,20 +1,20 @@
 (* Falsifiers F6 (witness honesty) and F7 (free-commit)
-   (docs/architecture/80-validation.md § the falsifier discipline).
+   (docs/architecture/50-api.md § the falsifier discipline).
 
    F6 — witness honesty: a node whose executor is rigged to CLAIM a
    dependency it never read, or to HIDE one it did read, gets the witness
-   the ledger observed, both times (docs/architecture/30-channels.md
-   § mechanized witnesses; docs/architecture/50-commit.md § law 1).
+   the ledger observed, both times (docs/architecture/20-medium.md
+   § mechanized witnesses; docs/architecture/30-scheduling.md § law 1).
 
    F7 — free-commit: an upstream that lands byte-identically to the
    hypothesis advances no generation, fires no invalidation, and its
    speculators retire with zero reconcile events
-   (docs/architecture/50-commit.md § law 2 — the economic keystone).
+   (docs/architecture/30-scheduling.md § law 2 — the economic keystone).
 
    Law 3, fresh addresses — the commit-point check judges the artifact:
    a consumer that witnessed a pre-commit draft a producer's first landing
    replaced is rejected even though both states share the first generation
-   (docs/architecture/50-commit.md § law 3 — absence is a real case).
+   (docs/architecture/30-scheduling.md § law 3 — absence is a real case).
 
    Every executor here is [Agent.Rigged]; no test constructs
    [Agent.claude_cli]; nothing sleeps; nothing touches the network. *)
@@ -47,7 +47,7 @@ let sh cmd = ignore (Sys.command (cmd ^ " >/dev/null 2>&1"))
 let ( // ) = Filename.concat
 
 (* A one-commit git repository: the committed branch's storage engine
-   (docs/architecture/50-commit.md § durability boundary). *)
+   (docs/architecture/30-scheduling.md § durability boundary). *)
 let seed_repo repo ~file ~contents =
   sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
   write_file (repo // file) contents;
@@ -698,7 +698,7 @@ let%expect_test "F7: an identical head-tuple payload is a free commit" =
 (* witnessed at — so a generation-only check would let a consumer that    *)
 (* snooped a DIFFERENT draft retire over the producer's landing.  The     *)
 (* commit-point check judges the artifact (the content hash the triple    *)
-(* already carries; 50-commit.md § law 1/law 3): the drifted snooper is   *)
+(* already carries; 30-scheduling.md § law 1/law 3): the drifted snooper is   *)
 (* rejected, the exact-prediction snooper still retires free, and the     *)
 (* rejection carries the store event's delta ref.                         *)
 (* ================================================================== *)

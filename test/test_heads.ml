@@ -4,18 +4,18 @@
    - B4 — seed payloads are real: a seed tuple's payload reaches the
      executor's operand section, enters committed state at run open, and
      makes law judgment over a seeded relation non-vacuous
-     (docs/architecture/70-api.md § running).
+     (docs/architecture/50-api.md § running).
    - B13 — cardinality windows are shape: a tuples window is handed to the
      invocation as the array-rooted wire schema (minItems/maxItems), and a
      reply conforming to that handed schema parses; the bound is unwritable
      at the decode boundary, never a count check after it
      (docs/architecture/10-theory.md § statement grammar;
-     docs/architecture/20-contracts.md § lowering).
+     docs/architecture/10-theory.md § lowering).
    - B1 — the boundary is the admitted contract: head replies parse through
      [Contract.Codec] against the admitted wire schema with ref resolution
      against mint provenance — wrong enums, stray fields, and invented ref
      ids die at the boundary with diagnostics, never in committed state
-     (docs/architecture/20-contracts.md § failure surface).
+     (docs/architecture/10-theory.md § failure surface).
    - B14 — provenance is total for tuple-window heads: every committed head
      id traces to a firing record of its retired producer in the ledger
      (docs/architecture/10-theory.md § provenance is total).

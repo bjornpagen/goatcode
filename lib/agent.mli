@@ -5,13 +5,13 @@
     template (the common case), a pure function, or a shell gate — the
     latter two exist so the theory never invokes an LLM to do a compiler's
     job. The declarations live in {!Theory.Executor}; this module owns the
-    runtimes behind them (docs/architecture/60-agents.md).
+    runtimes behind them (docs/architecture/40-agents.md).
 
     The agent runtimes are {b direct provider API calls — never a CLI
     shell-out}. The harness owns the tool loop: every load, store, and
     effect an agent performs is executed here and appended to the ledger as
     an evented footprint, which is the only design under which the
-    mechanized-witness law can hold (docs/architecture/30-channels.md
+    mechanized-witness law can hold (docs/architecture/20-medium.md
     § mechanized witnesses). Two layers:
 
     - {!Provider} — ONE stateless model turn: request out, assistant reply
@@ -32,7 +32,7 @@
 
     No live LLM call happens in tests: falsifiers run entirely on
     {!Rigged} lanes; the provider lanes are never constructed by the test
-    suite (docs/architecture/80-validation.md § the falsifier
+    suite (docs/architecture/50-api.md § the falsifier
     discipline). *)
 
 (** Tool grants: the node's footprint made operational — reads and writes
@@ -48,8 +48,8 @@
     tool simply cannot be given the [speculative] index — "a speculative
     node ran a non-idempotent effect" is not a policy violation the
     dispatcher catches, it is a grant nobody can build (falsifiers F12 and
-    F15; docs/architecture/60-agents.md § tool grants;
-    docs/architecture/30-channels.md § event taxonomy). *)
+    F15; docs/architecture/40-agents.md § tool grants;
+    docs/architecture/20-medium.md § event taxonomy). *)
 module Grant : sig
   type speculative
   (** Phantom index: the node carries undischarged hypotheses. *)
@@ -113,7 +113,7 @@ module Grant : sig
 
   val describe : _ t -> string
   (** The footprint-grant prompt section, rendered
-      (docs/architecture/60-agents.md § prompt assembly, part 4). *)
+      (docs/architecture/40-agents.md § prompt assembly, part 4). *)
 end
 
 (** Prompt assembly: derived, never authored. A hand-authored per-node
@@ -122,7 +122,7 @@ end
     section (derived prose + wire schema as reference text), operand
     section (codec-rendered body tuples; hypotheses explicitly marked
     speculative), footprint grant, settlement instruction
-    (docs/architecture/60-agents.md § prompt assembly). *)
+    (docs/architecture/40-agents.md § prompt assembly). *)
 module Prompt : sig
   type part =
     | Preamble of string
@@ -230,7 +230,7 @@ end
     assistant reply out. The tool loop lives {e above} this signature, in
     the agent layer, so a provider never executes anything: it moves bytes
     to a model API and types the reply
-    (docs/architecture/60-agents.md § model pins and provider routing,
+    (docs/architecture/40-agents.md § model pins and provider routing,
     § the executor transport). *)
 module Provider : sig
   (** A tool the model may call: harness-owned declarations, one per tool
@@ -343,7 +343,7 @@ end
 
 (** Loop bounds as data, checked by the agent loop before each model turn
     (the runaway-loop backstop; cf. the same posture in
-    docs/architecture/40-scheduling.md § backstops: a ceiling is declared,
+    docs/architecture/30-scheduling.md § backstops: a ceiling is declared,
     never implied). Exhaustion is the node's own throw —
     [Fault.Context_exhausted] — and settles like any fault. *)
 module Stop : sig
@@ -391,7 +391,7 @@ module Executor : sig
             the fiber's suspension points — and returns any drift notes
             that passed the node's footprint filter; each note carries the
             disposition the scheduler already decided (check-on-yield,
-            docs/architecture/30-channels.md § delivery). A
+            docs/architecture/20-medium.md § delivery). A
             [`Stop_cleanly] disposition obliges the executor to finish no
             further work and emit nothing. *)
   }
@@ -426,7 +426,7 @@ val agent : stop:Stop.t list -> provider:Provider.t -> Executor.t
     refuses any command whose token stream names git in command position —
     git is the harness's commit substrate; workers never touch it
     (operator ruling; the v0 screen is a recorded tripwire, not a security
-    boundary — docs/architecture/60-agents.md § the git ban; falsifier
+    boundary — docs/architecture/40-agents.md § the git ban; falsifier
     F17).
 
     Every execution appends the matching ledger event with its footprint —
@@ -437,14 +437,14 @@ val agent : stop:Stop.t list -> provider:Provider.t -> Executor.t
     with no further work and nothing emitted. [stop] conditions (plus the
     pin's step ceiling) bound the loop; exhaustion faults with
     [Context_exhausted]
-    (docs/architecture/60-agents.md § tool grants, § drift notes at
+    (docs/architecture/40-agents.md § tool grants, § notes at
     yield). *)
 
 (** Deterministic fakes: scripted provider turns — outputs, delays, faults,
     invalid-output injections, and scripted tool calls — what makes the
     whole falsifier roster runnable in CI without a model call. Live-model
     runs validate templates, never engine laws
-    (docs/architecture/80-validation.md § the falsifier discipline). *)
+    (docs/architecture/50-api.md § the falsifier discipline). *)
 module Rigged : sig
   type step =
     | Reply of string  (** A settled turn with this final text. *)
@@ -500,7 +500,7 @@ val shell_gate : Executor.t
     run is never an unobserved effect lane. Idempotence is the
     declaration's: a gate is a build/test command the engine may freely
     reissue, which is why gates are grantable under either speculation
-    index (docs/architecture/30-channels.md § event taxonomy). A
+    index (docs/architecture/20-medium.md § event taxonomy). A
     git-naming gate never reaches this runtime — admission rejects it
     ({!Theory.Admission.error}, [Git_gate]). *)
 
@@ -533,8 +533,8 @@ val invoke :
     constrained-decode lane, grammar derived from the same schema) instead
     of burning budget. Exhaustion returns [Fault.Repair_exhausted]; nothing
     invalid ever crosses the boundary (falsifier F10;
-    docs/architecture/60-agents.md § the primary lane;
-    docs/architecture/50-commit.md § the repair lane — one lane, two entry
+    docs/architecture/40-agents.md § the primary lane;
+    docs/architecture/30-scheduling.md § the repair lane — one lane, two entry
     points). *)
 
 val invoke_parsed :

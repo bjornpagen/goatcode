@@ -1,12 +1,12 @@
 (* Reading a run: pull surfaces, every one a ledger query, none on any hot
-   path (docs/architecture/70-api.md § reading a run).
+   path (docs/architecture/50-api.md § reading a run).
 
    Everything here is derived from the ledger's observed events or the
    settled map — never self-report. Honest-measurement discipline:
    wasted-token accounting is gross (squashed nodes' bills count in full),
    overlap is measured (hypothesis lifetime actually overlapped), and the
    token ceiling binding is surfaced as the anomaly flag it is
-   (docs/architecture/80-validation.md § honest measurement). *)
+   (docs/architecture/50-api.md § honest measurement). *)
 
 type speculation_account = {
   tokens_under_hypotheses : int;
@@ -359,7 +359,7 @@ let summarize (settled : Run.settled) : summary =
   let hf = hypothesis_facts events in
   let tokens_squashed =
     (* Gross: a squashed node's whole bill counts, salvageable or not
-       (docs/architecture/80-validation.md § honest measurement). *)
+       (docs/architecture/50-api.md § honest measurement). *)
     List.fold_left
       (fun acc (_, (r : Run.node_report)) ->
         match r.settlement with
@@ -439,7 +439,7 @@ let scoreboard (handle : Run.handle) : scoreboard =
   (* Chain confidence multiplies down a speculation chain: the product of
      this hypothesis's confidence with every still-undischarged hypothesis
      its consumer inherited (a discharged ancestor is confirmed reality —
-     factor 1) (docs/architecture/40-scheduling.md § backstops). *)
+     factor 1) (docs/architecture/30-scheduling.md § backstops). *)
   let chain_product consumer_key conf =
     List.fold_left
       (fun acc hk ->

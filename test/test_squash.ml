@@ -270,7 +270,7 @@ let abort_invariant_violations ~ledger ~settlements ~tuples ~seeds ~repo =
   in
   (* 1. Every committed tuple was minted by a node that fully retired — or
      is one of the run's seeds, committed at run open with no minting node
-     (docs/architecture/70-api.md § running). *)
+     (docs/architecture/50-api.md § running). *)
   List.iter
     (fun t ->
       let key = tuple_key t in
@@ -442,8 +442,8 @@ let%expect_test "F3: squash_set is exactly the provenance-closed subtree" =
 (* F3, store-to-load edge: a consumer whose hypothesis was snooped from   *)
 (* a producer's store buffer is in the producer's dead subtree —          *)
 (* "producer squash → subtree squash", always                            *)
-(* (docs/architecture/40-scheduling.md § read-time binding;              *)
-(* docs/architecture/30-channels.md § store-to-load forwarding). The     *)
+(* (docs/architecture/30-scheduling.md § read-time binding;              *)
+(* docs/architecture/20-medium.md § store-to-load forwarding). The     *)
 (* [source] string is written exactly as the engine writes it            *)
 (* (chase.ml's [source_label]: "store-buffer:<producer id>").            *)
 (* ==================================================================== *)

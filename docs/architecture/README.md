@@ -129,8 +129,9 @@ Also owed, tracked here so nothing lands silently:
   worker subscription surface (theory-compiled defaults plus amendments)
   and falsifier F20 land with it.
 - **The code-comment sweep** — `lib/`, `bin/`, `test/`, and `examples/`
-  carry ~450 references to the former doc filenames; they are swept to the
-  new names in one mechanical change (no semantics).
+  carried ~450 references to the former doc filenames; swept to the new
+  names in one mechanical change (no semantics), moved § names re-checked
+  against the consolidated docs. — LANDED (this commit)
 
 ## OPEN items (run-level; mechanism-level OPEN items live in their owning doc)
 

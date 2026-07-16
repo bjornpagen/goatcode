@@ -6,7 +6,7 @@
     to the model API, the codec that parses replies, the prompt prose
     (harvested doc comments), and the drift diff. A hand-carried second copy
     of any derived artifact is a bug wherever it appears
-    (docs/architecture/20-contracts.md § the one-supply law).
+    (docs/architecture/10-theory.md § the one-supply law).
 
     Naming rule, inherited as law: the prompt-reader wins the naming, the
     decoder wins the shape. Field names, enum spellings, and doc comments are
@@ -19,7 +19,7 @@
     against it never hear about it. Doc-comment changes DO change the
     derived schema — descriptions are part of what the model reads — and
     therefore do advance the generation
-    (docs/architecture/20-contracts.md § versioning and generations). *)
+    (docs/architecture/10-theory.md § versioning and generations). *)
 module Schema_hash : sig
   type t
 
@@ -32,7 +32,7 @@ end
 (** A path into a payload shape (field names, [$defs] hops, array-items
     steps): the coordinate system of schema diffs, parse complaints, and the
     consumed-paths drift refinement
-    (docs/architecture/40-scheduling.md § drift routing). *)
+    (docs/architecture/30-scheduling.md § drift routing). *)
 module Path : sig
   type t = string list
   (** Root-to-leaf steps; [[]] is the payload root. *)
@@ -53,7 +53,7 @@ end
     offending path named, and everything downstream (the API caller, the
     prompt renderer, the drift differ) consumes [Wire_schema.t], in which
     the unsafe schema is unrepresentable rather than detected
-    (docs/architecture/20-contracts.md § lowering). *)
+    (docs/architecture/10-theory.md § lowering). *)
 module Wire_schema : sig
   type prim = Str | Int | Num | Bool
 
@@ -80,7 +80,7 @@ module Wire_schema : sig
         (** A ref slot: a typed id string that must resolve through
             {!Id.Registry.resolve} for [relation]. Ref slots are discovered
             here at admission — the theory never re-declares them, one
-            supply (docs/architecture/20-contracts.md § phantom refs). *)
+            supply (docs/architecture/10-theory.md § phantom refs). *)
     | Def_ref of string  (** [$ref] into {!t.defs}; the only recursion. *)
 
   and field = { name : string; required : bool; schema : node }
@@ -102,7 +102,7 @@ module Wire_schema : sig
 
   val hash : t -> Schema_hash.t
   (** Deterministic content hash; the generation-witness input for contract
-      addresses (docs/architecture/50-commit.md § law 2). *)
+      addresses (docs/architecture/30-scheduling.md § law 2). *)
 end
 
 (** Contract drift as a mechanical schema diff. Since the schema is a
@@ -112,7 +112,7 @@ end
     no semver, no "backwards-compatible" judgments; the reconcile router
     decides cheap-patch vs flush from the diff's shape — a work-salvage
     judgment, never a type-theory one
-    (docs/architecture/20-contracts.md § the drift diff, § versioning). *)
+    (docs/architecture/10-theory.md § the drift diff, § versioning). *)
 module Diff : sig
   type change =
     | Added of Path.t  (** New optional field / widened enum. *)
@@ -131,7 +131,7 @@ module Diff : sig
 
   val additive_only : t -> bool
   (** True when every change is {!constructor:Added} — the [Additive] drift
-      class's signal (docs/architecture/40-scheduling.md § drift routing). *)
+      class's signal (docs/architecture/30-scheduling.md § drift routing). *)
 
   val touched_paths : t -> Path.t list
   (** The paths this diff touches; intersected with a consumer's observed
@@ -142,8 +142,8 @@ end
     reply text and these diagnostics go back to the same agent as a
     stateless repair call; the channel never admits an unparseable tuple and
     no panic is reachable from wire data
-    (docs/architecture/20-contracts.md § failure surface;
-    docs/architecture/60-agents.md § the primary lane). *)
+    (docs/architecture/10-theory.md § failure surface;
+    docs/architecture/40-agents.md § the primary lane). *)
 module Repair : sig
   type complaint = { path : Path.t; expected : string; got : string }
 
@@ -154,7 +154,7 @@ module Repair : sig
         (** A non-parse with refusal markers (the model refused or
             meta-commented instead of producing tuples): routes to the
             constrained-decode fallback lane, not the repair loop
-            (docs/architecture/60-agents.md § the fallback lane). *)
+            (docs/architecture/40-agents.md § the fallback lane). *)
   }
 end
 
@@ -164,7 +164,7 @@ end
     shape, enum membership, or ref resolution, because the tuple's type is
     the record of the check. The ppx-raised decode exceptions are caught
     here, once, and converted to diagnostics
-    (docs/architecture/20-contracts.md § failure surface). *)
+    (docs/architecture/10-theory.md § failure surface). *)
 module Codec : sig
   type 'a t
 
@@ -184,7 +184,7 @@ module Codec : sig
       was handed, one supply. The parsed value is the codec-proven payload;
       an escape at any path (an invented ref id included) is a repair
       complaint naming that path
-      (docs/architecture/20-contracts.md § failure surface). *)
+      (docs/architecture/10-theory.md § failure surface). *)
 
   val parse :
     'a t -> registry:Id.Registry.t -> string -> ('a, Repair.diagnostics) result
@@ -198,13 +198,13 @@ module Codec : sig
     Yojson.Safe.t ->
     ('a, Repair.diagnostics) result
   (** The same boundary for already-parsed JSON; seed tuples ride through
-      here too (docs/architecture/70-api.md § seed tooling). *)
+      here too (docs/architecture/50-api.md § seed tooling). *)
 
   val print : 'a t -> 'a -> Yojson.Safe.t
 
   val render : 'a t -> 'a -> string
   (** The printer that renders tuples into downstream prompts (the operand
-      section — docs/architecture/60-agents.md § prompt assembly). *)
+      section — docs/architecture/40-agents.md § prompt assembly). *)
 end
 
 type 'a t
@@ -236,7 +236,7 @@ val codec : 'a t -> 'a Codec.t
     drift is a diff of two such values; the enforcement plan for
     [invariants] is the module's test gate — named machinery, keeping the
     acceptance gate honest
-    (docs/architecture/20-contracts.md § code-interface contracts). *)
+    (docs/architecture/10-theory.md § code-interface contracts). *)
 module Module_contract : sig
   type sig_item = {
     name : string;  (** The value's name as it appears in the mli. *)
@@ -253,7 +253,7 @@ module Module_contract : sig
 
   val render_mli : t -> string
   (** The plain printer (round-trip fidelity linting is OPEN —
-      docs/architecture/20-contracts.md § OPEN items). *)
+      docs/architecture/10-theory.md § OPEN items). *)
 end
 
 val module_contract : Module_contract.t t

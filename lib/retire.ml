@@ -84,7 +84,7 @@ module Committed = struct
            [disjoint] law's footprint index. Two writes to one address
            from one base are a clobber by construction; serialized
            writers cannot collide because the later one witnessed the
-           earlier landing (50-commit.md § retirement order). *)
+           earlier landing (30-scheduling.md § retirement order). *)
   }
 
   let open_ ~repo ~branch =
@@ -129,7 +129,7 @@ module Committed = struct
      tuples. No node wrote it: the write log (the disjoint law's index)
      records nothing, and retirement remains the only writer of
      node-produced committed state
-     (docs/architecture/70-api.md § running). *)
+     (docs/architecture/50-api.md § running). *)
   let seed t ~relation ~id ~payload =
     let address = Ledger.Address.Tuple { relation; id } in
     t.entries <-
@@ -239,7 +239,7 @@ module Committed = struct
          (Filename.quote t.repo) (Filename.quote rel_path))
 
   (* One retirement = one commit on the committed branch, message = node
-     provenance (50-commit.md § durability boundary). *)
+     provenance (30-scheduling.md § durability boundary). *)
   let commit_retirement t ~message =
     sh_quiet
       (Printf.sprintf "git -C %s checkout -q %s" (Filename.quote t.repo)
@@ -582,7 +582,7 @@ end
 module Merge_registry = struct
   (* Policy reified as data: (address-class glob, merge-fn name) rows,
      registered at theory accept, consulted by the conflict judge. v0 ships
-     empty — every conflict serializes (50-commit.md § OPEN items). *)
+     empty — every conflict serializes (30-scheduling.md § OPEN items). *)
   type t = (string * string) list
 
   let empty = []
@@ -639,7 +639,7 @@ let minted_of ledger node =
       | _ -> [])
     (events ledger)
 
-(* Undischarged hypotheses block retirement (40-scheduling.md § read-time
+(* Undischarged hypotheses block retirement (30-scheduling.md § read-time
    binding): carried = the node's own takes plus everything its firing
    provenance inherited; discharged = the refresher's discharge events. *)
 let undischarged_hypotheses ledger node =
@@ -668,7 +668,7 @@ let undischarged_hypotheses ledger node =
 
 (* The fallback source of a [Delta_ref.t] when committal recorded none for
    the address (hand-laid ledgers, tuple addresses): the store event that
-   moved it (every tool call is an event, 30-channels.md § the ledger). *)
+   moved it (every tool call is an event, 20-medium.md § the ledger). *)
 let last_store_delta ledger address =
   List.fold_left
     (fun acc (e : E.t) ->
@@ -764,7 +764,7 @@ let moves_of ~committed ~ledger stales =
 
 (* Write-set intersection against siblings' committed write-sets: the
    [disjoint] EGD's violation, memory disambiguation mechanized
-   (30-channels.md § mechanized witnesses). An overlapping address the node
+   (20-medium.md § mechanized witnesses). An overlapping address the node
    witnessed at its current committed generation is not a conflict — the
    node already serialized behind that sibling and the held witness (phase
    1) is the proof. An address with a declared merge function routes to
@@ -1062,7 +1062,7 @@ let squash_set ledger ~cause =
        || List.exists
             (fun (m, _, source) ->
               (* A snooped store-buffer read is a provenance edge
-                 (30-channels.md § store-to-load forwarding). The engine's
+                 (20-medium.md § store-to-load forwarding). The engine's
                  dispatch path records the source as
                  "store-buffer:<producer id>" (chase.ml [source_label]);
                  hand-laid ledgers may record the bare producer id. Both
@@ -1132,7 +1132,7 @@ let squash ~ledger ~registry ~cause =
 
 (* ------------------------------------------------------------------ *)
 (* Final-state judgment: once, at quiescence, against the merged final   *)
-(* tuple set and the footprint index (50-commit.md § final-state         *)
+(* tuple set and the footprint index (30-scheduling.md § final-state         *)
 (* judgment).                                                            *)
 
 let field_string (payload : Yojson.Safe.t) field =

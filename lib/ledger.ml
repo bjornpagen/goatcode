@@ -1,13 +1,13 @@
 (* The append-only event log and the shared spatial vocabulary.
 
    Signatures are normative (ledger.mli); semantics come from
-   docs/architecture/30-channels.md (the ledger, event taxonomy, mechanized
-   witnesses), 40-scheduling.md (settlement, the predictor),
-   50-commit.md (generations advance on semantic change only) and
-   80-validation.md (replay determinism, the speculation counters).
+   docs/architecture/20-medium.md (the ledger, event taxonomy, mechanized
+   witnesses), 30-scheduling.md (settlement, the predictor),
+   30-scheduling.md (generations advance on semantic change only) and
+   50-api.md (replay determinism, the speculation counters).
 
    v0 durability is a single-writer append-only file of Marshal-framed
-   events (30-channels.md § OPEN items).  Marshal is the one format that
+   events (20-medium.md § OPEN items).  Marshal is the one format that
    round-trips abstract ['realm Id.t] values — Id deliberately exposes no
    [of_string], so a textual journal could not be re-parsed into typed
    events without a backdoor.  A torn tail record (crash mid-append) is
@@ -17,7 +17,7 @@
 type node = |
 type hypothesis = |
 
-(* Realm names, for the engine's minters (docs/architecture/50-commit.md
+(* Realm names, for the engine's minters (docs/architecture/30-scheduling.md
    § provisional identity).  Not exported; the run wires them. *)
 let _node_realm = "node"
 let _hypothesis_realm = "hypothesis"
@@ -27,7 +27,7 @@ module Timestamp = struct
      monotone non-decreasing so ledger order and time order never disagree —
      the replay falsifier compares decision traces against this stream and
      a backwards clock would make "computed from event timestamps"
-     (30-channels.md § the ledger) lie. *)
+     (20-medium.md § the ledger) lie. *)
   type t = float
 
   let compare = Float.compare
@@ -87,7 +87,7 @@ end
 
 module Generation = struct
   (* A per-address counter.  Only the commit layer calls [next], and only on
-     semantic change (50-commit.md § law 2) — the ledger stores whatever the
+     semantic change (30-scheduling.md § law 2) — the ledger stores whatever the
      commit layer decided; it never advances anything itself. *)
   type t = int
 
@@ -101,7 +101,7 @@ end
 module Content_hash = struct
   (* Stdlib [Digest] (MD5): content identity for witness comparison, not a
      security boundary — the witness needs no trust boundary of its own
-     because it is captured by observation (30-channels.md § mechanized
+     because it is captured by observation (20-medium.md § mechanized
      witnesses). *)
   type t = Digest.t
 
@@ -331,7 +331,7 @@ let append t ?node kind =
            "Ledger.append: %s was opened read-only (Ledger.load)" t.path)
   | Append oc ->
       (* The one wall-clock read in the system: timestamps enter scheduler
-         decisions only through the ledger (80-validation.md § replay
+         decisions only through the ledger (50-api.md § replay
          determinism).  Clamped so append order and time order agree. *)
       let at = Float.max (Unix.gettimeofday ()) t.last_at in
       t.last_at <- at;
@@ -442,20 +442,20 @@ module Predictor_history = struct
      statement matches and the most recent [Pin_bump] for that statement —
      in append order, before the firing — names that executor and pin.
      A pin bump therefore resets the shape's history by construction
-     (survival history is per pin, 60-agents.md § model pins), and a shape
+     (survival history is per pin, 40-agents.md § model pins), and a shape
      with no recorded pin has no samples: it reads as fresh, which is what
      [Speculate.Predictor.survival = None] means.  The run records each
      shape's initial pin as a [Pin_bump] at open.
 
      One sample = one hypothesis lifecycle on a node of the shape:
        survived         — a [Hypothesis_discharged] with the same id exists
-                          (discharged unchanged / fired, 80-validation.md).
+                          (discharged unchanged / fired, 50-api.md).
        reconcile_tokens — agent-turn tokens between the first [Drift_note]
                           at the hypothesis's address and its discharge
                           (or the node's end): the drift-routed reconcile.
        flush_tokens     — the node's gross token bill when it settled
                           [Squashed] (wasted-token accounting is gross,
-                          never net — 80-validation.md § honest
+                          never net — 50-api.md § honest
                           measurement); 0 otherwise.
        overlap_s        — hypothesis-taken to discharge: the wall clock the
                           consumer ran ahead on the guess. *)
@@ -573,7 +573,7 @@ end
 
 module Witness_index = struct
   (* Witness = observed events only: the read-set is assembled from the
-     node's own [Load] events, never from any self-report (30-channels.md
+     node's own [Load] events, never from any self-report (20-medium.md
      § mechanized witnesses; falsifier F6). *)
   let reads t node =
     List.concat_map
@@ -583,7 +583,7 @@ module Witness_index = struct
 
   (* The store footprint, for the [disjoint] EGD.  Effects are excluded:
      they are lock-guarded machine resources, not tree writes, and the
-     disjoint-writes law is judged over committed paths (50-commit.md
+     disjoint-writes law is judged over committed paths (30-scheduling.md
      § retirement order). *)
   let writes t node =
     Footprint.of_list

@@ -10,13 +10,13 @@
     witness, cannot forget a dependency it consulted, and cannot claim
     staleness-immunity it doesn't have — which is why the witness needs no
     trust boundary of its own
-    (docs/architecture/50-commit.md § the generation-witness protocol;
-    docs/architecture/30-channels.md § mechanized witnesses;
+    (docs/architecture/30-scheduling.md § the generation-witness protocol;
+    docs/architecture/20-medium.md § mechanized witnesses;
     falsifier F6). *)
 
 (** One observed read. A snooped read of a producer's store buffer enters
     with the producer's {e uncommitted} generation — exactly what makes the
-    speculation honest (docs/architecture/30-channels.md § store-to-load
+    speculation honest (docs/architecture/20-medium.md § store-to-load
     forwarding). *)
 type triple = {
   address : Ledger.Address.t;
@@ -41,14 +41,14 @@ val consumed_paths :
 (** The contract payload paths this witness proves the node read — the
     input to the per-consumer drift refinement: a breaking change to a
     field the consumer never read is additive from that consumer's
-    perspective (docs/architecture/40-scheduling.md § drift routing). *)
+    perspective (docs/architecture/30-scheduling.md § drift routing). *)
 
 val observed_content :
   t -> Ledger.Address.t -> Ledger.Content_hash.t option
 (** The content the node's latest observed read of [address] proves it
     derived from — the base coordinate of its committed writes, from which
     the disjoint law detects clobbers by construction
-    (docs/architecture/50-commit.md § retirement order and the merge).
+    (docs/architecture/30-scheduling.md § retirement order and the landing).
     [None]: the node never read the address (a blind write's base). *)
 
 (** {2 The commit-point check} *)
@@ -90,9 +90,9 @@ val holds :
     [Absent] (a pre-commit read of state nothing has landed over). [Error
     stales] is the raw material of [Retire.Generation_moved] — the engine
     performs no retry, no merge heroics, no silent re-read; routing is the
-    scheduler's (docs/architecture/50-commit.md § law 3).
+    scheduler's (docs/architecture/30-scheduling.md § law 3).
 
     Soundness, never freshness: a held witness proves the node's outputs
     were derived from the state they claim — it does not prove no better
     input existed. Freshness is scheduler economics, never a
-    commit-blocking judgment (docs/architecture/50-commit.md § law 4). *)
+    commit-blocking judgment (docs/architecture/30-scheduling.md § law 4). *)

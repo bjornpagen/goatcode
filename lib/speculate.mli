@@ -5,14 +5,14 @@
     be earned by evidence. Every read of a hypothesizable missing operand
     takes the hypothesis; the single off switch is per task shape and its
     constructor {e requires} the churn measurement that justifies it
-    (docs/architecture/40-scheduling.md § speculation is default-on).
+    (docs/architecture/30-scheduling.md § speculation is default-on).
     Speculation targets contracts, never implementations: the hypothesis is
     the interface tuple, not the artifact bytes. *)
 
 (** A task shape: the key of every speculation counter — (statement,
     executor), per model pin. A new pin is a new speculation regime
-    (docs/architecture/40-scheduling.md § the predictor;
-    docs/architecture/60-agents.md § model pins). *)
+    (docs/architecture/30-scheduling.md § the predictor;
+    docs/architecture/40-agents.md § model pins). *)
 module Shape : sig
   type t = {
     statement : Theory.Statement.id;
@@ -27,7 +27,7 @@ end
 
 (** A hypothesis: the typed record of one read that proceeded on a guess.
     Taken at the blocking read — as late, and therefore as well-informed,
-    as the work allows (docs/architecture/40-scheduling.md § read-time
+    as the work allows (docs/architecture/30-scheduling.md § read-time
     binding). *)
 module Hypothesis : sig
   (** Where the guess came from; the predictor selects between sources when
@@ -43,7 +43,7 @@ module Hypothesis : sig
       }
         (** A partial artifact snooped from the producer's in-flight
             stores — the frontier's [In_flight] top
-            (docs/architecture/30-channels.md § store-to-load
+            (docs/architecture/20-medium.md § store-to-load
             forwarding). *)
 
   type t = {
@@ -57,14 +57,14 @@ module Hypothesis : sig
     confidence : float;
         (** Chain confidence multiplies down a speculation chain; below the
             floor, reads suspend instead of hypothesizing
-            (docs/architecture/40-scheduling.md § backstops). *)
+            (docs/architecture/30-scheduling.md § backstops). *)
   }
 end
 
 (** Drift, parsed once into a sum type and routed by a policy table — never
     conditionals threaded through the engine (doc rule 8: essential
     branching, reified as data;
-    docs/architecture/40-scheduling.md § drift routing).
+    docs/architecture/30-scheduling.md § drift routing).
 
     Drift class is judged {e per consumer}, not per contract: a breaking
     change to a field the consumer's observed witness never read is
@@ -122,7 +122,7 @@ module Drift : sig
   (** A drift note: the compact rendering delivered to an agent at a yield
       point. It ends with the routing the scheduler already decided, so the
       agent never guesses its own fate
-      (docs/architecture/60-agents.md § drift notes at yield). *)
+      (docs/architecture/40-agents.md § notes at yield). *)
   type note = {
     address : Ledger.Address.t;
     cls : cls;
@@ -143,7 +143,7 @@ end
     blocks its consumer's retirement; the refresher settles it when the
     producer lands ({!landing}) or dies (the caller settles [Squashed]
     directly — a squash needs no content judgment)
-    (docs/architecture/40-scheduling.md § read-time binding, § drift
+    (docs/architecture/30-scheduling.md § read-time binding, § drift
     routing). *)
 module Lifecycle : sig
   type t =
@@ -168,7 +168,7 @@ module Lifecycle : sig
 end
 
 (** Per-shape counters, all ledger-derived, each with its named reader
-    (docs/architecture/80-validation.md § the speculation counters). *)
+    (docs/architecture/50-api.md § the speculation counters). *)
 module Counters : sig
   type t = {
     survival : float;  (** Hypotheses discharged unchanged / fired. *)
@@ -191,7 +191,7 @@ end
     hypothesis-carrying candidates, higher survival first),
     hypothesis-source selection, and churn detection. Anything
     history-indexed (TAGE-shaped) waits for data; this module is the
-    recorded upgrade slot (docs/architecture/40-scheduling.md § the
+    recorded upgrade slot (docs/architecture/30-scheduling.md § the
     predictor). *)
 module Predictor : sig
   type t
@@ -201,7 +201,7 @@ module Predictor : sig
   val survival : t -> Shape.t -> float option
   (** [None] for a fresh shape (no prior ledger history) — the regime
       headline measurements must be taken in
-      (docs/architecture/80-validation.md § honest measurement). *)
+      (docs/architecture/50-api.md § honest measurement). *)
 
   val prefer_source :
     t ->
@@ -215,7 +215,7 @@ module Predictor : sig
   val compare_for_port : t -> Shape.t -> Shape.t -> int
   (** Port-priority comparator among hypothesis-carrying candidates:
       higher survival first, FIFO within ties
-      (docs/architecture/40-scheduling.md § ports and priority). *)
+      (docs/architecture/30-scheduling.md § ports and priority). *)
 end
 
 (** Reconcile churn: the one measured regime where speculation lengthens
@@ -223,7 +223,7 @@ end
     contended, flush-reissue serializing). A measurement is obtainable only
     from a ledger — there is no public constructor — so the off switch
     cannot be thrown on folklore
-    (docs/architecture/40-scheduling.md § speculation is default-on). *)
+    (docs/architecture/30-scheduling.md § speculation is default-on). *)
 module Churn : sig
   type measurement
 
@@ -258,7 +258,7 @@ module Switch : sig
 end
 
 (** The two backstops: safety equipment, neither an objective
-    (docs/architecture/40-scheduling.md § backstops). *)
+    (docs/architecture/30-scheduling.md § backstops). *)
 module Backstops : sig
   type t = {
     token_ceiling : int;
@@ -282,6 +282,6 @@ module Backstops : sig
       v0 constant (the floor's own documentation is calibrated to it:
       0.05 admits chains ~40 deep at 0.93 per link) — measurement-owned;
       a per-shape measured link factor is the recorded upgrade, in the
-      predictor's slot (docs/architecture/40-scheduling.md
+      predictor's slot (docs/architecture/30-scheduling.md
       § backstops). *)
 end

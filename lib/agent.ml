@@ -1,6 +1,6 @@
 (* Execution units: tool grants, prompt assembly, the provider lanes, the
    harness-owned tool loop, and the validate-and-repair loop
-   (docs/architecture/60-agents.md).
+   (docs/architecture/40-agents.md).
 
    Design discipline: the representation carries the logic. Tools are
    values in a table derived from the grant (capability IS the table);
@@ -15,8 +15,8 @@ let fault origin message = { Ledger.Fault.origin; message }
 let approx_tokens s = (String.length s + 3) / 4
 
 (* [`Stop_cleanly] discipline shared by every executor that yields: finish
-   no further work, emit nothing (docs/architecture/60-agents.md § drift
-   notes at yield). *)
+   no further work, emit nothing (docs/architecture/40-agents.md § notes
+   at yield). *)
 let stop_requested notes =
   List.exists
     (fun (n : Speculate.Drift.note) ->
@@ -136,13 +136,13 @@ module Prompt = struct
 
   (* [diagnostics] is the repair lane's stateless-with-diagnostics rider:
      appended to the rendering only, so [parts] stays the five
-     constitutional parts (docs/architecture/60-agents.md § the primary
+     constitutional parts (docs/architecture/40-agents.md § the primary
      lane). *)
   type t = { parts : part list; diagnostics : string option }
 
   (* The derived prose of the contract section: harvested doc comments,
      walked out of the wire schema — one supply, no hand-carried copy
-     (docs/architecture/20-contracts.md § the one-supply law). *)
+     (docs/architecture/10-theory.md § the one-supply law). *)
   let harvest_prose (schema : Contract.Wire_schema.t) =
     let b = Buffer.create 256 in
     let add path doc =
@@ -428,7 +428,7 @@ module Provider = struct
      the case is made unexpressible: the prompt carries the full schema
      as reference text and the codec boundary parse plus the repair lane
      are the correctness backstop — the same freeform-with-reference
-     posture the primary lane already commits to (60-agents.md § the
+     posture the primary lane already commits to (40-agents.md § the
      primary lane). The decoder judges refs and windows fully at the
      codec ([Contract.Codec.by_schema]), so nothing semantic moves. *)
   let rec lower_api_schema (j : Yojson.Safe.t) : Yojson.Safe.t =
@@ -899,7 +899,7 @@ module Provider = struct
                             live smoke shows non-strict schema drift the
                             codec has to repair; until then the codec
                             boundary is the enforcement
-                            (docs/architecture/70-api.md § OPEN items). *)
+                            (docs/architecture/50-api.md § OPEN items). *)
                          ("strict", `Bool false);
                        ] );
                  ] );
@@ -1079,7 +1079,7 @@ end
    The point of the direct-API rebuild: every load, store, and effect an
    agent performs is executed HERE, and its ledger event travels as DATA in
    the tool's outcome — the loop appends it, so an unevented execution is
-   not writable inside a tool (docs/architecture/30-channels.md
+   not writable inside a tool (docs/architecture/20-medium.md
    § mechanized witnesses).
 
    Capability is a table: {!Toolset.of_grant} derives the tool values a
@@ -1542,7 +1542,7 @@ let read_file_tool (view : Source.view) : Tool.t =
    database at [repo] as a loose blob ([git hash-object -w]) and parse the
    printed oid. Shelling out to git is the engine's commit-substrate idiom
    (retire.ml owns the same boundary), and the git ban binds workers,
-   never the harness (docs/architecture/60-agents.md § the git ban): this
+   never the harness (docs/architecture/40-agents.md § the git ban): this
    subprocess is the harness writing its own blob store. *)
 let blob_into_object_store ~repo file =
   let ic =
@@ -1825,7 +1825,7 @@ let grep_tool (view : Source.view) : Tool.t =
   }
 
 (* The git ban (operator ruling: "ban all git commands from any of the
-   workers"; docs/architecture/60-agents.md § the git ban). Git is the
+   workers"; docs/architecture/40-agents.md § the git ban). Git is the
    harness's commit substrate — [Retire.Committed] holds the only writer
    lock on the committed branch — so a worker running git is an
    unwitnessed effect plus revert machinery plus branch machinery, three
@@ -2128,8 +2128,8 @@ let agent ~stop ~provider =
                       calls
                   in
                   (* Between tool calls: the fiber's suspension point,
-                     where drift notes land (docs/architecture/60-agents.md
-                     § drift notes at yield). *)
+                     where drift notes land (docs/architecture/40-agents.md
+                     § notes at yield). *)
                   if stop_requested (on_yield ()) then
                     Ok { Executor.outcome = Executor.Text ""; usage }
                   else
@@ -2279,7 +2279,7 @@ let pure_fn f =
    resource — an unobserved, un-locked effect lane is not writable here.
    Idempotence is the declaration's: a gate is a build/test command the
    engine may freely reissue, which is why gates are grantable under
-   either speculation index (docs/architecture/30-channels.md § event
+   either speculation index (docs/architecture/20-medium.md § event
    taxonomy). *)
 let shell_gate =
   let run :
@@ -2373,7 +2373,7 @@ end
 
 (* Diagnostics shaped for the repair re-invocation: the agent's own invalid
    output plus the parser's specific complaints
-   (docs/architecture/20-contracts.md § failure surface). *)
+   (docs/architecture/10-theory.md § failure surface). *)
 let render_diagnostics (d : Contract.Repair.diagnostics) =
   let b = Buffer.create 256 in
   Buffer.add_string b
@@ -2443,7 +2443,7 @@ let[@warning "-16"] invoke_parsed ~executor ?fallback ~parse ~invocation
   in
   (* [attempts_used] counts budgeted repair re-invocations; the one refusal
      reroute to the fallback lane never burns budget
-     (docs/architecture/60-agents.md § the fallback lane). Repair attempts
+     (docs/architecture/40-agents.md § the fallback lane). Repair attempts
      always re-invoke the primary executor — the same agent, stateless,
      with diagnostics. *)
   let rec loop ~attempts_used ~fallback_spent current inv =

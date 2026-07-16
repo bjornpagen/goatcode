@@ -2,7 +2,7 @@
 ; theory authors' payload types carry [@@deriving jsonschema, yojson] and the
 ; catalog entry (Contract.v) receives the deriver's output as data. The
 ; derivers therefore run where the type declarations live (host executables,
-; test theories), never here (docs/architecture/20-contracts.md).
+; test theories), never here (docs/architecture/10-theory.md).
 (library
  (name goatcode)
  (public_name goatcode)

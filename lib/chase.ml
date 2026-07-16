@@ -1,5 +1,5 @@
 (* The chase engine: eager start, read-time operand binding, ports,
-   settlement, quiescence (docs/architecture/40-scheduling.md;
+   settlement, quiescence (docs/architecture/30-scheduling.md;
    docs/architecture/10-theory.md § chase semantics). chase.mli is the
    contract; this file owns only private machinery.
 
@@ -16,7 +16,7 @@
 module Port = struct
   (* The house posture is no limits: a bound exists only with its forcing
      bottleneck named — an undocumented bound is unwritable by construction
-     (docs/architecture/40-scheduling.md § ports and priority). *)
+     (docs/architecture/30-scheduling.md § ports and priority). *)
   type capacity = Open | Bounded of { limit : int; bottleneck : string }
 
   type t = { name : string; capacity : capacity }
@@ -72,8 +72,8 @@ type tuple_realm
    alike. Heads enter at their producer's COMPLETION — parsed, uncommitted
    store-buffer state — so data-generated instances start at
    materialization, before the producer retires
-   (docs/architecture/40-scheduling.md § eager start;
-   docs/architecture/30-channels.md § store-to-load forwarding). Whether
+   (docs/architecture/30-scheduling.md § eager start;
+   docs/architecture/20-medium.md § store-to-load forwarding). Whether
    the entry is committed is never cached here: the committed lookup is
    the one source of that truth. *)
 type tuple_entry = {
@@ -93,12 +93,12 @@ type tuple_entry = {
       (* Hypotheses along this tuple's derivation chain, inherited into
          every firing that consumes it. Discharge events, not this list,
          decide retirement blocking — a discharged inheritance is inert
-         (docs/architecture/40-scheduling.md § read-time binding). *)
+         (docs/architecture/30-scheduling.md § read-time binding). *)
   confidence : float;
       (* Chain confidence at this tuple: the product of the producing
          chain's hypothesis confidences. Seeds and committed state are
          1.0; each snooped read multiplies its own link onto this
-         (docs/architecture/40-scheduling.md § backstops). *)
+         (docs/architecture/30-scheduling.md § backstops). *)
 }
 
 (* One firing of a dependency statement: a node, pre-settlement. *)
@@ -133,7 +133,7 @@ type completed = {
    typed operations recover the payload type: one writer end per relation
    (retire publishes; invalidations fan out over every channel, each
    edge's footprint filtering), one reader end per consumer edge (drained
-   at the consumer's yields) (docs/architecture/30-channels.md
+   at the consumer's yields) (docs/architecture/20-medium.md
    § delivery). *)
 type any_tx = Any_tx : 'a Theory.Relation.t * 'a Channel.tx -> any_tx
 type any_rx = Any_rx : 'a Theory.Relation.t * 'a Channel.rx -> any_rx
@@ -169,7 +169,7 @@ type t = {
   sched : Fiber.t;
       (* The substrate: every dispatched node runs as one fiber; parked
          reads and in-flight transfers live in ITS tables, not here
-         (docs/architecture/40-scheduling.md § read-time binding). *)
+         (docs/architecture/30-scheduling.md § read-time binding). *)
   mutable fiber_nodes : (Fiber.id * fiber_entry) list; (* spawn order *)
   mutable seq : int;
   mutable tuples : tuple_entry list; (* the body-match feed *)
@@ -248,7 +248,7 @@ let speculation_off t shape =
 (* The engine hands a consumer the whole operand tuple, so its consumed
    paths are the payload's top-level fields — the per-consumer refinement's
    input for engine reads (field-level read tracking is the executor tool
-   loop's affair) (docs/architecture/40-scheduling.md § drift routing). *)
+   loop's affair) (docs/architecture/30-scheduling.md § drift routing). *)
 let top_paths (payload : Yojson.Safe.t) : Contract.Path.t list =
   match payload with
   | `Assoc fields -> List.map (fun (f, _) -> [ f ]) fields
@@ -341,7 +341,7 @@ let purge t nodes ~cause =
 
 (* A node's own failure: the fault is raw, never wrapped; the transitive
    dependents squash with provenance-walk precision (Retire owns the walk)
-   (docs/architecture/40-scheduling.md § settlement). *)
+   (docs/architecture/30-scheduling.md § settlement). *)
 let settle_fault t (inst : instance) fault =
   settle t inst.node (Settlement.Faulted fault) ~seal:true;
   Id.Registry.drop_provisional t.registry inst.minted_ids;
@@ -363,7 +363,7 @@ let settle_fault t (inst : instance) fault =
       purge t dependents ~cause
 
 (* {2 Read-time operand binding}
-   The unit of waiting is the read (docs/architecture/40-scheduling.md
+   The unit of waiting is the read (docs/architecture/30-scheduling.md
    § read-time binding). Committed operands witness. An uncommitted
    operand is a producer's parsed, unretired store buffer: the read takes
    a store-buffer hypothesis — speculation proper, default-on — unless the
@@ -462,7 +462,7 @@ let policy_read t fid address =
    discontinued the fiber (it performed nothing further), and the engine
    settles the abandoned attempt so its body match can reissue against
    the state that stopped it — bounded, exactly like any other reissue
-   (docs/architecture/40-scheduling.md § drift routing, § settlement). *)
+   (docs/architecture/30-scheduling.md § drift routing, § settlement). *)
 let stop_cleanly_settle t (inst : instance) (note : Speculate.Drift.note) =
   let count =
     match List.assoc_opt inst.fired_key t.reissues with
@@ -521,7 +521,7 @@ let drain t =
    Drift class is judged per consumer, against what this consumer
    provably read; the routing itself is the policy table
    ([Speculate.Drift.table]) — classification here only PARSES the move
-   into the table's domain (docs/architecture/40-scheduling.md § drift
+   into the table's domain (docs/architecture/30-scheduling.md § drift
    routing). *)
 
 let committed_payload t ~relation ~id =
@@ -614,7 +614,7 @@ let witnessed_files_of t node =
    invalidations its subscription will never carry — the declaration must
    grow to cover it. Loads only: a store is the node's own work product,
    and write overlaps are the disjoint law's domain
-   (docs/architecture/30-channels.md § footprint filtering). One escape
+   (docs/architecture/20-medium.md § footprint filtering). One escape
    per address; the first tool that touched it is named. *)
 let footprint_escapes t (inst : instance) =
   let key =
@@ -670,7 +670,7 @@ let note_drift t ~node ~address ~delta cls =
    invalidation queue at the fiber's suspension points, pull what landed,
    and hand back typed drift notes carrying the routing the table already
    decided — check-on-yield, never a mid-flight interrupt
-   (docs/architecture/30-channels.md § delivery, § invalidate, don't
+   (docs/architecture/20-medium.md § delivery, § invalidate, don't
    update). *)
 let on_yield_of t (inst : instance) : unit -> Speculate.Drift.note list =
   let key = Theory.Statement.to_string inst.provenance.Ledger.Provenance.statement in
@@ -710,7 +710,7 @@ let on_yield_of t (inst : instance) : unit -> Speculate.Drift.note list =
    resolution against mint provenance) — so the bound is unwritable at the
    decode boundary, shape and refs are codec-proven, and nothing
    downstream re-checks either. Failures are repair diagnostics for the
-   shared lane (docs/architecture/20-contracts.md § failure surface;
+   shared lane (docs/architecture/10-theory.md § failure surface;
    docs/architecture/10-theory.md § statement grammar). *)
 
 let window_schema (window : Theory.Window.t) (ws : Contract.Wire_schema.t) :
@@ -759,7 +759,7 @@ let heads_of t (inst : instance) (json : Yojson.Safe.t) :
 (* {2 The invocation lane}
    Freeform generation, boundary parse, then the repair loop — the SHARED
    lane ([Agent.invoke_parsed]): one repair-loop implementation for the
-   engine and the host API alike (docs/architecture/60-agents.md § the
+   engine and the host API alike (docs/architecture/40-agents.md § the
    primary lane, § the fallback lane). *)
 
 let invoke_lane :
@@ -947,7 +947,7 @@ let hypothesis_carrying t (inst : instance) =
    among hypothesis-carrying candidates the predictor orders higher
    survival first; FIFO everywhere else — an eager start with witnessed
    operands is never re-ranked by a survival counter
-   (docs/architecture/40-scheduling.md § ports and priority). *)
+   (docs/architecture/30-scheduling.md § ports and priority). *)
 let admission_order t =
   List.stable_sort
     (fun a b ->
@@ -965,7 +965,7 @@ let admission_order t =
 (* Head tuples enter the body-match feed at their producer's COMPLETION,
    as snoopable store-buffer state: data-generated instances start at
    materialization, before the producer retires
-   (docs/architecture/40-scheduling.md § eager start). The entry carries
+   (docs/architecture/30-scheduling.md § eager start). The entry carries
    the derivation's strata (pointwise max over the consumed operands, one
    deeper where the head relation is generation-bounded), the hypotheses
    the chain now rides on, and the chain confidence. *)
@@ -1023,7 +1023,7 @@ let feed_heads t (inst : instance)
    parks THIS fiber mid-flight on exactly the missing address, resuming
    when a landing wakes it with the committed operand — the whole-instance
    parking list, its wholesale requeue on any retirement, and the
-   re-dispatch re-read are gone (docs/architecture/40-scheduling.md
+   re-dispatch re-read are gone (docs/architecture/30-scheduling.md
    § read-time binding). The executor's yields perform [Fiber.Yield]
    (delivery is the fiber's [on_yield], mounted at spawn), and its
    provider turns may perform [Http_post] — the suspension the scheduler
@@ -1068,7 +1068,7 @@ let node_body t (inst : instance) () =
                  producer's uncommitted generation — what makes the
                  speculation honest, and what retires it for free when
                  the landing is exactly the snapshot (falsifier F7)
-                 (docs/architecture/30-channels.md § store-to-load
+                 (docs/architecture/20-medium.md § store-to-load
                  forwarding). *)
               ignore
                 (Ledger.append t.ledger ~node:inst.node
@@ -1243,7 +1243,7 @@ let try_dispatch t =
   | ordered -> (
       (* The token-ceiling backstop: at the ceiling, admit only witnessed
          work until discharges catch up
-         (docs/architecture/40-scheduling.md § backstops). *)
+         (docs/architecture/30-scheduling.md § backstops). *)
       let run_tokens = Ledger.Usage.total (Ledger.Telemetry.run_usage t.ledger) in
       let ceiling_hit =
         (not (List.is_empty t.undischarged))
@@ -1301,7 +1301,7 @@ let cmp_holds (cmp : Theory.Filter.cmp) n bound =
 
 (* The v0 [where] grammar: a count over one relation linked one hop away.
    A readiness filter for the scheduler; the final law judgment still runs
-   (docs/architecture/50-commit.md § final-state judgment).
+   (docs/architecture/30-scheduling.md § final-state judgment).
 
    [Some counted] carries the EVIDENCE — the tuples that crossed the
    bound — because the firing consumes them: the count is read against
@@ -1408,7 +1408,7 @@ let fire t sid (spawn : Theory.Spawn.t) (entry : tuple_entry)
           consumed_entries;
       (* Downstream firings inherit the consumed chain's hypotheses: the
          squash walk and the retirement discharge check both read them
-         from here (docs/architecture/40-scheduling.md § read-time
+         from here (docs/architecture/30-scheduling.md § read-time
          binding). Counted tuples are consumed, so their chains inherit
          too — deduplicated, since counted siblings can share ancestry. *)
       hypotheses =
@@ -1549,7 +1549,7 @@ let reissue_or_stop t (c : completed) ~action ~cause ~reason =
    was opened for, ids resolved against mint provenance — and moved
    generations fan out as payload-free invalidations over every channel,
    each subscribed edge's declared footprint filtering
-   (docs/architecture/30-channels.md § invalidate, don't update,
+   (docs/architecture/20-medium.md § invalidate, don't update,
    § footprint filtering). *)
 
 let publish_heads t (c : completed) =
@@ -1634,7 +1634,7 @@ let fan_invalidations t ~node =
    convergence — a completed attempt cannot patch, and an in-flight one
    receives the note at its next yield; the drift note carries what
    changed); flush squashes the consumer's subtree
-   (docs/architecture/40-scheduling.md § read-time binding, § drift
+   (docs/architecture/30-scheduling.md § read-time binding, § drift
    routing). *)
 
 let discharge_hypothesis t (h : Speculate.Hypothesis.t) =
@@ -1767,7 +1767,7 @@ let retire_success t (c : completed) =
      the landing runs: each observed load outside the edge's compiled
      delivery filter is a typed event on the retiring node. Its readers
      are the [footprint_cover] verdict ([judge], below) and
-     [Report.explain] (docs/architecture/30-channels.md § footprint
+     [Report.explain] (docs/architecture/20-medium.md § footprint
      filtering). *)
   List.iter
     (fun (tool, address) ->
@@ -1786,7 +1786,7 @@ let retire_success t (c : completed) =
      layer is its delivery surface: committed heads publish on their
      relations' typed logs; the landing's moved generations fan out as
      invalidations, each edge's declared footprint filtering
-     (docs/architecture/30-channels.md § pre-opened channels,
+     (docs/architecture/20-medium.md § channels,
      § invalidate, don't update). *)
   publish_heads t c;
   fan_invalidations t ~node:c.inst.node;
@@ -1798,7 +1798,7 @@ let retire_success t (c : completed) =
      witnessed operand at the next ready-queue turn. A woken fiber holds
      its admitted slot (it is witnessed work by construction: the wake key
      IS the committed address), so no re-queue and no re-admission exist
-     to gate (docs/architecture/40-scheduling.md § read-time binding;
+     to gate (docs/architecture/30-scheduling.md § read-time binding;
      fiber.mli [wake]). *)
   List.iter
     (fun (h : Retire.head_tuple) ->
@@ -1872,7 +1872,7 @@ let handle_rejection t (c : completed) (rejection : Retire.rejection) =
          moved address into its class per THIS consumer, record the typed
          note, and route by the table — reconcile routes reissue the
          attempt against the moved state; any flush row flushes the
-         subtree (docs/architecture/40-scheduling.md § drift routing). *)
+         subtree (docs/architecture/30-scheduling.md § drift routing). *)
       let witnessed_files = witnessed_files_of t c.inst.node in
       let classified =
         List.map
@@ -1963,7 +1963,7 @@ let try_retire t =
   | [] -> false
   | cs ->
       (* Dependency order: a node's producers retire before it does
-         (docs/architecture/50-commit.md § retirement order). *)
+         (docs/architecture/30-scheduling.md § retirement order). *)
       let candidates = List.map (fun c -> c.inst.node) cs in
       let order = Retire.dependency_order t.ledger ~candidates in
       let ordered =
@@ -2050,7 +2050,7 @@ let resolve_parked t =
    committed state at the primordial generation, and feeds the body match
    its codec-rendered payload, so where-filters match seed fields, agents
    read seed data, and law judgment counts seeded referents
-   (docs/architecture/70-api.md § running). *)
+   (docs/architecture/50-api.md § running). *)
 let seed_entry t (tu : Theory.Tuple.t) : tuple_entry =
   match tu with
   | Theory.Tuple.Packed (rel, payload) as packed ->
@@ -2097,7 +2097,7 @@ let create ~theory ~ledger ~committed ~channels ?transport ~ports ~executors
   (* The scheduler's channel ends, all opened before any node runs: the
      writer end per relation (retire publishes; invalidations fan out) and
      one reader end per consumer edge (drained at that consumer's yields)
-     (docs/architecture/30-channels.md § pre-opened channels). *)
+     (docs/architecture/20-medium.md § channels). *)
   let txs =
     List.map
       (fun (Theory.Relation.Packed r) ->
@@ -2165,7 +2165,7 @@ let create ~theory ~ledger ~committed ~channels ?transport ~ports ~executors
   (* Each shape's initial pin, recorded at run open: predictor history is
      keyed by the typed (statement, executor, pin) identities the ledger
      carries — survival history is per pin
-     (docs/architecture/60-agents.md § model pins). *)
+     (docs/architecture/40-agents.md § model pins). *)
   List.iter
     (fun ((sid : Theory.Statement.id), (spawn : Theory.Spawn.t)) ->
       ignore
@@ -2183,7 +2183,7 @@ let create ~theory ~ledger ~committed ~channels ?transport ~ports ~executors
 
 (* Woken fibers resume before anything new is admitted: resumed witnessed
    work is never displaced by fresh eager work
-   (docs/architecture/40-scheduling.md § ports and priority). *)
+   (docs/architecture/30-scheduling.md § ports and priority). *)
 let run_ready t =
   if Fiber.has_ready t.sched then begin
     drain t;
@@ -2231,7 +2231,7 @@ let committed t = t.committed_state
    surface, and this is not a declared law with a satisfied case to
    report (no structure nothing consumes). The offender strings name the
    node and the escaped address: what the theory author reads to grow the
-   declaration (docs/architecture/30-channels.md § footprint
+   declaration (docs/architecture/20-medium.md § footprint
    filtering). *)
 let footprint_cover_verdict t =
   let offenders =

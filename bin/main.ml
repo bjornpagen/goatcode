@@ -11,7 +11,7 @@
    admission-repair lane), and prints the admitted roster plus the
    run-it-yourself guidance — it does NOT run the emitted theory (its
    seed surface is undesigned; [~seed:[]] would fire nothing and print
-   success vacuously — docs/architecture/70-api.md § the CLI, OPEN: the
+   success vacuously — docs/architecture/50-api.md § the CLI, OPEN: the
    plan-to-run seed surface).
 
    The exit-code contract (every command; an operator at a shell never
@@ -286,7 +286,7 @@ let print_story (st : Report.story) =
 (* ------------------------------------------------------------------ *)
 (* Reconstructing a settled map from a bare ledger.                    *)
 (*                                                                     *)
-(* report/explain receive only a ledger path (70-api § the CLI), while *)
+(* report/explain receive only a ledger path (50-api § the CLI), while *)
 (* the readers take [Run.settled]. Settlements, timings, usage, law    *)
 (* verdicts, and hypotheses are all ledger-derived; committed tuple    *)
 (* payloads live on the committed branch, not in the ledger, so the    *)
@@ -360,8 +360,8 @@ let node_of_string ledger s =
 (*                                                                     *)
 (* Deliberately absent: switches (a speculation off switch requires a  *)
 (* ledger-derived churn measurement and is unconstructible from config *)
-(* text — doc rule 8; 70-api § running) and merges (v0 ships the       *)
-(* registry empty; 50-commit § OPEN items).                            *)
+(* text — doc rule 8; 50-api § running) and merges (v0 ships the       *)
+(* registry empty; 30-scheduling § OPEN items).                            *)
 (* ------------------------------------------------------------------ *)
 
 module Config_file = struct
@@ -671,7 +671,7 @@ let run_config_of ~path ~(file : Config_file.t) ~theory =
 (* ------------------------------------------------------------------ *)
 
 (* Stance and method, never shape — shape derives from the meta-catalog
-   contract (docs/architecture/60-agents.md § prompt assembly, § the
+   contract (docs/architecture/40-agents.md § prompt assembly, § the
    planner). *)
 let planner_preamble =
   String.concat " "
@@ -696,7 +696,7 @@ let planner_pin_of (file : Config_file.t) =
     model =
       (* Pins name the model explicitly — the lane is a direct API call,
          so there is no ambient default to inherit. The planner pins the
-         strongest available model (60-agents.md § provider routing). *)
+         strongest available model (40-agents.md § provider routing). *)
       Option.value (Config_file.str file "planner_model")
         ~default:"claude-fable-5";
     sampling = [];
@@ -861,7 +861,7 @@ let cmd_replay ~ledger_path =
         (* The honest claim (run.mli [replay]): the coherence audit passed —
            the clock, settlement, retire order, and drift routes the trace
            makes re-derivable all reproduce. Full re-execution is the
-           recorded OPEN item (80-validation.md § replay determinism). *)
+           recorded OPEN item (50-api.md § replay determinism). *)
         print_endline
           "replay: coherent (clock, settlement, retire order, and drift \
            routes reproduce from the recorded trace)";
@@ -880,7 +880,7 @@ let cmd_replay ~ledger_path =
 (* The planner lane: bootstrap run, meta-catalog parse, the same
    admission judgment a hand-written theory faces, then the roster and
    the run-it-yourself guidance — never a vacuous run of the emission
-   (70-api § the CLI).
+   (50-api § the CLI).
 
    The bootstrap (planning) run journals at [ledger_path ^ ".plan"] —
    [ledger_path] itself stays free for the emitted theory's own run
@@ -927,7 +927,7 @@ let plan_attempt ~file ~config_path ~plan_ledger ~spec_text =
 (* The admission-repair spec: the planner re-invoked
    stateless-with-diagnostics — its original operand, its own invalid
    emission, and the admission complaints, exactly the repair-lane shape
-   (60-agents.md § the planner; the preamble already instructs "repair
+   (40-agents.md § the planner; the preamble already instructs "repair
    the named offense and nothing else"). *)
 let repair_spec ~spec ~emission ~errs =
   String.concat "\n"
@@ -975,7 +975,7 @@ let cmd_plan ~spec ~config_path =
                  and the plan-to-run seed surface is undesigned: running
                  with [~seed:[]] would fire nothing and print success
                  vacuously. Admission is the honest boundary of this
-                 command (70-api.md § the CLI, OPEN: the plan-to-run seed
+                 command (50-api.md § the CLI, OPEN: the plan-to-run seed
                  surface). *)
               Printf.printf
                 "planner emitted an admitted theory: %d relations, \
@@ -1019,7 +1019,7 @@ let cmd_plan ~spec ~config_path =
             finish ~ledgers:[ ("plan ledger", plan_ledger) ] settled emitted
         | `Inadmissible (_, emission, errs) -> (
             (* The admission-repair lane, one bounded re-invocation
-               (60-agents.md § the planner): the rejected emission returns
+               (40-agents.md § the planner): the rejected emission returns
                to the planner with its diagnostics as a fresh planning run
                journaled at [<plan_ledger>.repair] — run-granular because
                admission is judged after the bootstrap run settles (the

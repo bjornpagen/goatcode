@@ -1,16 +1,16 @@
-(* Falsifiers, group "engine" (docs/architecture/80-validation.md § the
+(* Falsifiers, group "engine" (docs/architecture/50-api.md § the
    falsifier discipline):
 
    - F1 max-of-legs: a diamond theory's wall clock is the slowest leg,
      never the sum — the dependency structure IS the schedule
-     (docs/architecture/40-scheduling.md § eager start, § read-time
+     (docs/architecture/30-scheduling.md § eager start, § read-time
      binding).
    - F2 no head-of-line blocking: a slow node on an open port never delays
      an unrelated ready node.
    - F4 dispatch purity: no I/O, logging, or await on the
      settlement-to-issue path beyond the ledger append, enforced by
      instrumentation in this test build
-     (docs/architecture/40-scheduling.md § ports and priority).
+     (docs/architecture/30-scheduling.md § ports and priority).
 
    Rigged executors only ([Agent.Rigged]); [Agent.claude_cli] is never
    constructed here. No sleeps: [Delay_s] is scheduling pressure the rigged
@@ -222,7 +222,7 @@ let committed_relations (settled : Run.settled) =
    wrap_left only until its operand materializes in the producer's store
    buffer — data-generated instances start at materialization or
    hypothesis, whichever is earlier, BEFORE the producer settles
-   (docs/architecture/40-scheduling.md § eager start). The wall clock of
+   (docs/architecture/30-scheduling.md § eager start). The wall clock of
    the whole run is then bounded by the slowest leg's own span, never the
    legs' sum — asserted here at trace level (issue order) and at
    real-clock level (7200 scripted seconds must not appear in the test's
@@ -334,7 +334,7 @@ let%expect_test "F1 max-of-legs: the dependency structure is the schedule" =
    Second killing attempt: the slow occupant dies mid-flight. Its fault is
    its own — the unrelated node still retires, its tuple still commits,
    and nothing of the occupant's failure leaks into the sibling's
-   settlement (docs/architecture/40-scheduling.md § settlement). *)
+   settlement (docs/architecture/30-scheduling.md § settlement). *)
 
 let%expect_test "F2 no head-of-line blocking on an open port" =
   let run ~slow_script =

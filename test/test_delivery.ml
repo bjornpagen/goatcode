@@ -1,7 +1,7 @@
 (* Falsifiers, group "delivery and speculation" — the wired delivery half
-   and the hypothesis lifecycle (docs/architecture/30-channels.md
+   and the hypothesis lifecycle (docs/architecture/20-medium.md
    § delivery, § store-to-load forwarding;
-   docs/architecture/40-scheduling.md § read-time binding, § drift
+   docs/architecture/30-scheduling.md § read-time binding, § drift
    routing, § settlement):
 
    - F7 (discharge-on-exact-landing): a consumer that snooped a producer's
@@ -96,7 +96,7 @@ let admit ~relations ~statements =
 
 (* A real git repo: the committed branch's storage engine — file deltas,
    generation moves, and the write log all ride it
-   (docs/architecture/50-commit.md § durability boundary). *)
+   (docs/architecture/30-scheduling.md § durability boundary). *)
 let sandbox ?(files = []) prefix =
   let root = Filename.temp_dir prefix "" in
   let repo = Filename.concat root "repo" in
@@ -730,7 +730,7 @@ let%expect_test "FL2 cascade arm: a consumer of a squashed writer's dead \
    discharged | drifted{cls}. The engine's refresher discharges identical
    landings (F7, above, end to end); the drift arm is judged here — the
    per-consumer refinement included
-   (docs/architecture/40-scheduling.md § read-time binding). *)
+   (docs/architecture/30-scheduling.md § read-time binding). *)
 
 let%expect_test "the refresher's landing judgment: discharge or drifted, \
                  per consumer" =
@@ -788,7 +788,7 @@ let%expect_test "the refresher's landing judgment: discharge or drifted, \
    announced as the [Ceiling_bound] anomaly with its numbers — and admits
    only after discharges catch up (here: the producer retires, the
    refresher discharges, and the deflected node reads witnessed state)
-   (docs/architecture/40-scheduling.md § backstops). *)
+   (docs/architecture/30-scheduling.md § backstops). *)
 
 let%expect_test "the token ceiling binds: eager work deflected, announced, \
                  admitted after discharge" =
@@ -1027,7 +1027,7 @@ let%expect_test "FL5: two live writers of one path convict at retire; the \
    will never carry). The declaration is a filter, never a wall: the
    escapee still retires. A sibling whose read_globs cover its read is
    the control — no event, no offender
-   (docs/architecture/30-channels.md § footprint filtering). *)
+   (docs/architecture/20-medium.md § footprint filtering). *)
 
 let%expect_test "footprint escape: an uncovered load surfaces at retire as \
                  the typed event and the footprint_cover verdict" =

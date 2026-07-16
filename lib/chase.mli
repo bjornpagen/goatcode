@@ -7,17 +7,17 @@
     and provenance is total (every tuple records the firing that produced
     it and the tuples that firing consumed)
     (docs/architecture/10-theory.md § chase semantics;
-    docs/architecture/40-scheduling.md).
+    docs/architecture/30-scheduling.md).
 
     The objective every policy here derives from: wall-clock time, at all
     costs. Where a policy could save tokens by waiting, it does not wait
-    (docs/architecture/40-scheduling.md § the objective). *)
+    (docs/architecture/30-scheduling.md § the objective). *)
 
 (** Ports: structural hazards, declared, never defaulted. The house posture
     is no limits — a numeric bound exists only where a strictly documented
     bottleneck forces it, and "prudence" is not a bottleneck.
     Unboundedness is written, never implied
-    (docs/architecture/40-scheduling.md § ports and priority). *)
+    (docs/architecture/30-scheduling.md § ports and priority). *)
 module Port : sig
   type t
 
@@ -40,7 +40,7 @@ end
     default-on safe on bounded ports: the worst case for a bad hypothesis
     is wasted tokens and a queued slot, never a delayed witnessed node.
     v0 never preempts an admitted slot
-    (docs/architecture/40-scheduling.md § ports and priority). *)
+    (docs/architecture/30-scheduling.md § ports and priority). *)
 module Priority : sig
   type cls =
     | Resumed_witnessed
@@ -54,7 +54,7 @@ module Priority : sig
 end
 
 (** Read-time operand binding: the unit of waiting is the read
-    (docs/architecture/40-scheduling.md § read-time binding). *)
+    (docs/architecture/30-scheduling.md § read-time binding). *)
 module Read : sig
   type outcome =
     | Witnessed of {
@@ -77,7 +77,7 @@ module Settlement = Ledger.Settlement
 (** Every node settles exactly once: retired / faulted / squashed. A fault
     squashes exactly the transitive dependents; siblings retire
     undisturbed; the engine never converts a node failure into a run-level
-    rejection (docs/architecture/40-scheduling.md § settlement). *)
+    rejection (docs/architecture/30-scheduling.md § settlement). *)
 
 (** Binding a theory's executor declarations to runtimes: rigged in tests,
     the direct provider lanes ({!Agent.agent} over {!Agent.Provider}) live.
@@ -88,7 +88,7 @@ type executor_binding = {
   runtime : Agent.Executor.t;
   fallback : Agent.Executor.t option;
       (** The constrained-decode refusal lane
-          (docs/architecture/60-agents.md § the fallback lane). *)
+          (docs/architecture/40-agents.md § the fallback lane). *)
   repair_budget : Agent.Repair_budget.t;
   port : string;  (** Every executor names its port. *)
 }
@@ -114,12 +114,12 @@ val create :
     them); every statement instance derivable from the seed starts at t=0 —
     starting is not speculating: the eager prefix consumes no operands and
     has nothing to squash on operand grounds
-    (docs/architecture/40-scheduling.md § eager start). Seed tuples are
+    (docs/architecture/30-scheduling.md § eager start). Seed tuples are
     typed at construction — codec-proven by construction — and enter
     committed state here, at the primordial generation: seeds are facts,
     not work product, so where-filters match their fields, agents read
     their payloads, and law judgment counts seeded referents
-    (docs/architecture/70-api.md § running).
+    (docs/architecture/50-api.md § running).
 
     Every dispatched node runs as a fiber on the {!Fiber} substrate: its
     operand reads park mid-flight on exactly the missing address (a
@@ -148,7 +148,7 @@ val step : t -> [ `Progressed | `Quiescent ]
 val run_to_quiescence : t -> unit
 (** Drive {!step} until no statement can fire, no reads are left to serve,
     and every started node has settled
-    (docs/architecture/40-scheduling.md § quiescence and completion). *)
+    (docs/architecture/30-scheduling.md § quiescence and completion). *)
 
 val quiescent : t -> bool
 
@@ -163,7 +163,7 @@ val judge : t -> (Theory.Law.verdict list, [ `Not_quiescent ]) result
 (** Final-state law judgment, delegated to {!Retire.judge}. Judged once, at
     quiescence, against the merged final state — mid-run state is not final
     state, so a pre-quiescence call returns [`Not_quiescent] rather than a
-    wrong-or-hedged verdict (docs/architecture/50-commit.md § final-state
+    wrong-or-hedged verdict (docs/architecture/30-scheduling.md § final-state
     judgment). [Run.exec] calls it exactly once, after
     {!run_to_quiescence}.
 
