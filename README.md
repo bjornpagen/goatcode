@@ -202,6 +202,7 @@ branch, never by exit codes alone.
 | [`examples/haiku_live.ml`](examples/haiku_live.ml) | two agents chained through a ref slot; store-buffer speculation; a count law |
 | [`examples/coding_live.ml`](examples/coding_live.ml) | a from-scratch coding task: an implementer that runs its own tests (`run_command`), then a shell gate re-verifying against the committed tree |
 | [`examples/calc_live.ml`](examples/calc_live.ml) | the stress: three parallel implementers, a count-gated integrator consuming an in-flight tuple as a hypothesis, disjoint-writes law, full-suite gate |
+| [`examples/lisp_live.ml`](examples/lisp_live.ml) | the census workload, whole: four parallel implementers build a Scheme-flavored mini-Lisp (reader, core, evaluator, printer) against interface contracts pinned as seed data, a count-gated integrator wires the REPL off in-flight store buffers, and the gate runs the interpreter's full test suite — the committed ref runs `(fact 10)` |
 | [`examples/dump_ledger.ml`](examples/dump_ledger.ml) | the raw event stream, one line per append — the ground truth the readers summarize |
 
 ## Validation
