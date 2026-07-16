@@ -1616,17 +1616,23 @@ let read_file_tool (view : Source.view) : Tool.t =
                   }));
   }
 
-(* The store path's git boundary: hash [file]'s bytes into the object
-   database at [repo] as a loose blob ([git hash-object -w]) and parse the
-   printed oid. Shelling out to git is the engine's commit-substrate idiom
+(* The store path's git boundary: hash the bytes at [rel_file] — a
+   REPO-RELATIVE path — into the object database at [repo] as a loose blob
+   ([git hash-object -w]) and parse the printed oid. Repo-relative is
+   load-bearing, not idiom: [git -C] changes directory before resolving
+   pathname arguments, so a harness-cwd-relative disk path (born whenever
+   the run config names a relative repo — the CLI's [.goat/demo-repo]
+   shape) double-resolves under [-C] and misses; the live 2026-07-15
+   smoke lost every store this way, retiring on empty commits (falsifier
+   FL8). Shelling out to git is the engine's commit-substrate idiom
    (retire.ml owns the same boundary), and the git ban binds workers,
    never the harness (docs/architecture/40-agents.md § the git ban): this
    subprocess is the harness writing its own blob store. *)
-let blob_into_object_store ~repo file =
+let blob_into_object_store ~repo rel_file =
   let ic =
     Unix.open_process_in
       (Printf.sprintf "git -C %s hash-object -w -- %s 2>/dev/null"
-         (Filename.quote repo) (Filename.quote file))
+         (Filename.quote repo) (Filename.quote rel_file))
   in
   let line = In_channel.input_line ic in
   match (Unix.close_process_in ic, line) with
@@ -1721,7 +1727,14 @@ let store_file ~tool (view : Source.view) rel content :
           remove_quietly tmp;
           errored m
       | () -> (
-          match blob_into_object_store ~repo:view.Source.repo tmp with
+          (* The tmp was born beside the target, so its repo-relative
+             address is the target's directory plus the tmp's basename —
+             the coordinate git resolves under [-C] wherever the harness
+             cwd is. *)
+          let rel_tmp =
+            Filename.concat (Filename.dirname rel) (Filename.basename tmp)
+          in
+          match blob_into_object_store ~repo:view.Source.repo rel_tmp with
           | None ->
               remove_quietly tmp;
               errored

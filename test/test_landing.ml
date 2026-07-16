@@ -15,7 +15,12 @@
    - a deletion is derived from the event stream (a locator ref at a file
      address), not from any tree diff.
 
-   Rigged fixtures only; no engine, no model, no network. *)
+   Plus FL8, the end-to-end agreement law the 2026-07-15 live smoke found
+   violated: a store the toolset executed and evented must ACTUALLY be on
+   the committed ref's tree — ledger truth and git landing agree
+   (docs/architecture/50-api.md § the falsifier discipline, FL8).
+
+   Rigged fixtures and rigged executors only; no model, no network. *)
 
 open Goatcode
 
@@ -564,4 +569,183 @@ let%expect_test "open_ refuses a committed branch it cannot check out; the \
     open refused: true (names the branch: true)
     the operator's edit is untouched: true
     bare mode opens: true
+    |}]
+
+(* ================================================================== *)
+(* FL8 — ledger truth and git landing agree, end to end.  The run       *)
+(* config names the repo RELATIVELY (the CLI's .goat/demo-repo idiom),   *)
+(* and `git -C` resolves relative pathname arguments against the -C      *)
+(* directory — the coordinate the 2026-07-15 live smoke fell down:       *)
+(* the store path handed hash-object a harness-cwd-relative tmp path,    *)
+(* the blob never landed, write_file answered a typed error the model    *)
+(* routed around, and both retire commits were EMPTY while the tuples    *)
+(* read correct.  The law: a template granted write_globs yields a       *)
+(* toolset whose write_file executes and events the Store (an unknown    *)
+(* tool or a refused store leaves no Store event — either is red here),  *)
+(* and the committed ref's tree ACTUALLY CONTAINS the stored content.    *)
+(* An empty retire commit for a node whose trace carries store events    *)
+(* would print an <absent> landing below.                                *)
+(* ================================================================== *)
+
+let%expect_test "FL8: an evented store lands on the committed ref — ledger \
+                 truth and git landing agree under a relative repo path" =
+  let module R = Agent.Rigged in
+  let root = Printf.sprintf "goat_fl8_scratch_%d" (Unix.getpid ()) in
+  assert (Filename.is_relative root);
+  sh (Printf.sprintf "rm -rf %s" (Filename.quote root));
+  let repo = root // "repo" in
+  mkdirs repo;
+  sh (Printf.sprintf "git -C %s init -q" (Filename.quote repo));
+  sh
+    (Printf.sprintf
+       "git -C %s -c user.name=test -c user.email=test@localhost commit -q \
+        --allow-empty -m seed"
+       (Filename.quote repo));
+  let msg_schema : Yojson.Safe.t =
+    `Assoc
+      [
+        ("type", `String "object");
+        ( "properties",
+          `Assoc [ ("msg", `Assoc [ ("type", `String "string") ]) ] );
+        ("required", `List [ `String "msg" ]);
+        ("additionalProperties", `Bool false);
+      ]
+  in
+  let task = Theory.Relation.dynamic ~name:"task" ~schema:msg_schema in
+  let note = Theory.Relation.dynamic ~name:"note" ~schema:msg_schema in
+  let pin =
+    {
+      Theory.Pin.provider = "rigged";
+      model = "deterministic";
+      sampling = [];
+      options = [];
+    }
+  in
+  (* The live smoke's grant shape: a real write_globs declaration, not
+     the tests' habitual "**". *)
+  let writer =
+    Theory.Executor.Agent_template
+      {
+        name = "fl8_writer";
+        pin;
+        preamble = "fl8_writer: a rigged test template";
+        read_globs = [];
+        write_globs = [ "docs/*" ];
+        effects = [];
+      }
+  in
+  let theory =
+    match
+      Theory.declare
+        ~relations:[ Theory.Relation.Packed task; Theory.Relation.Packed note ]
+        ~statements:
+          [
+            Theory.Spawn.v ~name:"write_note" ~for_:"task"
+              ~exists:("note", Theory.Window.nodes 1)
+              ~by:writer ();
+          ]
+        ~laws:[]
+    with
+    | Ok t -> t
+    | Error errors ->
+        List.iter
+          (fun e -> print_endline (Theory.Admission.to_string e))
+          errors;
+        failwith "theory did not admit"
+  in
+  let content = "landed bytes, not ghost bytes\n" in
+  let script =
+    [
+      R.Call_tool
+        {
+          name = "write_file";
+          input =
+            `Assoc
+              [ ("path", `String "docs/note.md"); ("content", `String content) ];
+        };
+      R.Reply {|{"msg":"stored"}|};
+    ]
+  in
+  let config =
+    {
+      Run.repo;
+      committed_branch = "goat-committed";
+      ledger_path = root // "ledger.bin";
+      ports = [ Chase.Port.open_ ~name:"main" ];
+      executors =
+        [
+          {
+            Chase.executor = Theory.Executor.id writer;
+            runtime = R.executor ~script;
+            fallback = None;
+            repair_budget = Agent.Repair_budget.v 1;
+            port = "main";
+          };
+        ];
+      backstops = Speculate.Backstops.default;
+      switches = [];
+      merges = Retire.Merge_registry.empty;
+    }
+  in
+  (match
+     Run.exec ~theory
+       ~seed:[ Theory.Tuple.v task (`Assoc [ ("msg", `String "go") ]) ]
+       ~config
+   with
+  | Error _ -> print_endline "run rejected as misuse"
+  | Ok settled ->
+      (* Ledger truth: the granted toolset contained write_file, executed
+         it, and evented the store (unknown tool / refused store = no
+         Store event = red). *)
+      let stores =
+        List.filter_map
+          (fun (e : Ledger.Event.t) ->
+            match e.kind with
+            | Ledger.Event.Store { tool; address; _ } ->
+                Some
+                  (Printf.sprintf "%s at %s" tool
+                     (Ledger.Address.to_string address))
+            | _ -> None)
+          (Ledger.Replay.events settled.Run.ledger)
+      in
+      Printf.printf "store events: %s\n"
+        (match stores with [] -> "<none>" | ss -> String.concat ", " ss);
+      Printf.printf "all nodes retired: %b\n"
+        (settled.Run.nodes <> []
+        && List.for_all
+             (fun (_, (r : Run.node_report)) ->
+               match r.Run.settlement with
+               | Ledger.Settlement.Retired -> true
+               | Ledger.Settlement.Faulted _ | Ledger.Settlement.Squashed _ ->
+                   false)
+             settled.Run.nodes);
+      (* Git landing: the committed ref's tree actually contains the
+         stored content — judged with git itself, against the repo. *)
+      Printf.printf "goat-committed tree: %s\n"
+        (match
+           sh_out
+             (Printf.sprintf "git -C %s ls-tree -r --name-only goat-committed"
+                (Filename.quote repo))
+         with
+        | Some out when String.trim out <> "" ->
+            String.concat ", "
+              (List.filter
+                 (fun l -> String.trim l <> "")
+                 (String.split_on_char '\n' out))
+        | Some _ | None -> "<empty>");
+      Printf.printf "goat-committed:docs/note.md: %s\n"
+        (match
+           sh_out
+             (Printf.sprintf "git -C %s show goat-committed:docs/note.md"
+                (Filename.quote repo))
+         with
+        | Some c -> Printf.sprintf "%S" c
+        | None -> "<absent>"));
+  sh (Printf.sprintf "rm -rf %s" (Filename.quote root));
+  [%expect
+    {|
+    store events: write_file at file:docs/note.md
+    all nodes retired: true
+    goat-committed tree: docs/note.md
+    goat-committed:docs/note.md: "landed bytes, not ghost bytes\n"
     |}]

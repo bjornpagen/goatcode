@@ -416,6 +416,18 @@ doc:
   target path in a tight loop while stores land through the tool path;
   assert every observed read is a whole former-or-latter content, never an
   interleaving (tmp+rename's contract, exercised from outside the domain).
+- **FL8 — ledger truth and git landing agree, end to end.** A rigged
+  executor calls `write_file` through `Run.exec` with the run config
+  naming the repo *relatively* (the CLI's `.goat/demo-repo` idiom — the
+  coordinate the 2026-07-15 live smoke fell down: `git -C` resolves
+  relative pathname arguments against the `-C` directory, so the store
+  path's blob never landed and both retire commits were empty while the
+  tuples read correct). Assert: the template's `write_globs` yielded a
+  toolset whose `write_file` executed and evented the Store (an unknown
+  tool or a refused store leaves no Store event — either is red); and the
+  committed ref's tree ACTUALLY CONTAINS the stored content, judged by
+  `git ls-tree`/`show` against the repo. An empty retire commit for a
+  node whose trace carries store events is red.
 
 The fiber-substrate falsifiers (FB1–FB7: park/wake delivery, squash
 inescapability, discontinue finalizers, overlap, wake-twice, rogue-effect
